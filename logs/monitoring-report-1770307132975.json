@@ -1,0 +1,34 @@
+{
+  "timestamp": "2026-02-05T15:58:52.975Z",
+  "uptime": "5秒",
+  "keyMetrics": {
+    "totalRequests": 1,
+    "totalErrors": 0,
+    "errorRate": "0.00%",
+    "contractsCreated": 1,
+    "paymentsProcessed": 1,
+    "riskAssessments": 0
+  },
+  "performance": {
+    "message": "无性能数据"
+  },
+  "healthChecks": {
+    "database": {
+      "status": "healthy",
+      "lastCheck": 1770307127968
+    },
+    "payment": {
+      "status": "healthy",
+      "lastCheck": 1770307127968
+    },
+    "contract": {
+      "status": "healthy",
+      "lastCheck": 1770307127968
+    },
+    "api": {
+      "status": "healthy",
+      "lastCheck": 1770307127968
+    }
+  },
+  "recommendations": []
+}

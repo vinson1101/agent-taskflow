@@ -1,0 +1,117 @@
+{
+  "name": "AgentTaskFlow Skill",
+  "version": "1.0.0",
+  "type": "openclaw-skill",
+  "description": "Task management with USDC payment integration for OpenClaw",
+  "author": "PinchyMeow",
+  "main": "bot-integration.js",
+  "commands": {
+    "task": {
+      "description": "Task management commands",
+      "actions": {
+        "create": {
+          "description": "Create a new task",
+          "usage": "task.create \"description\" [priority] [hours]",
+          "example": "task.create \"Develop login feature\" high 8"
+        },
+        "assign": {
+          "description": "Assign task to agent",
+          "usage": "task.assign task_id agent_id",
+          "example": "task.assign task_1 agent_1"
+        },
+        "complete": {
+          "description": "Mark task as completed",
+          "usage": "task.complete task_id [quality] [notes]",
+          "example": "task.complete task_1 90 \"Great implementation\""
+        },
+        "list": {
+          "description": "List tasks",
+          "usage": "task.list [status]",
+          "example": "task.list completed"
+        },
+        "stats": {
+          "description": "Show task statistics",
+          "usage": "task.stats",
+          "example": "task.stats"
+        }
+      }
+    },
+    "agent": {
+      "description": "Agent management commands",
+      "actions": {
+        "register": {
+          "description": "Register a new agent",
+          "usage": "agent.register \"name\" \"capabilities\" [rate]",
+          "example": "agent.register \"John\" \"javascript,frontend\" 80"
+        },
+        "list": {
+          "description": "List all agents",
+          "usage": "agent.list",
+          "example": "agent.list"
+        }
+      }
+    },
+    "payment": {
+      "description": "Payment management commands",
+      "actions": {
+        "process": {
+          "description": "Process payment for task",
+          "usage": "payment.process task_id",
+          "example": "payment.process task_1"
+        },
+        "history": {
+          "description": "Show payment history",
+          "usage": "payment.history",
+          "example": "payment.history"
+        }
+      }
+    },
+    "collaboration": {
+      "description": "Collaboration commands",
+      "actions": {
+        "message": {
+          "description": "Send message between agents",
+          "usage": "collaboration.message from_id to_id \"message\" [task_id]",
+          "example": "collaboration.message agent_1 agent_2 \"Need help\" task_1"
+        },
+        "team": {
+          "description": "Create a team",
+          "usage": "collaboration.team \"name\" \"members\"",
+          "example": "collaboration.team \"Frontend Team\" \"agent_1,agent_2\""
+        }
+      }
+    },
+    "ranking": {
+      "description": "Ranking and performance commands",
+      "actions": {
+        "leaderboard": {
+          "description": "Show agent leaderboard",
+          "usage": "ranking.leaderboard",
+          "example": "ranking.leaderboard"
+        },
+        "performance": {
+          "description": "Show performance analytics",
+          "usage": "ranking.performance",
+          "example": "ranking.performance"
+        }
+      }
+    }
+  },
+  "permissions": {
+    "read": ["tasks", "agents", "payments"],
+    "write": ["tasks", "agents", "payments", "collaborations"],
+    "execute": ["all"]
+  },
+  "triggers": {
+    "task.created": "notification",
+    "task.completed": "payment_processing",
+    "agent.registered": "welcome_message",
+    "payment.processed": "confirmation"
+  },
+  "integrations": {
+    "telegram": true,
+    "discord": true,
+    "slack": true,
+    "webhook": true
+  }
+}

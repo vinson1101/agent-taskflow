@@ -1,0 +1,628 @@
+{
+  "testType": "小时任务类型测试",
+  "testDate": "2026-02-05T16:41:28.627Z",
+  "duration": -24,
+  "totalTasks": 4,
+  "totalAgents": 3,
+  "testResults": [
+    {
+      "test": "hourly_pricing",
+      "taskId": "task_1770309688631_e6o3ti",
+      "hourlyRate": 108,
+      "totalPay": 216,
+      "duration": "2hours",
+      "difficulty": "simple",
+      "timestamp": "2026-02-05T16:41:28.632Z"
+    },
+    {
+      "test": "hourly_pricing",
+      "taskId": "task_1770309688631_twrnhp",
+      "hourlyRate": 140,
+      "totalPay": 1120,
+      "duration": "8hours",
+      "difficulty": "complex",
+      "timestamp": "2026-02-05T16:41:28.632Z"
+    },
+    {
+      "test": "hourly_pricing",
+      "taskId": "task_1770309688631_e55keu",
+      "hourlyRate": 120,
+      "totalPay": 480,
+      "duration": "4hours",
+      "difficulty": "moderate",
+      "timestamp": "2026-02-05T16:41:28.633Z"
+    },
+    {
+      "test": "hourly_pricing",
+      "taskId": "task_1770309688631_3kklvb",
+      "hourlyRate": 113,
+      "totalPay": 678,
+      "duration": "6hours",
+      "difficulty": "moderate",
+      "timestamp": "2026-02-05T16:41:28.633Z"
+    },
+    {
+      "test": "smart_matching",
+      "taskId": "task_1770309688631_e6o3ti",
+      "matches": [
+        {
+          "agent": {
+            "id": "trainer2",
+            "name": "李专家",
+            "skills": [
+              "教学",
+              "沟通",
+              "数据可视化"
+            ],
+            "experience": 8,
+            "hourlyRate": 200,
+            "rating": 4.9,
+            "available": true
+          },
+          "matchScore": 0.8266666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 10,
+          "priceScore": 0.8,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "matchScore": 0.7341666666666666,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 6.25,
+          "priceScore": 0.9,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "matchScore": 0.6791666666666666,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 3.75,
+          "priceScore": 1,
+          "available": true
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.633Z"
+    },
+    {
+      "test": "smart_matching",
+      "taskId": "task_1770309688631_twrnhp",
+      "matches": [
+        {
+          "agent": {
+            "id": "trainer2",
+            "name": "李专家",
+            "skills": [
+              "教学",
+              "沟通",
+              "数据可视化"
+            ],
+            "experience": 8,
+            "hourlyRate": 200,
+            "rating": 4.9,
+            "available": true
+          },
+          "matchScore": 0.8666666666666666,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 10,
+          "priceScore": 1,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "matchScore": 0.7208333333333333,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 6.25,
+          "priceScore": 0.8333333333333334,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "matchScore": 0.6124999999999999,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 3.75,
+          "priceScore": 0.6666666666666666,
+          "available": true
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.633Z"
+    },
+    {
+      "test": "smart_matching",
+      "taskId": "task_1770309688631_e55keu",
+      "matches": [
+        {
+          "agent": {
+            "id": "trainer2",
+            "name": "李专家",
+            "skills": [
+              "教学",
+              "沟通",
+              "数据可视化"
+            ],
+            "experience": 8,
+            "hourlyRate": 200,
+            "rating": 4.9,
+            "available": true
+          },
+          "matchScore": 0.8416666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 10,
+          "priceScore": 0.875,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "matchScore": 0.7541666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 6.25,
+          "priceScore": 1,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "matchScore": 0.6541666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 3.75,
+          "priceScore": 0.875,
+          "available": true
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.634Z"
+    },
+    {
+      "test": "smart_matching",
+      "taskId": "task_1770309688631_3kklvb",
+      "matches": [
+        {
+          "agent": {
+            "id": "trainer2",
+            "name": "李专家",
+            "skills": [
+              "教学",
+              "沟通",
+              "数据可视化"
+            ],
+            "experience": 8,
+            "hourlyRate": 200,
+            "rating": 4.9,
+            "available": true
+          },
+          "matchScore": 0.8416666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 10,
+          "priceScore": 0.875,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "matchScore": 0.7541666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 6.25,
+          "priceScore": 1,
+          "available": true
+        },
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "matchScore": 0.6541666666666667,
+          "skillMatch": 0.6666666666666666,
+          "experienceScore": 3.75,
+          "priceScore": 0.875,
+          "available": true
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.634Z"
+    },
+    {
+      "test": "smart_contract",
+      "taskId": "task_1770309688631_e6o3ti",
+      "contracts": [
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "totalAmount": 240,
+          "paymentSchedule": "一次性支付",
+          "escrowAmount": 72,
+          "contractType": "短期合约",
+          "riskLevel": "低风险",
+          "expectedDuration": "2hours"
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "totalAmount": 300,
+          "paymentSchedule": "一次性支付",
+          "escrowAmount": 90,
+          "contractType": "短期合约",
+          "riskLevel": "低风险",
+          "expectedDuration": "2hours"
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.635Z"
+    },
+    {
+      "test": "smart_contract",
+      "taskId": "task_1770309688631_twrnhp",
+      "contracts": [
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "totalAmount": 960,
+          "paymentSchedule": "30%预付 + 40%中期 + 30%完成",
+          "escrowAmount": 288,
+          "contractType": "长期合约",
+          "riskLevel": "高风险",
+          "expectedDuration": "8hours"
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "totalAmount": 1200,
+          "paymentSchedule": "30%预付 + 40%中期 + 30%完成",
+          "escrowAmount": 360,
+          "contractType": "长期合约",
+          "riskLevel": "中等风险",
+          "expectedDuration": "8hours"
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.635Z"
+    },
+    {
+      "test": "smart_contract",
+      "taskId": "task_1770309688631_e55keu",
+      "contracts": [
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "totalAmount": 480,
+          "paymentSchedule": "50%预付 + 50%完成",
+          "escrowAmount": 144,
+          "contractType": "中期合约",
+          "riskLevel": "低风险",
+          "expectedDuration": "4hours"
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "totalAmount": 600,
+          "paymentSchedule": "50%预付 + 50%完成",
+          "escrowAmount": 180,
+          "contractType": "中期合约",
+          "riskLevel": "低风险",
+          "expectedDuration": "4hours"
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.635Z"
+    },
+    {
+      "test": "smart_contract",
+      "taskId": "task_1770309688631_3kklvb",
+      "contracts": [
+        {
+          "agent": {
+            "id": "trainer3",
+            "name": "王教练",
+            "skills": [
+              "教学",
+              "沟通",
+              "客户服务"
+            ],
+            "experience": 3,
+            "hourlyRate": 120,
+            "rating": 4.5,
+            "available": true
+          },
+          "totalAmount": 720,
+          "paymentSchedule": "30%预付 + 40%中期 + 30%完成",
+          "escrowAmount": 216,
+          "contractType": "中期合约",
+          "riskLevel": "中等风险",
+          "expectedDuration": "6hours"
+        },
+        {
+          "agent": {
+            "id": "trainer1",
+            "name": "张老师",
+            "skills": [
+              "教学",
+              "沟通",
+              "Python"
+            ],
+            "experience": 5,
+            "hourlyRate": 150,
+            "rating": 4.8,
+            "available": true
+          },
+          "totalAmount": 900,
+          "paymentSchedule": "30%预付 + 40%中期 + 30%完成",
+          "escrowAmount": 270,
+          "contractType": "中期合约",
+          "riskLevel": "低风险",
+          "expectedDuration": "6hours"
+        }
+      ],
+      "timestamp": "2026-02-05T16:41:28.636Z"
+    },
+    {
+      "test": "quality_assessment",
+      "taskId": "task_1770309688631_e6o3ti",
+      "qualityMetrics": {
+        "teachingAbility": 7,
+        "contentMastery": 7,
+        "studentFeedback": 6,
+        "practicalValue": 5,
+        "overallScore": 6,
+        "bonusMultiplier": 1
+      },
+      "timestamp": "2026-02-05T16:41:28.636Z"
+    },
+    {
+      "test": "quality_assessment",
+      "taskId": "task_1770309688631_twrnhp",
+      "qualityMetrics": {
+        "teachingAbility": 8,
+        "contentMastery": 8,
+        "studentFeedback": 8,
+        "practicalValue": 9,
+        "overallScore": 8,
+        "bonusMultiplier": 1.2
+      },
+      "timestamp": "2026-02-05T16:41:28.636Z"
+    },
+    {
+      "test": "quality_assessment",
+      "taskId": "task_1770309688631_e55keu",
+      "qualityMetrics": {
+        "teachingAbility": 8,
+        "contentMastery": 8,
+        "studentFeedback": 6,
+        "practicalValue": 6,
+        "overallScore": 7,
+        "bonusMultiplier": 1.1
+      },
+      "timestamp": "2026-02-05T16:41:28.636Z"
+    },
+    {
+      "test": "quality_assessment",
+      "taskId": "task_1770309688631_3kklvb",
+      "qualityMetrics": {
+        "teachingAbility": 6,
+        "contentMastery": 6,
+        "studentFeedback": 7,
+        "practicalValue": 8,
+        "overallScore": 7,
+        "bonusMultiplier": 1.1
+      },
+      "timestamp": "2026-02-05T16:41:28.636Z"
+    },
+    {
+      "test": "complete_workflow",
+      "taskId": "task_1770309688631_e6o3ti",
+      "selectedAgent": {
+        "agent": {
+          "id": "trainer2",
+          "name": "李专家",
+          "skills": [
+            "教学",
+            "沟通",
+            "数据可视化"
+          ],
+          "experience": 8,
+          "hourlyRate": 200,
+          "rating": 4.9,
+          "available": true
+        },
+        "matchScore": 0.8266666666666667,
+        "skillMatch": 0.6666666666666666,
+        "experienceScore": 10,
+        "priceScore": 0.8,
+        "available": true
+      },
+      "selectedContract": {
+        "agent": {
+          "id": "trainer2",
+          "name": "李专家",
+          "skills": [
+            "教学",
+            "沟通",
+            "数据可视化"
+          ],
+          "experience": 8,
+          "hourlyRate": 200,
+          "rating": 4.9,
+          "available": true
+        },
+        "totalAmount": 400,
+        "paymentSchedule": "一次性支付",
+        "escrowAmount": 120,
+        "contractType": "短期合约",
+        "riskLevel": "低风险",
+        "expectedDuration": "2hours"
+      },
+      "qualityMetrics": {
+        "teachingAbility": 6,
+        "contentMastery": 5,
+        "studentFeedback": 6,
+        "practicalValue": 5,
+        "overallScore": 6,
+        "bonusMultiplier": 1
+      },
+      "executionResult": {
+        "status": "completed",
+        "actualDuration": "2h",
+        "satisfaction": 60,
+        "finalPayment": 216,
+        "qualityBonus": 0,
+        "performance": "good"
+      },
+      "timestamp": "2026-02-05T16:41:28.637Z"
+    }
+  ],
+  "summary": {
+    "avgHourlyRate": 120.25,
+    "avgQualityScore": 6.8,
+    "totalContracts": 8
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "AgentTaskFlow",
+  "version": "1.0.0",
+  "description": "Task management skill with USDC payment integration for OpenClaw",
+  "author": "PinchyMeow",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "jest"
+  },
+  "keywords": ["openclaw", "task", "payment", "usdc"],
+  "dependencies": {
+    "openclaw": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

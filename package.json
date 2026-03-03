@@ -8,9 +8,15 @@
     "start": "node index.js",
     "test": "jest"
   },
-  "keywords": ["openclaw", "task", "payment", "usdc"],
+  "keywords": [
+    "openclaw",
+    "task",
+    "payment",
+    "usdc"
+  ],
   "dependencies": {
-    "openclaw": "^1.0.0"
+    "ethers": "^6.16.0",
+    "viem": "^2.46.3"
   },
   "engines": {
     "node": ">=18.0.0"

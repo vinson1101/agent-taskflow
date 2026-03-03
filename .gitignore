@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Data files (contains potential sensitive info)
+data/
+
+# Environment files
+.env
+.env.local
+.env.*
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

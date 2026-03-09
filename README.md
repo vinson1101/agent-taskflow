@@ -125,6 +125,36 @@ cp .env.example .env
 node main.js
 ```
 
+## 📂 任务目录结构 ATF
+
+新建任务时，自动生成以下标准结构：
+
+```
+ATF-TASKS/{序号}-{任务名称}/
+├── README.md           # 任务说明（必选）
+├── progress.md        # 进度记录（必选）
+├── research/          # 研究报告（可选）
+│   └── *.md
+├── evaluation.md      # 评估报告（必选）
+├── incentives.md      # 激励机制（必选）
+├── .env.example       # 环境变量模板（开发类任务可选）
+└── src/              # 代码（开发类任务可选）
+```
+
+### 文件说明
+
+| 文件 | 必选 | 说明 |
+|------|------|------|
+| README.md | ✅ | 任务目标、背景、验收标准 |
+| progress.md | ✅ | 进度勾选、里程碑 |
+| evaluation.md | ✅ | 方案评估、可行性分析 |
+| incentives.md | ✅ | 商业模式、收益分配 |
+| research/ | ❌ | 研究报告、参考资料 |
+| .env.example | ❌ | 环境变量模板 |
+| src/ | ❌ | 开发代码 |
+
+---
+
 ## 📁 项目结构
 
 ```

@@ -21,7 +21,20 @@ function loadAgents() {
 }
 function saveAgents(a) { fs.writeFileSync(AGENTS_FILE, JSON.stringify(a, null, 2)); }
 function loadTasks() {
-  try { return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8')); } catch { return []; }
+  // 1. 从 JSON 加载任务
+  let tasks = [];
+  try { tasks = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8')); } catch { tasks = []; }
+  
+  // 2. taskNum 已存储在 JSON，直接使用
+  
+  // 3. 按 taskNum 排序（没有 taskNum 的放后面）
+  tasks.sort((a, b) => {
+    const aNum = a.taskNum || 999;
+    const bNum = b.taskNum || 999;
+    return aNum - bNum;
+  });
+  
+  return tasks;
 }
 function saveTasks(t) { fs.writeFileSync(TASKS_FILE, JSON.stringify(t, null, 2)); }
 function loadScores() {
@@ -147,18 +160,15 @@ ${taskId}
   return { dirName, taskPath, exists: true };
 }
 
-// 获取任务序号 (最大序号+1)
+// 获取任务序号 (从 JSON 读最大序号+1)
 function getNextTaskNum() {
-  if (!fs.existsSync(TASKS_DIR)) return 1;
-  const dirs = fs.readdirSync(TASKS_DIR);
-  let maxNum = 0;
-  dirs.forEach(d => {
-    const match = d.match(/^(\d+)-/);
-    if (match) {
-      const num = parseInt(match[1]);
-      if (num > maxNum) maxNum = num;
-    }
-  });
+  const tasks = loadTasks();
+  if (tasks.length === 0) return 1;
+  
+  const maxNum = tasks.reduce((max, t) => {
+    return (t.taskNum || 0) > max ? t.taskNum : max;
+  }, 0);
+  
   return maxNum + 1;
 }
 
@@ -346,16 +356,54 @@ else if (cmd === 'rate') {
 
 // 任务列表
 else if (cmd === 'list') {
-  const tasks = loadTasks();
+  const args = process.argv.slice(3);
+  const showAll = args.includes('all') || args.includes('-a');
+  const knownFlags = ['all', '-a', '-h', '--help'];
+  const filter = args.find(a => !a.startsWith('-') && !knownFlags.includes(a)) || '';
+  
+  let tasks = loadTasks();
   const statusIcon = { pending: '⏳', assigned: '📤', running: '🔄', done: '✅', failed: '❌' };
-  console.log('📋 任务:\n');
-  for (const t of tasks) {
+  
+  // 过滤任务
+  if (!showAll) {
+    // 默认只显示未完成的任务
+    tasks = tasks.filter(t => t.status !== 'done' && t.status !== 'failed');
+  }
+  
+  // 搜索过滤
+  if (filter) {
+    tasks = tasks.filter(t => 
+      t.description.toLowerCase().includes(filter.toLowerCase())
+    );
+  }
+  
+  // 按 taskNum 排序
+  tasks.sort((a, b) => (a.taskNum || 999) - (b.taskNum || 999));
+  
+  console.log(`📋 任务${showAll ? ' (全部)' : ' (未完成)'}:\n`);
+  
+  if (tasks.length === 0) {
+    console.log('  (无)');
+    return;
+  }
+  
+  tasks.forEach((t) => {
     const icon = statusIcon[t.status] || '❓';
-    console.log(`${icon} [${t.status}] ${t.id}`);
-    console.log(`   ${t.description}`);
-    if (t.assignedTo) console.log(`   -> ${t.assignedTo}`);
-    if (t.rating) console.log(`   ⭐ ${t.rating}/10`);
+    const taskNum = t.taskNum ? String(t.taskNum).padStart(2, ' ') : '  ';
+    console.log(`${taskNum}. ${icon} [${t.status}]`);
+    console.log(`    ${t.description}`);
+    if (t.assignedTo) console.log(`    -> ${t.assignedTo}`);
+    if (t.rating) console.log(`    ⭐ ${t.rating}/10`);
     console.log('');
+  });
+  
+  // 显示帮助
+  if (args.includes('-h') || args.includes('--help')) {
+    console.log('用法:');
+    console.log('  atf list          - 显示未完成任务');
+    console.log('  atf list all     - 显示全部任务');
+    console.log('  atf list <关键词> - 搜索任务');
+    console.log('  atf list -h      - 显示帮助');
   }
 }
 

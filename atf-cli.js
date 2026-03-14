@@ -210,6 +210,63 @@ function rateTask(taskId, rating, reason = '') {
   };
 }
 
+// ============ 任务类型自动识别 + ACP 执行器 ============
+
+// 任务类型关键词映射
+const TYPE_KEYWORDS = {
+  code: ['code', '编码', '写代码', '开发', '写一个', '写个', 'script', '脚本', 'bot'],
+  analyze: ['analyze', '分析', '研究', '调研', '看看', '检查', '查看'],
+  trade: ['trade', '交易', '买入', '卖出', '换', 'swap', 'sell', 'buy'],
+};
+
+// 执行器映射
+// 注意: ACP spawn 目前有技术限制 (spawn subagent)
+//edBy 只支持 因此 code/analyze 类型临时使用 exec fallback
+const EXECUTORS = {
+  code: { executor: 'Claude(Exec)', agent: 'claude', useExec: true },
+  analyze: { executor: 'Claude(Exec)', agent: 'claude', useExec: true },
+  trade: { executor: 'F0x', agent: 'f0x' },
+  general: { executor: 'Self(PinchyMeow)', agent: 'pinchymeow' }
+};
+
+// 自动识别任务类型
+function detectTaskType(description) {
+  const desc = description.toLowerCase();
+  for (const [type, keywords] of Object.entries(TYPE_KEYWORDS)) {
+    for (const kw of keywords) {
+      if (desc.includes(kw)) return type;
+    }
+  }
+  return 'general';
+}
+
+// 获取任务类型的执行指令
+function getExecutorCommand(taskType, description) {
+  const executor = EXECUTORS[taskType] || EXECUTORS.general;
+  
+  // 对于 code/analyze 类型，ACP spawn 有技术限制，生成 exec 命令
+  if (executor.useExec) {
+    return {
+      type: taskType,
+      executor: executor.executor,
+      agent: executor.agent,
+      useExec: true,
+      execCmd: `claude -p --allow-dangerously-skip-permissions "${description}"`,
+      curlCmd: `exec: claude -p --allow... "${description}"`
+    };
+  }
+  
+  return {
+    type: taskType,
+    executor: executor.executor,
+    agent: executor.agent,
+    spawnCmd: `请用 sessions_spawn runtime:"acp" agentId:"${executor.agent}" 执行: ${description}`,
+    curlCmd: `openclaw sessions_spawn --runtime acp --agent-id ${executor.agent} --task "${description}"`
+  };
+}
+
+// ============ 主程序 ============
+
 const args = process.argv.slice(2);
 const cmd = args[0];
 
@@ -223,6 +280,8 @@ if (!cmd) {
   register <id> <type> <name>      注册 Agent
   list-agents                       查看 Agents + 评分
   create <描述> [type]              创建任务 (自动创建目录)
+  execute <描述>                    自动识别类型并执行 (ACP/F0x/Self)
+  route <taskId>                    显示任务类型的执行路由
   assign <taskId> <agentId>         分配任务 (自动创建子任务)
   update <taskId> <status>          更新状态
   rate <taskId> <1-10> [原因]       评分
@@ -235,9 +294,17 @@ if (!cmd) {
   任务目录: ${TASKS_DIR}
   目录格式: 序号-任务名 (如 11-Virtuals-Protocol)
 
+任务类型路由:
+  code → Claude Code (ACP)      [编码/开发/脚本]
+  analyze → Claude (ACP)         [分析/研究/调研]
+  trade → F0x                    [交易/买卖]
+  general → PinchyMeow           [其他]
+
 示例:
   atf register f0x trading "F0x"
   atf create "买入ETH" trading
+  atf execute "写一个ETH价格检查脚本"
+  atf execute "分析DEGEN趋势"
   atf assign task_xxx f0x
   atf update task_xxx done
   atf rate task_xxx 8 "完成及时"
@@ -304,6 +371,80 @@ else if (cmd === 'create') {
   console.log(`✅ 任务: ${task.id} [${task.shortId}]`);
   console.log(`   ${task.description}`);
   console.log(`   📁 目录: ${taskPath}`);
+}
+
+// 执行任务 (自动识别类型 + 显示执行指令)
+else if (cmd === 'execute') {
+  const description = args.slice(1).join(' ');
+  if (!description) return console.log('用法: atf execute <描述>');
+  
+  // 1. 识别类型
+  const taskType = detectTaskType(description);
+  const exec = getExecutorCommand(taskType, description);
+  
+  // 2. 创建任务
+  const taskNum = getNextTaskNum();
+  const taskId = generateId();
+  const tasks = loadTasks();
+  const task = {
+    id: taskId,
+    shortId: `T-${taskNum.toString().padStart(3, '0')}`,
+    taskNum: taskNum,
+    description,
+    type: taskType,
+    status: 'pending',
+    executor: exec.executor,
+    createdAt: new Date().toISOString(),
+    assignedTo: null,
+    startedAt: null,
+    completedAt: null
+  };
+  tasks.push(task);
+  saveTasks(tasks);
+  
+  // 3. 创建目录
+  createTaskDir(taskId, description, taskNum);
+  
+  // 4. 输出路由信息
+  console.log(`\n🤖 ATF 任务路由`);
+  console.log(`================`);
+  console.log(`📝 任务: ${description}`);
+  console.log(`🏷️  类型: ${taskType}`);
+  console.log(`⚙️  执行: ${exec.executor}`);
+  
+  // 根据执行方式显示不同指令
+  if (exec.useExec) {
+    console.log(`\n📋 Exec 指令 (Claude Code):`);
+    console.log(`   ${exec.execCmd}`);
+    console.log(`\n⚠️  注意: ACP spawn 有技术限制，使用 exec fallback`);
+  } else {
+    console.log(`\n📋 Spawn 指令:`);
+    console.log(`   ${exec.curlCmd}`);
+  }
+  
+  console.log(`\n✅ 任务已创建: ${task.shortId}`);
+  console.log(`   等待执行后更新状态`);
+}
+
+// 显示任务路由
+else if (cmd === 'route') {
+  const [taskId] = args.slice(1);
+  if (!taskId) return console.log('用法: atf route <taskId>');
+  
+  const tasks = loadTasks();
+  const task = tasks.find(t => t.id === taskId || t.shortId === taskId);
+  if (!task) return console.log(`❌ 任务不存在: ${taskId}`);
+  
+  const taskType = task.type || detectTaskType(task.description);
+  const exec = getExecutorCommand(taskType, task.description);
+  
+  console.log(`\n📋 任务路由信息`);
+  console.log(`================`);
+  console.log(`ID: ${task.id} [${task.shortId}]`);
+  console.log(`描述: ${task.description}`);
+  console.log(`类型: ${taskType}`);
+  console.log(`执行: ${exec.executor}`);
+  console.log(`\nSpawn: ${exec.curlCmd}`);
 }
 
 // 分配任务 (这里返回任务ID，由主会话去 spawn 子任务)

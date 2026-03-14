@@ -111,6 +111,26 @@ ${taskId}
 `;
     fs.writeFileSync(path.join(taskPath, 'progress.md'), progressContent);
     
+    // 创建 context.json (v1 schema)
+    const context = {
+      schema_version: '1.0',
+      task_id: taskId,
+      title: description,
+      description: description,
+      type: 'general',
+      status: 'created',
+      created_by: 'pinchymeow',
+      assigned_to: null,
+      priority: 'normal',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      dependencies: [],
+      tags: [],
+      workspace: taskPath,
+      metadata: {}
+    };
+    fs.writeFileSync(path.join(taskPath, 'context.json'), JSON.stringify(context, null, 2));
+    
     // 创建 evaluation.md
     const evalContent = `# 考核评分
 
@@ -279,11 +299,14 @@ if (!cmd) {
 命令:
   register <id> <type> <name>      注册 Agent
   list-agents                       查看 Agents + 评分
+  agent-capabilities <id> add|remove|list [cap]  Agent 能力管理
   create <描述> [type]              创建任务 (自动创建目录)
   execute <描述>                    自动识别类型并执行 (ACP/F0x/Self)
   route <taskId>                    显示任务类型的执行路由
   assign <taskId> <agentId>         分配任务 (自动创建子任务)
-  update <taskId> <status>          更新状态
+  update <taskId> <status>      更新状态 (同步到 context.json)
+  validate                     验证 context.json schema
+  depend <taskId> add|remove|list [dep]  任务依赖管理
   rate <taskId> <1-10> [原因]       评分
   list                             任务列表
   stats                            统计
@@ -318,12 +341,71 @@ if (cmd === 'register') {
   const [agentId, type, name] = args.slice(1);
   const agents = loadAgents();
   agents[agentId] = {
-    id: agentId, type, name: name || agentId,
+    id: agentId,
+    type: type || 'general',
+    name: name || agentId,
+    capabilities: [],
+    workspace: null,
+    status: 'active',
     registeredAt: new Date().toISOString(),
-    tasksCompleted: 0
+    tasksCompleted: 0,
+    performance: {
+      avgScore: null,
+      successRate: null
+    }
   };
   saveAgents(agents);
-  console.log(`✅ 已注册: ${agentId} (${type})`);
+  console.log(`✅ 已注册: ${agentId} (${type || 'general'})`);
+  console.log(`   用 atf agent-capabilities ${agentId} add <cap> 添加能力`);
+}
+
+// Agent 能力管理
+else if (cmd === 'agent-capabilities') {
+  const [agentId, action, ...cap] = args.slice(1);
+  if (!agentId) return console.log(`用法: atf agent-capabilities <agent_id> add|remove|list [capability]`);
+  
+  const agents = loadAgents();
+  if (!agents[agentId]) return console.log(`❌ Agent 不存在: ${agentId}`);
+  
+  const agent = agents[agentId];
+  if (!agent.capabilities) agent.capabilities = [];
+  
+  if (action === 'list') {
+    console.log(`\\n📋 Agent 能力: ${agentId}`);
+    console.log(`   能力: ${agent.capabilities.length ? agent.capabilities.join(', ') : '无'}`);
+    console.log(`   类型: ${agent.type}`);
+    console.log(`   状态: ${agent.status}`);
+    console.log(`   任务完成: ${agent.tasksCompleted}`);
+    return;
+  }
+  
+  if (action === 'add') {
+    const capability = cap.join(' ');
+    if (!capability) return console.log(`用法: atf agent-capabilities ${agentId} add <capability>`);
+    if (!agent.capabilities.includes(capability)) {
+      agent.capabilities.push(capability);
+      saveAgents(agents);
+      console.log(`✅ 已添加能力: ${agentId} + ${capability}`);
+    } else {
+      console.log(`ℹ️ 能力已存在: ${capability}`);
+    }
+    return;
+  }
+  
+  if (action === 'remove') {
+    const capability = cap.join(' ');
+    if (!capability) return console.log(`用法: atf agent-capabilities ${agentId} remove <capability>`);
+    if (agent.capabilities.includes(capability)) {
+      agent.capabilities = agent.capabilities.filter(c => c !== capability);
+      saveAgents(agents);
+      console.log(`✅ 已移除能力: ${agentId} - ${capability}`);
+    } else {
+      console.log(`ℹ️ 能力不存在: ${capability}`);
+    }
+    return;
+  }
+  
+  console.log(`用法: atf agent-capabilities <agent_id> add|remove|list [capability]`);
 }
 
 // 查看 Agents + 评分
@@ -479,6 +561,174 @@ else if (cmd === 'update') {
   }
   saveTasks(tasks);
   console.log(`✅ ${taskId}: ${status}`);
+  
+  // 同时更新 context.json
+  const dirs = fs.readdirSync(TASKS_DIR).filter(d => 
+    fs.statSync(path.join(TASKS_DIR, d)).isDirectory()
+  );
+  let taskDir = null;
+  for (const dir of dirs) {
+    const contextPath = path.join(TASKS_DIR, dir, 'context.json');
+    if (fs.existsSync(contextPath)) {
+      try {
+        const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+        if (ctx.task_id === taskId) {
+          taskDir = path.join(TASKS_DIR, dir);
+          break;
+        }
+      } catch (e) {}
+    }
+  }
+  
+  if (taskDir) {
+    const contextPath = path.join(taskDir, 'context.json');
+    try {
+      const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+      ctx.status = status;
+      ctx.updated_at = new Date().toISOString();
+      fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
+      console.log(`   📄 context.json 已更新`);
+    } catch (e) {
+      console.log(`   ⚠️ context.json 更新失败: ${e.message}`);
+    }
+  }
+}
+
+// 验证 context.json schema
+else if (cmd === 'validate') {
+  const dirs = fs.readdirSync(TASKS_DIR).filter(d => {
+    return fs.statSync(path.join(TASKS_DIR, d)).isDirectory();
+  });
+  
+  const validStatuses = ['created', 'planned', 'assigned', 'executing', 'blocked', 'review', 'completed', 'archived'];
+  let valid = 0, invalid = 0, errors = [];
+  
+  for (const dir of dirs) {
+    const contextPath = path.join(TASKS_DIR, dir, 'context.json');
+    if (!fs.existsSync(contextPath)) {
+      errors.push(`${dir}: 缺少 context.json`);
+      invalid++;
+      continue;
+    }
+    
+    try {
+      const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+      if (!ctx.schema_version) {
+        errors.push(`${dir}: 缺少 schema_version`);
+        invalid++;
+      } else if (!validStatuses.includes(ctx.status)) {
+        errors.push(`${dir}: 无效状态 "${ctx.status}"`);
+        invalid++;
+      } else {
+        valid++;
+      }
+    } catch (e) {
+      errors.push(`${dir}: JSON 解析错误 - ${e.message}`);
+      invalid++;
+    }
+  }
+  
+  console.log(`\\n📋 Schema 验证结果`);
+  console.log(`   ✅ 有效: ${valid}`);
+  console.log(`   ❌ 无效: ${invalid}`);
+  if (errors.length > 0) {
+    console.log(`\\n错误列表:`);
+    errors.forEach(e => console.log(`   - ${e}`));
+  }
+}
+
+// 任务依赖管理
+else if (cmd === 'depend') {
+  const [taskId, depType, depTaskId] = args.slice(1);
+  
+  if (!taskId || !depType) {
+    return console.log(`用法: atf depend <task_id> add|remove|list [depends_on_task_id]`);
+  }
+  
+  // 查找任务目录
+  const dirs = fs.readdirSync(TASKS_DIR).filter(d => 
+    fs.statSync(path.join(TASKS_DIR, d)).isDirectory()
+  );
+  
+  let targetDir = null;
+  for (const dir of dirs) {
+    const contextPath = path.join(TASKS_DIR, dir, 'context.json');
+    if (fs.existsSync(contextPath)) {
+      const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+      if (ctx.task_id === taskId) {
+        targetDir = path.join(TASKS_DIR, dir);
+        break;
+      }
+    }
+  }
+  
+  if (!targetDir) return console.log(`❌ 任务不存在: ${taskId}`);
+  
+  const contextPath = path.join(targetDir, 'context.json');
+  const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+  
+  if (depType === 'list') {
+    console.log(`\\n📋 任务依赖: ${taskId}`);
+    console.log(`   依赖: ${ctx.dependencies?.length ? ctx.dependencies.join(', ') : '无'}`);
+    // 反向查找依赖此任务的任务
+    let dependents = [];
+    for (const dir of dirs) {
+      const otherPath = path.join(TASKS_DIR, dir, 'context.json');
+      if (fs.existsSync(otherPath)) {
+        const other = JSON.parse(fs.readFileSync(otherPath, 'utf8'));
+        if (other.dependencies?.includes(taskId)) {
+          dependents.push(other.task_id);
+        }
+      }
+    }
+    console.log(`   被依赖: ${dependents.length ? dependents.join(', ') : '无'}`);
+    return;
+  }
+  
+  if (depType === 'add') {
+    if (!depTaskId) return console.log(`用法: atf depend ${taskId} add <depends_on_task_id>`);
+    
+    // 检查被依赖的任务是否存在
+    let depExists = false;
+    for (const dir of dirs) {
+      const otherPath = path.join(TASKS_DIR, dir, 'context.json');
+      if (fs.existsSync(otherPath)) {
+        const other = JSON.parse(fs.readFileSync(otherPath, 'utf8'));
+        if (other.task_id === depTaskId) {
+          depExists = true;
+          break;
+        }
+      }
+    }
+    if (!depExists) return console.log(`❌ 依赖的任务不存在: ${depTaskId}`);
+    
+    if (!ctx.dependencies) ctx.dependencies = [];
+    if (!ctx.dependencies.includes(depTaskId)) {
+      ctx.dependencies.push(depTaskId);
+      ctx.updated_at = new Date().toISOString();
+      fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
+      console.log(`✅ 已添加依赖: ${taskId} → ${depTaskId}`);
+    } else {
+      console.log(`ℹ️ 依赖已存在: ${taskId} → ${depTaskId}`);
+    }
+    return;
+  }
+  
+  if (depType === 'remove') {
+    if (!depTaskId) return console.log(`用法: atf depend ${taskId} remove <depends_on_task_id>`);
+    
+    if (ctx.dependencies && ctx.dependencies.includes(depTaskId)) {
+      ctx.dependencies = ctx.dependencies.filter(d => d !== depTaskId);
+      ctx.updated_at = new Date().toISOString();
+      fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
+      console.log(`✅ 已移除依赖: ${taskId} → ${depTaskId}`);
+    } else {
+      console.log(`ℹ️ 依赖不存在: ${taskId} → ${depTaskId}`);
+    }
+    return;
+  }
+  
+  console.log(`用法: atf depend <task_id> add|remove|list [depends_on_task_id]`);
 }
 
 // 评分

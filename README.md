@@ -1,235 +1,117 @@
-# AgentTaskFlow - 智能任务分配和协作系统
+# AgentTaskFlow (ATF) - 任务分配与协作系统
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
-[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)](https://github.com/vinson1101/agent-taskflow)
+> 基于 OpenClaw 的多 Agent 任务管理框架。统一任务仓库 + CLI + Watcher。
 
-## 🎯 项目概述
-
-AgentTaskFlow 是一个基于 OpenClaw 框架的智能任务分配和协作系统，支持任务创建、自动路由、多代理执行和协作追踪。
-
-### 核心特性
-
-- **智能任务路由** - 自动识别任务类型，路由到最适合的执行代理
-- **多代理协作** - 支持 Claude Code、F0x 交易专家、PinchyMeow 等多种代理
-- **CLI 工具** - 完整的命令行界面，简化任务管理
-- **任务目录化** - 每个任务独立目录，包含完整的文档结构
-
-## 🚀 快速开始
-
-### 安装
-
-```bash
-# 克隆仓库
-git clone https://github.com/vinson1101/agent-taskflow.git
-cd agent-taskflow
-
-# 安装依赖
-npm install
-
-# 添加全局命令
-npm link
-```
-
-### 基本用法
-
-```bash
-# 注册代理
-atf register f0x trading "F0x"
-atf register pinchymeow general "PinchyMeow"
-
-# 查看可用代理
-atf list-agents
-
-# 创建任务（自动识别类型）
-atf create "买入ETH" trading
-atf execute "写一个ETH价格检查脚本"
-
-# 分配任务
-atf assign task_xxx f0x
-
-# 更新状态
-atf update task_xxx done
-
-# 评分
-atf rate task_xxx 8 "完成及时"
-```
-
-## 📖 命令详解
-
-### atf register \<id\> \<type\> \<name\>
-
-注册一个代理到系统。
-
-```bash
-atf register f0x trading "F0x - Base链交易专家"
-atf register pinchymeow general "PinchyMeow - 首席助理"
-```
-
-### atf list-agents
-
-列出所有已注册的代理及其评分。
-
-### atf create \<描述\> [type]
-
-创建新任务，自动识别任务类型或指定类型。
-
-```bash
-# 自动识别类型
-atf create "分析DEGEN趋势"
-
-# 指定类型
-atf create "写一个价格监控脚本" code
-```
-
-### atf execute \<描述\>
-
-创建任务并自动识别类型，显示执行指令。
-
-```bash
-# 交易类型 → F0x
-atf execute "买入100 USDC的ETH"
-
-# 代码类型 → Claude Code (exec fallback)
-atf execute "写一个ETH价格检查脚本"
-
-# 分析类型 → Claude Code
-atf execute "分析DEGEN未来走势"
-
-# 一般任务 → PinchyMeow
-atf execute "整理今天的会议记录"
-```
-
-### atf route \<taskId\>
-
-显示任务的路由信息，包括类型和执行指令。
-
-```bash
-atf route task_001
-```
-
-### atf assign \<taskId\> \<agentId\>
-
-分配任务给指定代理。
-
-```bash
-atf assign task_001 f0x
-```
-
-### atf update \<taskId\> \<status\>
-
-更新任务状态。
-
-```bash
-atf update task_001 done
-atf update task_001 in-progress
-atf update task_001 blocked
-```
-
-### atf rate \<taskId\> \<1-10\> [原因]
-
-对任务完成情况进行评分。
-
-```bash
-atf rate task_001 9 "完成质量很高"
-```
-
-## 🏷️ 任务类型路由
-
-系统自动识别任务类型并路由到最适合的执行代理：
-
-| 类型 | 关键词 | 执行代理 | 说明 |
-|------|--------|----------|------|
-| `code` | code, 编码, 写代码, 开发, 脚本, bot | Claude Code (exec) | 代码开发任务 |
-| `analyze` | analyze, 分析, 研究, 调研, 查看 | Claude Code (exec) | 分析研究任务 |
-| `trade` | trade, 交易, 买入, 卖出, swap, buy, sell | F0x | 交易执行任务 |
-| `general` | 其他 | PinchyMeow | 一般任务 |
-
-## 📂 任务目录结构
-
-每个任务自动生成标准目录结构：
-
-```
-ATF-TASKS/{序号}-{任务名称}/
-├── README.md           # 任务说明（必选）
-├── progress.md        # 进度记录（必选）
-├── research/          # 研究报告（可选）
-├── evaluation.md      # 评估报告（必选）
-├── incentives.md      # 激励机制（必选）
-└── src/              # 代码（开发类任务可选）
-```
-
-### 文件说明
-
-| 文件 | 必选 | 说明 |
-|------|------|------|
-| README.md | ✅ | 任务目标、背景、验收标准 |
-| progress.md | ✅ | 进度勾选、里程碑 |
-| evaluation.md | ✅ | 方案评估、可行性分析 |
-| incentives.md | ✅ | 商业模式、收益分配 |
-
-## 📁 项目结构
-
-```
-agent-taskflow/
-├── atf-cli.js              # CLI 主入口 (最新: execute/route 命令)
-├── index.js                # 核心系统
-├── cli.js                  # 旧版 CLI
-├── package.json            # 项目配置
-├── .gitignore
-├── README.md               # 本文件
-├── TODO.md                 # 待办事项
-├── TODO-INTEGRATION-SUMMARY.md  # 集成总结
-├── ATF-TASKS/              # 任务目录
-│   └── */                  # 每个任务一个目录
-├── node_modules/           # 依赖
-└── logs/                  # 日志目录
-```
-
-## 🔧 技术实现
-
-### 任务类型自动识别
-
-```javascript
-const TYPE_KEYWORDS = {
-  code: ['code', '编码', '写代码', '开发', 'script', '脚本', 'bot'],
-  analyze: ['analyze', '分析', '研究', '调研', '看看', '检查'],
-  trade: ['trade', '交易', '买入', '卖出', 'swap', 'sell', 'buy'],
-};
-
-function detectTaskType(description) {
-  // 根据关键词自动识别任务类型
-}
-```
-
-### 执行器映射
-
-```javascript
-const EXECUTORS = {
-  code: { executor: 'Claude(Exec)', agent: 'claude', useExec: true },
-  analyze: { executor: 'Claude(Exec)', agent: 'claude', useExec: true },
-  trade: { executor: 'F0x', agent: 'f0x' },
-  general: { executor: 'Self(PinchyMeow)', agent: 'pinchymeow' }
-};
-```
-
-**注意**: 由于 ACP spawn 有技术限制，code/analyze 类型使用 exec fallback 模式。
-
-## 📊 状态
-
-- ✅ 核心功能稳定
-- ✅ CLI 工具完整
-- ✅ 自动任务路由
-- ✅ 多代理支持
-
-## 📄 许可证
-
-MIT License
-
-## 👤 作者
-
-- **PinchyMeow** - 首席助理和架构师
+**状态：运行中（v2，2026-04-11 重构）**
 
 ---
 
-**AgentTaskFlow - 让任务分配更智能，让协作更高效！** 🚀
+## 核心文件
+
+| 文件 | 说明 |
+|------|------|
+| `atf-cli.js` | CLI 入口，所有命令 |
+| `workspace/bin/atf-watcher.cjs` | 状态监控 + 超时 DLQ + 通知 |
+| `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
+| `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
+
+---
+
+## 架构
+
+```
+atf create "描述"  → ctx.json + pending-task.json
+atf assign T-X f0x → ctx.assigned_to + pending-task.json
+F0x scan          → 发现 pending-task.json → 查 ctx.status → 执行
+F0x               → atf update T-X completed
+Watcher           → 检测 completed → 通知 PinchyMeow → Vinson 确认 delivered
+```
+
+**状态机：**
+```
+created → assigned → confirmed → executing → completed → delivered
+    ↓         ↓          ↓
+  超时DLQ   超时DLQ    超时DLQ
+    ↓         ↓
+  retry ×3   archived
+```
+
+---
+
+## CLI 命令
+
+```bash
+node atf-cli.js create <描述>           # 创建任务
+node atf-cli.js list                    # 列出所有任务
+node atf-cli.js nextnum                  # 下一个编号
+node atf-cli.js status <taskId>         # 查看状态
+node atf-cli.js ctx <taskId>             # 查看 ctx.json
+node atf-cli.js assign <taskId> <agent>  # 指派（写 pending-task.json）
+node atf-cli.js update <taskId> <status> # 更新状态（pause/assigned/completed等）
+node atf-cli.js fan-out <taskId> <a1,a2> # fan-out 分发
+node atf-cli.js delivered <taskId>       # 标记已送达（Vinson 确认）
+node atf-cli.js dri <taskId> [agent]     # 设置/查看 DRI
+node atf-cli.js dlq list                  # 列出 DLQ
+node atf-cli.js dlq retry <taskId>       # DLQ 重试
+node atf-cli.js dlq skip <taskId>       # DLQ 跳过
+node atf-cli.js dlq cancel <taskId>     # DLQ 取消
+```
+
+---
+
+## CLI 命令（未完成 / 实验性）
+
+> ⚠️ 以下命令今天加的，但设计过重，**暂不使用**，用 `update <status>` 代替
+
+```bash
+# 这些命令存在但暂不推荐使用（设计过于复杂）
+node atf-cli.js block <taskId> <问题>    # 写 pending-decisions.json，Watcher 通知
+node atf-cli.js decide <taskId> <回答>  # 回答决策，继续执行
+node atf-cli.js revise <taskId> <反馈>  # 打回重做
+```
+
+**正确做法：** `atf update T-X paused` / `atf update T-X blocked` / `atf update T-X cancelled`
+
+---
+
+## 关键设计原则
+
+1. **文件 ≠ 状态** — `pending-task.json` 是通知信号，`ctx.status` 才是控制流
+2. **pause/cancelled/blocked** 等状态靠 `update` 命令，不需要新命令
+3. **小团队简化** — 不需要 watcher 投递确认、delivery-history 去重、pending-decisions 队列
+
+---
+
+## 已实现
+
+- ✅ 统一任务仓库（`/root/.openclaw/atf-tasks/`）
+- ✅ ctx.json 标准结构（含 protocol/delivery_status/retry_count）
+- ✅ CLI v2（create/list/assign/update/dlq/delivered/dri）
+- ✅ pending-task.json 通知机制
+- ✅ Watcher v1.5（超时 DLQ + 幂等投递 + 文件降级）
+- ✅ fan-out 分发
+- ✅ learnings-promote.cjs（→ MEMORY）
+- ✅ 岚遥机制（learnings/ 即时记录 + promote）
+
+## 未完成 / 待优化
+
+- [ ] **learnings → lessons 合并** — 已存在 `memory/lessons/`，learnings 机制是重复的，应迁移到 lessons
+- [ ] **简化 watcher** — 投递确认、delivery-history、pending-decisions 复杂度过高，简化回基本超时 DLQ 即可
+- [ ] **block/decide/revise 命令移除** — 设计过重，用 `update <status>` 代替即可
+- [ ] **shared-context/ 结构化** — intel/ 情报积累、decision/ 决策记录尚未日常化
+- [ ] **每日复盘 cron** — 岚遥建议的 23:00 复盘尚未建立
+- [ ] **Zoe 每周巡检** — 岚遥建议的 10:00/14:00/22:00 巡检 cron 尚未建立
+
+---
+
+## 相关路径
+
+- 任务仓库：`/root/.openclaw/atf-tasks/`
+- CLI：`/root/.openclaw/workspace/agent-taskflow/atf-cli.js`
+- Watcher：`/root/.openclaw/workspace/bin/atf-watcher.cjs`
+- learnings promote：`/root/.openclaw/workspace/bin/learnings-promote.cjs`
+- Lessons：`/root/.openclaw/workspace/memory/lessons/`
+
+---
+
+*最后更新：2026-04-12*

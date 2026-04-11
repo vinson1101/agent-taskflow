@@ -1,868 +1,714 @@
 #!/usr/bin/env node
+/**
+ * ATF CLI v2 - 统一任务仓库
+ * 所有任务存储在 /root/.openclaw/atf-tasks/
+ * 每个任务目录包含: ctx.json, latest.json, README.md, progress.md, research/, notifications/
+ */
 
 const fs = require('fs');
 const path = require('path');
 
-const DATA_DIR = '/root/.openclaw/workspace/agent-taskflow/data';
+// ============================================================
+// 统一配置
+// ============================================================
+const TASKS_DIR = '/root/.openclaw/atf-tasks';
+const DLQ_DIR    = '/root/.openclaw/atf-tasks/dlq';
+const DATA_DIR  = '/root/.openclaw/workspace/agent-taskflow/data';
 const AGENTS_FILE = `${DATA_DIR}/agents.json`;
-const TASKS_FILE = `${DATA_DIR}/tasks.json`;
+const TASKS_FILE  = `${DATA_DIR}/tasks.json`;
 const SCORES_FILE = `${DATA_DIR}/scores.json`;
 
-// 任务目录配置
-const TASKS_DIR = '/root/.openclaw/workspace/ATF-TASKS';
+if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
+if (!fs.existsSync(DATA_DIR))  fs.mkdirSync(DATA_DIR,   { recursive: true });
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+// ============================================================
+// 工具函数
+// ============================================================
+function loadJson(f) {
+  if (!fs.existsSync(f)) return null;
+  try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return null; }
 }
-
-// 数据加载/保存
-function loadAgents() {
-  try { return JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch { return {}; }
+function saveJson(f, d) {
+  const dir = path.dirname(f);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(d, null, 2));
 }
-function saveAgents(a) { fs.writeFileSync(AGENTS_FILE, JSON.stringify(a, null, 2)); }
-function loadTasks() {
-  // 1. 从 JSON 加载任务
-  let tasks = [];
-  try { tasks = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8')); } catch { tasks = []; }
-  
-  // 2. taskNum 已存储在 JSON，直接使用
-  
-  // 3. 按 taskNum 排序（没有 taskNum 的放后面）
-  tasks.sort((a, b) => {
-    const aNum = a.taskNum || 999;
-    const bNum = b.taskNum || 999;
-    return aNum - bNum;
-  });
-  
-  return tasks;
-}
-function saveTasks(t) { fs.writeFileSync(TASKS_FILE, JSON.stringify(t, null, 2)); }
-function loadScores() {
-  try { return JSON.parse(fs.readFileSync(SCORES_FILE, 'utf8')); } catch { return {}; }
-}
-function saveScores(s) { fs.writeFileSync(SCORES_FILE, JSON.stringify(s, null, 2)); }
+function ctxPath(taskId)    { const d=dirOfTaskId(taskId);return `${TASKS_DIR}/${d}/ctx.json`; }
+function latestPath(taskId) { return `${TASKS_DIR}/${taskId}/latest.json`; }
 
-function generateId() {
-  return `task_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-}
-
-// 创建任务目录
-function createTaskDir(taskId, description, taskNum = null) {
-  if (!fs.existsSync(TASKS_DIR)) {
-    fs.mkdirSync(TASKS_DIR, { recursive: true });
-  }
-  
-  // 清理描述中的非法字符
-  const safeDesc = description
-    .replace(/[<>:"/\\|?*]/g, '-')
-    .replace(/\s+/g, '-')
-    .substring(0, 50);
-  
-  // 目录名格式: 序号-任务名 或 task_xxx-任务名
-  const dirName = taskNum ? `${taskNum}-${safeDesc}` : `${taskId}-${safeDesc}`;
-  const taskPath = path.join(TASKS_DIR, dirName);
-  
-  if (!fs.existsSync(taskPath)) {
-    fs.mkdirSync(taskPath, { recursive: true });
-    
-    // 创建 README.md
-    const readmeContent = `# ${taskNum ? taskNum + ' - ' : ''}${description}
-
-## 任务描述
-${description}
-
-## 状态
-pending
-
-## Agent
-未分配
-
-## 创建时间
-${new Date().toISOString()}
-
-## 关联任务 ID
-${taskId}
-`;
-    fs.writeFileSync(path.join(taskPath, 'README.md'), readmeContent);
-    
-    // 创建子目录结构
-    fs.mkdirSync(path.join(taskPath, 'research'), { recursive: true });
-    fs.mkdirSync(path.join(taskPath, 'implementation'), { recursive: true });
-    fs.mkdirSync(path.join(taskPath, 'notes'), { recursive: true });
-    
-    // 创建 progress.md
-    const progressContent = `# 进度记录
-
-**最后更新**: ${new Date().toISOString().replace('T', ' ').split('.')[0]} GMT+8
-
-## 待办
-- [ ] 
-
-## 进行中
-- [ ] 
-
-## 完成
-- [ ] 
-
-## 记录
-| 日期 | 更新内容 | 更新人 |
-|------|----------|--------|
-|      |          |        |
-`;
-    fs.writeFileSync(path.join(taskPath, 'progress.md'), progressContent);
-    
-    // 创建 context.json (v1 schema)
-    const context = {
-      schema_version: '1.0',
-      task_id: taskId,
-      title: description,
-      description: description,
-      type: 'general',
-      status: 'created',
-      created_by: 'pinchymeow',
-      assigned_to: null,
-      priority: 'normal',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      dependencies: [],
-      tags: [],
-      workspace: taskPath,
-      metadata: {}
-    };
-    fs.writeFileSync(path.join(taskPath, 'context.json'), JSON.stringify(context, null, 2));
-    
-    // 创建 evaluation.md
-    const evalContent = `# 考核评分
-
-## 评分维度
-- 完成度 (40%)
-- 质量 (30%)
-- 效率 (20%)
-- 创新 (10%)
-
-## 评分记录
-| 日期 | 评分 | 评语 | 评分人 |
-|------|------|------|--------|
-|      |      |      |        |
-`;
-    fs.writeFileSync(path.join(taskPath, 'evaluation.md'), evalContent);
-    
-    // 创建 incentives.md
-    const incentContent = `# 激励方案
-
-## 物质激励
-- USDC 奖励
-- CLAW 代币
-
-## 精神激励
-- 称号升级
-- 优先选择任务
-
-## 激励记录
-| 日期 | 激励类型 | 金额/内容 | 原因 |
-|------|----------|----------|------|
-|      |          |          |      |
-`;
-    fs.writeFileSync(path.join(taskPath, 'incentives.md'), incentContent);
-    
-    // 创建 .env.example
-    const envContent = `# 环境变量模板
-# 复制为 .env 并填入真实值
-
-# 示例变量
-# API_KEY=xxx
-# API_SECRET=xxx
-`;
-    fs.writeFileSync(path.join(taskPath, '.env.example'), envContent);
-    
-    return { dirName, taskPath };
-  }
-  return { dirName, taskPath, exists: true };
-}
-
-// 获取任务序号 (从 JSON 读最大序号+1)
-function getNextTaskNum() {
-  const tasks = loadTasks();
-  if (tasks.length === 0) return 1;
-  
-  const maxNum = tasks.reduce((max, t) => {
-    return (t.taskNum || 0) > max ? t.taskNum : max;
-  }, 0);
-  
-  return maxNum + 1;
-}
-
-// 评分系统
-function rateTask(taskId, rating, reason = '') {
-  const tasks = loadTasks();
-  const task = tasks.find(t => t.id === taskId);
-  if (!task) return { error: '任务不存在' };
-  
-  const scores = loadScores();
-  if (!scores[task.assignedTo]) {
-    scores[task.assignedTo] = {
-      agentId: task.assignedTo,
-      totalScore: 0,
-      tasksCompleted: 0,
-      ratings: [],
-      avgRating: 0
-    };
-  }
-  
-  const agentScore = scores[task.assignedTo];
-  agentScore.tasksCompleted++;
-  agentScore.ratings.push({ taskId, rating, reason, time: new Date().toISOString() });
-  agentScore.totalScore += rating;
-  agentScore.avgRating = agentScore.totalScore / agentScore.ratings.length;
-  
-  task.rating = rating;
-  task.ratingReason = reason;
-  task.ratedAt = new Date().toISOString();
-  
-  saveScores(scores);
-  saveTasks(tasks);
-  
-  return { 
-    agentId: task.assignedTo, 
-    rating, 
-    avgRating: agentScore.avgRating.toFixed(1),
-    totalScore: agentScore.totalScore
-  };
-}
-
-// ============ 任务类型自动识别 + ACP 执行器 ============
-
-// 任务类型关键词映射
-const TYPE_KEYWORDS = {
-  code: ['code', '编码', '写代码', '开发', '写一个', '写个', 'script', '脚本', 'bot'],
-  analyze: ['analyze', '分析', '研究', '调研', '看看', '检查', '查看'],
-  trade: ['trade', '交易', '买入', '卖出', '换', 'swap', 'sell', 'buy'],
-};
-
-// 执行器映射
-// 注意: ACP spawn 目前有技术限制 (spawn subagent)
-//edBy 只支持 因此 code/analyze 类型临时使用 exec fallback
-const EXECUTORS = {
-  code: { executor: 'Claude(Exec)', agent: 'claude', useExec: true },
-  analyze: { executor: 'Claude(Exec)', agent: 'claude', useExec: true },
-  trade: { executor: 'F0x', agent: 'f0x' },
-  general: { executor: 'Self(PinchyMeow)', agent: 'pinchymeow' }
-};
-
-// 自动识别任务类型
-function detectTaskType(description) {
-  const desc = description.toLowerCase();
-  for (const [type, keywords] of Object.entries(TYPE_KEYWORDS)) {
-    for (const kw of keywords) {
-      if (desc.includes(kw)) return type;
+function readCtx(taskId) {
+  // 先尝试直接路径
+  const direct = loadJson(ctxPath(taskId));
+  if (direct) return direct;
+  // 反向查找：T-049 → 目录名
+  if (taskId.startsWith('T-')) {
+    const dirs = fs.readdirSync(TASKS_DIR).filter(d => !d.startsWith('.') && !d.endsWith('.json') && d !== 'dlq');
+    for (const d of dirs) {
+      const ctx = loadJson(`${TASKS_DIR}/${d}/ctx.json`);
+      if (ctx && (ctx.task_id === taskId || ctx.short_id === taskId)) return ctx;
     }
   }
-  return 'general';
+  return null;
 }
 
-// 获取任务类型的执行指令
-function getExecutorCommand(taskType, description) {
-  const executor = EXECUTORS[taskType] || EXECUTORS.general;
-  
-  // 对于 code/analyze 类型，ACP spawn 有技术限制，生成 exec 命令
-  if (executor.useExec) {
-    return {
-      type: taskType,
-      executor: executor.executor,
-      agent: executor.agent,
-      useExec: true,
-      execCmd: `claude -p --allow-dangerously-skip-permissions "${description}"`,
-      curlCmd: `exec: claude -p --allow... "${description}"`
-    };
+function dirOfTaskId(taskId) {
+  // T-049 → 目录名
+  if (taskId.startsWith('T-')) {
+    const dirs = fs.readdirSync(TASKS_DIR).filter(d => !d.startsWith('.') && !d.endsWith('.json') && d !== 'dlq');
+    for (const d of dirs) {
+      const ctx = loadJson(`${TASKS_DIR}/${d}/ctx.json`);
+      if (ctx && (ctx.task_id === taskId || ctx.short_id === taskId)) return d;
+    }
   }
-  
-  return {
-    type: taskType,
-    executor: executor.executor,
-    agent: executor.agent,
-    spawnCmd: `请用 sessions_spawn runtime:"acp" agentId:"${executor.agent}" 执行: ${description}`,
-    curlCmd: `openclaw sessions_spawn --runtime acp --agent-id ${executor.agent} --task "${description}"`
-  };
+  return taskId; // fallback
 }
 
-// ============ 主程序 ============
+function writeCtx(taskId, ctx) {
+  const dir = dirOfTaskId(taskId);
+  ctx.updated_at = new Date().toISOString();
+  saveJson(ctxPath(dir), ctx);
+  saveJson(latestPath(dir), ctx);
+}
 
-const args = process.argv.slice(2);
-const cmd = args[0];
+// ============================================================
+// 任务读写
+// ============================================================
+function getAllTasks() {
+  const tasks = [];
+  if (!fs.existsSync(TASKS_DIR)) return tasks;
+  const dirs = fs.readdirSync(TASKS_DIR);
+  for (const dir of dirs) {
+    if (dir === 'dlq' || dir.endsWith('.json')) continue;
+    const ctx = loadJson(`${TASKS_DIR}/${dir}/ctx.json`);
+    if (ctx) tasks.push(ctx);
+  }
+  return tasks;
+}
+
+function getNextTaskNum() {
+  const tasks = getAllTasks();
+  if (!tasks.length) return 1;
+  return tasks.reduce((max, t) => Math.max(max, t.taskNum || 0), 0) + 1;
+}
+
+// ============================================================
+// 创建任务目录结构
+// ============================================================
+function createTaskDir(taskNum, description) {
+  const safeDesc = description.replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '-').substring(0, 60);
+  const dirName  = `${taskNum}-${safeDesc}`;
+  const taskPath = `${TASKS_DIR}/${dirName}`;
+  if (fs.existsSync(taskPath)) return { dirName, taskPath };
+  fs.mkdirSync(taskPath, { recursive: true });
+  const subdirs = ['research', 'implementation', 'notes', 'notifications'];
+  for (const s of subdirs) fs.mkdirSync(`${taskPath}/${s}`, { recursive: true });
+  fs.writeFileSync(`${taskPath}/README.md`, `# ${taskNum} - ${description}\n\n**状态**: created\n`);
+  fs.writeFileSync(`${taskPath}/progress.md`, `## 进度记录\n\n### ${new Date().toISOString()}\n- 任务创建\n`);
+  return { dirName, taskPath };
+}
+
+function initCtx(taskNum, description, options = {}) {
+  const { dirName } = createTaskDir(taskNum, description);
+  const taskId = dirName;
+  const ctx = {
+    task_id: `T-${String(taskNum).padStart(3, '0')}`,
+    short_id: `T-${String(taskNum).padStart(3, '0')}`,
+    taskNum,
+    description,
+    status: 'created',
+    created_by: options.created_by || 'pinchymeow',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    parent_id: options.parent_id || null,
+    sub_tasks: [],
+    assigned_to: options.assigned_to || null,
+    protocol: {
+      confirm_timeout: options.confirm_timeout || 300,
+      final_timeout: options.final_timeout || 7200,
+      retry_count: 0,
+      max_retries: options.max_retries || 3,
+      delivery_status: 'pending', // pending → delivered | failed
+      delivery_attempts: 0,
+    },
+    inputs: options.inputs || {},
+    outputs: options.outputs || {},
+    shared_context: `${TASKS_DIR}/${taskId}/shared-context.json`,
+    dri: options.dri || options.assigned_to || null, // DRI：唯一责任人
+    dlq_entry: null,
+  };
+  writeCtx(taskId, ctx);
+  saveJson(`${TASKS_DIR}/${taskId}/notifications/history.json`, []);
+  return { taskId, dirName, ctx };
+}
+
+// ============================================================
+// fan-out
+// ============================================================
+function fanOut(parentId, agents) {
+  const parent = loadJson(ctxPath(parentId));
+  if (!parent) { console.error(`❌ 父任务不存在: ${parentId}`); return; }
+  const subtasks = [];
+  const startNum = getNextTaskNum();
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
+    const num = startNum + i;
+    const { taskId, dirName } = initCtx(num, `${parent.description} [${agent}]`, {
+      created_by: 'pinchymeow', parent_id: parentId, assigned_to: agent,
+      inputs: { parent_task: parentId },
+    });
+    subtasks.push({ agent, taskId, dirName, taskNum: num });
+    console.log(`  ✅ 创建子任务 ${dirName} → ${agent}`);
+  }
+  parent.sub_tasks = [...(parent.sub_tasks||[]), ...subtasks.map(s => s.taskId)];
+  writeCtx(parentId, parent);
+  return subtasks;
+}
+
+// ============================================================
+// CLI 入口
+// ============================================================
+const [,, cmd, ...args] = process.argv;
 
 if (!cmd) {
   console.log(`
-🤖 AgentTaskFlow - 任务管理与评分系统
-
-用法: atf <command> [参数]
-
-命令:
-  register <id> <type> <name>      注册 Agent
-  list-agents                       查看 Agents + 评分
-  agent-capabilities <id> add|remove|list [cap]  Agent 能力管理
-  create <描述> [type]              创建任务 (自动创建目录)
-  execute <描述>                    自动识别类型并执行 (ACP/F0x/Self)
-  route <taskId>                    显示任务类型的执行路由
-  assign <taskId> <agentId>         分配任务 (自动创建子任务)
-  update <taskId> <status>      更新状态 (同步到 context.json)
-  validate                     验证 context.json schema
-  depend <taskId> add|remove|list [dep]  任务依赖管理
-  rate <taskId> <1-10> [原因]       评分
-  list                             任务列表
-  stats                            统计
-  score <agentId>                   查看 Agent 评分
-  sync                             同步任务到目录
-
-配置:
-  任务目录: ${TASKS_DIR}
-  目录格式: 序号-任务名 (如 11-Virtuals-Protocol)
-
-任务类型路由:
-  code → Claude Code (ACP)      [编码/开发/脚本]
-  analyze → Claude (ACP)         [分析/研究/调研]
-  trade → F0x                    [交易/买卖]
-  general → PinchyMeow           [其他]
-
-示例:
-  atf register f0x trading "F0x"
-  atf create "买入ETH" trading
-  atf execute "写一个ETH价格检查脚本"
-  atf execute "分析DEGEN趋势"
-  atf assign task_xxx f0x
-  atf update task_xxx done
-  atf rate task_xxx 8 "完成及时"
-  atf sync
+ATF CLI v2
+用法:
+  atf create <描述>                       创建任务
+  atf list                                列出所有任务
+  atf status <taskId>                    查看状态（+投递状态+DRI）
+  atf assign <taskId> <agent>            指派
+  atf update <taskId> <status>           更新状态
+  atf fan-out <taskId> <agent1,agent2>   fan-out 分发
+  atf delivered <taskId>                 手动标记已送达
+  atf dri <taskId> [agent]              设置/查看 DRI（唯一责任人）
+  atf ctx <taskId>                       查看 ctx.json
+  atf nextnum                            下一个编号
+  atf dlq list                           列出 DLQ 任务
+  atf dlq show <taskId>                  查看 DLQ 详情
+  atf dlq retry <taskId>                 重试（写 pending-task.json）
+  atf dlq skip <taskId>                  跳过（archived）
+  atf dlq cancel <taskId>               取消
+  atf learnings add errors|learnings|features <内容>  即时记录
+  atf learnings list                     查看所有 learnings
+  atf learnings scan                    扫描可 promote 条目
+  atf learnings promote                 执行 promote → MEMORY
+  atf block <taskId> <question>         阻塞任务，等待 Vinson 决策
+  atf decide <taskId> <answer>          Vinson 回答，继续执行
+  atf revise <taskId> <feedback>        Vinson 不满意，打回重做
 `);
   process.exit(0);
 }
 
-// 注册 Agent
-if (cmd === 'register') {
-  const [agentId, type, name] = args.slice(1);
-  const agents = loadAgents();
-  agents[agentId] = {
-    id: agentId,
-    type: type || 'general',
-    name: name || agentId,
-    capabilities: [],
-    workspace: null,
-    status: 'active',
-    registeredAt: new Date().toISOString(),
-    tasksCompleted: 0,
-    performance: {
-      avgScore: null,
-      successRate: null
+switch (cmd) {
+  case 'list': {
+    const tasks = getAllTasks().sort((a, b) => (a.taskNum||0)-(b.taskNum||0));
+    console.log(`\n任务列表 (共 ${tasks.length} 个)\n`);
+    console.log('编号     状态        指派        描述');
+    console.log('─'.repeat(80));
+    for (const t of tasks) {
+      const num = String(t.taskNum||'?').padStart(3,' ');
+      const sts = (t.status||'?').padEnd(10);
+      const agt = (t.assigned_to||'-').padEnd(10);
+      console.log(`T-${num}  ${sts}  ${agt}  ${(t.description||'').substring(0,45)}`);
     }
-  };
-  saveAgents(agents);
-  console.log(`✅ 已注册: ${agentId} (${type || 'general'})`);
-  console.log(`   用 atf agent-capabilities ${agentId} add <cap> 添加能力`);
-}
-
-// Agent 能力管理
-else if (cmd === 'agent-capabilities') {
-  const [agentId, action, ...cap] = args.slice(1);
-  if (!agentId) return console.log(`用法: atf agent-capabilities <agent_id> add|remove|list [capability]`);
-  
-  const agents = loadAgents();
-  if (!agents[agentId]) return console.log(`❌ Agent 不存在: ${agentId}`);
-  
-  const agent = agents[agentId];
-  if (!agent.capabilities) agent.capabilities = [];
-  
-  if (action === 'list') {
-    console.log(`\\n📋 Agent 能力: ${agentId}`);
-    console.log(`   能力: ${agent.capabilities.length ? agent.capabilities.join(', ') : '无'}`);
-    console.log(`   类型: ${agent.type}`);
-    console.log(`   状态: ${agent.status}`);
-    console.log(`   任务完成: ${agent.tasksCompleted}`);
-    return;
+    console.log('');
+    break;
   }
-  
-  if (action === 'add') {
-    const capability = cap.join(' ');
-    if (!capability) return console.log(`用法: atf agent-capabilities ${agentId} add <capability>`);
-    if (!agent.capabilities.includes(capability)) {
-      agent.capabilities.push(capability);
-      saveAgents(agents);
-      console.log(`✅ 已添加能力: ${agentId} + ${capability}`);
-    } else {
-      console.log(`ℹ️ 能力已存在: ${capability}`);
+  case 'nextnum': console.log(`下一个编号: ${getNextTaskNum()}`); break;
+
+  case 'create': {
+    const description = args.join(' ');
+    if (!description) { console.error('用法: atf create <描述>'); break; }
+    const num = getNextTaskNum();
+    const { taskId, dirName, ctx } = initCtx(num, description);
+    console.log(`\n✅ 任务已创建: ${dirName}`);
+    console.log(`   task_id: ${ctx.task_id}  |  status: ${ctx.status}`);
+    console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
+    break;
+  }
+
+  case 'ctx': {
+    const taskId = args[0];
+    if (!taskId) { console.error('用法: atf ctx <taskId>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    console.log(JSON.stringify(ctx, null, 2));
+    break;
+  }
+
+  case 'status': {
+    const taskId = args[0];
+    if (!taskId) { console.error('用法: atf status <taskId>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    const ds = ctx.protocol?.delivery_status || 'N/A';
+    const da = ctx.protocol?.delivery_attempts || 0;
+    const dri = ctx.dri || '-';
+    console.log(`\n任务: ${ctx.task_id} - ${ctx.description}`);
+    console.log(`状态: ${ctx.status}  |  指派: ${ctx.assigned_to||'-'}  |  DRI: ${dri}`);
+    console.log(`投递: ${ds} (${da}次)  |  重试: ${ctx.protocol?.retry_count||0}/${ctx.protocol?.max_retries||3}`);
+    console.log(`创建: ${ctx.created_at}  |  更新: ${ctx.updated_at}`);
+    if (ctx.sub_tasks.length) console.log(`子任务: ${ctx.sub_tasks.join(', ')}`);
+    if (ctx.parent_id) console.log(`父任务: ${ctx.parent_id}`);
+    console.log('');
+    break;
+  }
+
+  case 'assign': {
+    const [taskId, agent] = args;
+    if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    ctx.assigned_to = agent; ctx.status = 'assigned';
+    if (!ctx.protocol) ctx.protocol = {};
+    ctx.protocol.delivery_status = 'pending';
+    ctx.protocol.delivery_attempts = 0;
+    writeCtx(taskId, ctx);
+    // 写 pending-task.json 通知 agent
+    const dir = dirOfTaskId(taskId);
+    const ws = `${TASKS_DIR}/${dir}`;
+    const pending = {
+      task_id: taskId,
+      assigned_to: agent,
+      description: ctx.description,
+      instructions: ctx.instructions || null,
+      created_by: ctx.assigned_to || 'pinchymeow',
+      created_at: new Date().toISOString()
+    };
+    fs.writeFileSync(`${ws}/pending-task.json`, JSON.stringify(pending, null, 2));
+    console.log(`✅ 已指派 ${taskId} → ${agent}`);
+    console.log(`   pending-task.json → ${ws}/pending-task.json`);
+    break;
+  }
+
+  case 'update': {
+    const [taskId, status] = args;
+    if (!taskId || !status) { console.error('用法: atf update <taskId> <status>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    ctx.status = status; writeCtx(taskId, ctx);
+    const hist = loadJson(`${TASKS_DIR}/${taskId}/notifications/history.json`) || [];
+    hist.push({ event: 'status_change', status, at: new Date().toISOString() });
+    saveJson(`${TASKS_DIR}/${taskId}/notifications/history.json`, hist.slice(-50));
+    console.log(`✅ ${taskId} → ${status}`);
+    break;
+  }
+
+  case 'fan-out': {
+    const [parentId, agentsStr] = args;
+    if (!parentId || !agentsStr) { console.error('用法: atf fan-out <taskId> <agent1,agent2,...>'); break; }
+    const agents = agentsStr.split(',').map(a => a.trim());
+    const subtasks = fanOut(parentId, agents);
+    if (subtasks) {
+      console.log(`\n✅ fan-out 完成，创建 ${subtasks.length} 个子任务`);
+      for (const s of subtasks) console.log(`   ${s.dirName} → ${s.agent}`);
     }
-    return;
+    break;
   }
-  
-  if (action === 'remove') {
-    const capability = cap.join(' ');
-    if (!capability) return console.log(`用法: atf agent-capabilities ${agentId} remove <capability>`);
-    if (agent.capabilities.includes(capability)) {
-      agent.capabilities = agent.capabilities.filter(c => c !== capability);
-      saveAgents(agents);
-      console.log(`✅ 已移除能力: ${agentId} - ${capability}`);
-    } else {
-      console.log(`ℹ️ 能力不存在: ${capability}`);
-    }
-    return;
-  }
-  
-  console.log(`用法: atf agent-capabilities <agent_id> add|remove|list [capability]`);
-}
 
-// 查看 Agents + 评分
-else if (cmd === 'list-agents') {
-  const agents = loadAgents();
-  const scores = loadScores();
-  console.log('📋 Agents:\n');
-  for (const [id, a] of Object.entries(agents)) {
-    const s = scores[id] || {};
-    const stars = s.avgRating ? '⭐'.repeat(Math.round(s.avgRating)) : '';
-    console.log(`  ${id}: ${a.type} - ${a.name}`);
-    if (s.avgRating) {
-      console.log(`     评分: ${s.avgRating}/10 ${stars} (${s.tasksCompleted}任务)`);
-    }
-  }
-}
+  // =============================================================
+  // DLQ 命令
+  // =============================================================
+  case 'dlq': {
+    const sub = args[0];
 
-// 创建任务
-else if (cmd === 'create') {
-  const description = args.slice(1).join(' ');
-  const tasks = loadTasks();
-  
-  // 获取下一个任务序号
-  const taskNum = getNextTaskNum();
-  const taskId = generateId();
-  
-  const task = {
-    id: taskId,
-    shortId: `T-${taskNum.toString().padStart(3, '0')}`,
-    taskNum: taskNum,
-    description,
-    type: 'general',
-    status: 'pending',
-    createdAt: new Date().toISOString(),
-    assignedTo: null,
-    startedAt: null,
-    completedAt: null
-  };
-  tasks.push(task);
-  saveTasks(tasks);
-  
-  // 自动创建任务目录
-  const { dirName, taskPath } = createTaskDir(taskId, description, taskNum);
-  
-  console.log(`✅ 任务: ${task.id} [${task.shortId}]`);
-  console.log(`   ${task.description}`);
-  console.log(`   📁 目录: ${taskPath}`);
-}
-
-// 执行任务 (自动识别类型 + 显示执行指令)
-else if (cmd === 'execute') {
-  const description = args.slice(1).join(' ');
-  if (!description) return console.log('用法: atf execute <描述>');
-  
-  // 1. 识别类型
-  const taskType = detectTaskType(description);
-  const exec = getExecutorCommand(taskType, description);
-  
-  // 2. 创建任务
-  const taskNum = getNextTaskNum();
-  const taskId = generateId();
-  const tasks = loadTasks();
-  const task = {
-    id: taskId,
-    shortId: `T-${taskNum.toString().padStart(3, '0')}`,
-    taskNum: taskNum,
-    description,
-    type: taskType,
-    status: 'pending',
-    executor: exec.executor,
-    createdAt: new Date().toISOString(),
-    assignedTo: null,
-    startedAt: null,
-    completedAt: null
-  };
-  tasks.push(task);
-  saveTasks(tasks);
-  
-  // 3. 创建目录
-  createTaskDir(taskId, description, taskNum);
-  
-  // 4. 输出路由信息
-  console.log(`\n🤖 ATF 任务路由`);
-  console.log(`================`);
-  console.log(`📝 任务: ${description}`);
-  console.log(`🏷️  类型: ${taskType}`);
-  console.log(`⚙️  执行: ${exec.executor}`);
-  
-  // 根据执行方式显示不同指令
-  if (exec.useExec) {
-    console.log(`\n📋 Exec 指令 (Claude Code):`);
-    console.log(`   ${exec.execCmd}`);
-    console.log(`\n⚠️  注意: ACP spawn 有技术限制，使用 exec fallback`);
-  } else {
-    console.log(`\n📋 Spawn 指令:`);
-    console.log(`   ${exec.curlCmd}`);
-  }
-  
-  console.log(`\n✅ 任务已创建: ${task.shortId}`);
-  console.log(`   等待执行后更新状态`);
-}
-
-// 显示任务路由
-else if (cmd === 'route') {
-  const [taskId] = args.slice(1);
-  if (!taskId) return console.log('用法: atf route <taskId>');
-  
-  const tasks = loadTasks();
-  const task = tasks.find(t => t.id === taskId || t.shortId === taskId);
-  if (!task) return console.log(`❌ 任务不存在: ${taskId}`);
-  
-  const taskType = task.type || detectTaskType(task.description);
-  const exec = getExecutorCommand(taskType, task.description);
-  
-  console.log(`\n📋 任务路由信息`);
-  console.log(`================`);
-  console.log(`ID: ${task.id} [${task.shortId}]`);
-  console.log(`描述: ${task.description}`);
-  console.log(`类型: ${taskType}`);
-  console.log(`执行: ${exec.executor}`);
-  console.log(`\nSpawn: ${exec.curlCmd}`);
-}
-
-// 分配任务 (这里返回任务ID，由主会话去 spawn 子任务)
-else if (cmd === 'assign') {
-  const [taskId, agentId] = args.slice(1);
-  const agents = loadAgents();
-  if (!agents[agentId]) return console.log(`❌ 未注册: ${agentId}`);
-  
-  const tasks = loadTasks();
-  const task = tasks.find(t => t.id === taskId);
-  if (!task) return console.log(`❌ 任务不存在`);
-  
-  task.assignedTo = agentId;
-  task.status = 'assigned';
-  task.assignedAt = new Date().toISOString();
-  saveTasks(tasks);
-  
-  console.log(`✅ 已分配: ${taskId} -> ${agentId}`);
-  console.log(`   请用 sessions_spawn 创建子任务执行`);
-}
-
-// 更新状态
-else if (cmd === 'update') {
-  const [taskId, status] = args.slice(1);
-  const tasks = loadTasks();
-  const task = tasks.find(t => t.id === taskId);
-  if (!task) return console.log(`❌ 任务不存在`);
-  
-  task.status = status;
-  if (status === 'done' || status === 'failed') {
-    task.completedAt = new Date().toISOString();
-  }
-  saveTasks(tasks);
-  console.log(`✅ ${taskId}: ${status}`);
-  
-  // 同时更新 context.json
-  const dirs = fs.readdirSync(TASKS_DIR).filter(d => 
-    fs.statSync(path.join(TASKS_DIR, d)).isDirectory()
-  );
-  let taskDir = null;
-  for (const dir of dirs) {
-    const contextPath = path.join(TASKS_DIR, dir, 'context.json');
-    if (fs.existsSync(contextPath)) {
-      try {
-        const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
-        if (ctx.task_id === taskId) {
-          taskDir = path.join(TASKS_DIR, dir);
-          break;
-        }
-      } catch (e) {}
-    }
-  }
-  
-  if (taskDir) {
-    const contextPath = path.join(taskDir, 'context.json');
-    try {
-      const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
-      ctx.status = status;
-      ctx.updated_at = new Date().toISOString();
-      fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
-      console.log(`   📄 context.json 已更新`);
-    } catch (e) {
-      console.log(`   ⚠️ context.json 更新失败: ${e.message}`);
-    }
-  }
-}
-
-// 验证 context.json schema
-else if (cmd === 'validate') {
-  const dirs = fs.readdirSync(TASKS_DIR).filter(d => {
-    return fs.statSync(path.join(TASKS_DIR, d)).isDirectory();
-  });
-  
-  const validStatuses = ['created', 'planned', 'assigned', 'executing', 'blocked', 'review', 'completed', 'archived'];
-  let valid = 0, invalid = 0, errors = [];
-  
-  for (const dir of dirs) {
-    const contextPath = path.join(TASKS_DIR, dir, 'context.json');
-    if (!fs.existsSync(contextPath)) {
-      errors.push(`${dir}: 缺少 context.json`);
-      invalid++;
-      continue;
-    }
-    
-    try {
-      const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
-      if (!ctx.schema_version) {
-        errors.push(`${dir}: 缺少 schema_version`);
-        invalid++;
-      } else if (!validStatuses.includes(ctx.status)) {
-        errors.push(`${dir}: 无效状态 "${ctx.status}"`);
-        invalid++;
-      } else {
-        valid++;
+    // atf dlq list
+    if (sub === 'list') {
+      if (!fs.existsSync(DLQ_DIR)) { console.log('DLQ 队列为空'); break; }
+      const files = fs.readdirSync(DLQ_DIR).filter(f => f.endsWith('.json'));
+      if (!files.length) { console.log('DLQ 队列为空'); break; }
+      console.log(`\nDLQ 队列 (${files.length} 个)\n`);
+      console.log('任务ID      指派        重试       原因');
+      console.log('─'.repeat(75));
+      for (const f of files.sort()) {
+        const d = loadJson(`${DLQ_DIR}/${f}`);
+        if (!d) continue;
+        const id = (d.short_id||d.task_id||f.replace('.json','')).padEnd(12);
+        const agt = (d.assigned_to||'-').padEnd(12);
+        const r = `${d.retry_count||0}/${d.protocol?.max_retries||3}`.padEnd(10);
+        const reason = (d.dlq_reason||'-').substring(0,40);
+        console.log(`${id}  ${agt}  ${r}  ${reason}`);
       }
-    } catch (e) {
-      errors.push(`${dir}: JSON 解析错误 - ${e.message}`);
-      invalid++;
+      console.log('');
+      break;
     }
-  }
-  
-  console.log(`\\n📋 Schema 验证结果`);
-  console.log(`   ✅ 有效: ${valid}`);
-  console.log(`   ❌ 无效: ${invalid}`);
-  if (errors.length > 0) {
-    console.log(`\\n错误列表:`);
-    errors.forEach(e => console.log(`   - ${e}`));
-  }
-}
 
-// 任务依赖管理
-else if (cmd === 'depend') {
-  const [taskId, depType, depTaskId] = args.slice(1);
-  
-  if (!taskId || !depType) {
-    return console.log(`用法: atf depend <task_id> add|remove|list [depends_on_task_id]`);
-  }
-  
-  // 查找任务目录
-  const dirs = fs.readdirSync(TASKS_DIR).filter(d => 
-    fs.statSync(path.join(TASKS_DIR, d)).isDirectory()
-  );
-  
-  let targetDir = null;
-  for (const dir of dirs) {
-    const contextPath = path.join(TASKS_DIR, dir, 'context.json');
-    if (fs.existsSync(contextPath)) {
-      const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
-      if (ctx.task_id === taskId) {
-        targetDir = path.join(TASKS_DIR, dir);
+    if (!args[0] || !args[1]) {
+      console.error('用法: atf dlq list | atf dlq show|retry|skip|cancel <taskId>'); break;
+    }
+    const [dlqCmd, shortId] = args;
+    // find DLQ file by short_id or task_id
+    let dlqFile = `${DLQ_DIR}/${shortId}.json`;
+    if (!fs.existsSync(dlqFile)) {
+      // reverse lookup by short_id
+      let found = null;
+      if (fs.existsSync(DLQ_DIR)) {
+        for (const f of fs.readdirSync(DLQ_DIR).filter(f => f.endsWith('.json'))) {
+          const d = loadJson(`${DLQ_DIR}/${f}`);
+          if (d && (d.short_id === shortId || d.task_id === shortId)) { found = f; break; }
+        }
+      }
+      if (!found) { console.error(`❌ DLQ 任务不存在: ${shortId}`); break; }
+      dlqFile = `${DLQ_DIR}/${found}`;
+    }
+    const dlq = loadJson(dlqFile);
+    // dir_name = 真正的任务目录名，如 "48-DLQ-催办链路测试"
+    const taskId = dlq.dir_name || dlq.short_id || shortId;
+
+    // atf dlq show <taskId>
+    if (dlqCmd === 'show') {
+      console.log(JSON.stringify(dlq, null, 2));
+      break;
+    }
+
+    // atf dlq retry <taskId>
+    if (dlqCmd === 'retry') {
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      const newRetry = (dlq.retry_count||0) + 1;
+      const maxRetries = dlq.protocol?.max_retries || 3;
+      if (newRetry > maxRetries) {
+        console.log(`❌ 已达最大重试次数 ${maxRetries}，无法重试`);
+        console.log('用 atf dlq skip 跳过 或 atf dlq cancel 取消');
         break;
       }
+      ctx.status = 'assigned';
+      ctx.protocol = ctx.protocol || {};
+      ctx.protocol.retry_count = newRetry;
+      ctx.dlq_entry = null;
+      ctx.updated_at = new Date().toISOString();
+      writeCtx(taskId, ctx);
+      fs.unlinkSync(dlqFile);
+      // 写 pending-task.json 通知 agent
+      const ws = ctx.assigned_to === 'f0x'
+        ? '/root/.openclaw/workspace-f0x'
+        : '/root/.openclaw/workspace-acestock';
+      const pending = {
+        task_id: ctx.task_id,
+        description: ctx.description,
+        assigned_at: new Date().toISOString(),
+        retry_count: newRetry,
+      };
+      fs.writeFileSync(`${ws}/pending-task.json`, JSON.stringify(pending, null, 2));
+      console.log(`✅ ${taskId} 重试 (${newRetry}/${maxRetries})，已写入 pending-task.json`);
+      console.log(`   → ${ws}/pending-task.json`);
+      break;
     }
+
+    // atf dlq skip <taskId>  → archived
+    if (dlqCmd === 'skip') {
+      const ctx = readCtx(taskId);
+      if (ctx) { ctx.status = 'archived'; writeCtx(taskId, ctx); }
+      fs.unlinkSync(dlqFile);
+      console.log(`✅ ${taskId} 已跳过 (archived)`);
+      break;
+    }
+
+    // atf dlq cancel <taskId> → cancelled
+    if (dlqCmd === 'cancel') {
+      const ctx = readCtx(taskId);
+      if (ctx) { ctx.status = 'cancelled'; writeCtx(taskId, ctx); }
+      fs.unlinkSync(dlqFile);
+      console.log(`✅ ${taskId} 已取消`);
+      break;
+    }
+
+    console.error('用法: atf dlq list | atf dlq show|retry|skip|cancel <taskId>');
+    break;
   }
-  
-  if (!targetDir) return console.log(`❌ 任务不存在: ${taskId}`);
-  
-  const contextPath = path.join(targetDir, 'context.json');
-  const ctx = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
-  
-  if (depType === 'list') {
-    console.log(`\\n📋 任务依赖: ${taskId}`);
-    console.log(`   依赖: ${ctx.dependencies?.length ? ctx.dependencies.join(', ') : '无'}`);
-    // 反向查找依赖此任务的任务
-    let dependents = [];
-    for (const dir of dirs) {
-      const otherPath = path.join(TASKS_DIR, dir, 'context.json');
-      if (fs.existsSync(otherPath)) {
-        const other = JSON.parse(fs.readFileSync(otherPath, 'utf8'));
-        if (other.dependencies?.includes(taskId)) {
-          dependents.push(other.task_id);
+
+  // =============================================================
+  // learnings 命令 - 岚遥进化机制核心
+  // =============================================================
+  case 'learnings': {
+    const [sub, ...restArgs] = args;
+    const WORKSPACES = [
+      '/root/.openclaw/workspace',
+      '/root/.openclaw/workspace-f0x',
+      '/root/.openclaw/workspace-acestock',
+    ];
+    const TYPES = {
+      errors: { file: 'ERRORS.md', name: 'ERROR' },
+      learnings: { file: 'LEARNINGS.md', name: 'LEARN' },
+      features: { file: 'FEATURES.md', name: 'FEATURE' },
+    };
+    const today = new Date().toISOString().substring(0,10).replace(/-/g,'');
+    const seq = String(Math.floor(Math.random()*999)+1).padStart(3,'0');
+    const lrnId = `LRN-${today}-${seq}`;
+
+    if (sub === 'scan') {
+      const total = { errors: 0, learnings: 0, features: 0 };
+      const seen = new Map(); // body前80字符 -> [{ws, type, body}]
+      for (const ws of WORKSPACES) {
+        const ldir = path.join(ws, '.learnings');
+        if (!fs.existsSync(ldir)) continue;
+        for (const [key, t] of Object.entries(TYPES)) {
+          const fpath = path.join(ldir, t.file);
+          if (!fs.existsSync(fpath)) continue;
+          const content = fs.readFileSync(fpath, 'utf-8');
+          // 匹配每个 [LRN-YYYYMMDD-NNN] 条目（到下一个 [LRN- 或文件末尾）
+          const regex = /\[LRN-(\d{8})-(\d+)\]\n([\s\S]*?)(?=\n\[LRN-\d{8}-\d+\]|\n#+[^\n]*\n|$)/g;
+          let m;
+          while ((m = regex.exec(content)) !== null) {
+            const body = m[3].trim();
+            if (!body) continue;
+            total[key]++;
+            const k = body.substring(0,80).replace(/\s/g,'');
+            if (!seen.has(k)) seen.set(k,[]);
+            seen.get(k).push({ws: path.basename(ws), type: key, body});
+          }
         }
       }
+      console.log('\nlearnings scan');
+      for (const [k,v] of Object.entries(total)) console.log(`  ${k}: ${v} entries`);
+      const promotable = [...seen.entries()].filter(([,occ])=>occ.length>=3);
+      if (promotable.length) {
+        console.log(`\n  可promote（≥3次）:`);
+        for (const [body, occ] of promotable) {
+          const r = occ[0];
+          const agents = [...new Set(occ.map(e=>e.ws))].join(',');
+          console.log(`    [${r.type.toUpperCase()}] ×${occ.length} | ${r.body.substring(0,50)}... | ${agents}`);
+        }
+      } else {
+        console.log(`  可promote: 0 条（出现≥3次）`);
+      }
+      break;
     }
-    console.log(`   被依赖: ${dependents.length ? dependents.join(', ') : '无'}`);
-    return;
-  }
-  
-  if (depType === 'add') {
-    if (!depTaskId) return console.log(`用法: atf depend ${taskId} add <depends_on_task_id>`);
-    
-    // 检查被依赖的任务是否存在
-    let depExists = false;
-    for (const dir of dirs) {
-      const otherPath = path.join(TASKS_DIR, dir, 'context.json');
-      if (fs.existsSync(otherPath)) {
-        const other = JSON.parse(fs.readFileSync(otherPath, 'utf8'));
-        if (other.task_id === depTaskId) {
-          depExists = true;
-          break;
+
+    if (sub === 'add') {
+      const [type, ...bodyParts] = restArgs;
+      if (!type || !bodyParts.length) {
+        console.error('用法: atf learnings add errors|learnings|features <内容>'); break;
+      }
+      const t = TYPES[type.toLowerCase()];
+      if (!t) { console.error('类型: errors|learnings|features'); break; }
+      const ws = process.cwd();
+      // 找 workspace
+      let foundWs = null;
+      for (const w of WORKSPACES) {
+        if (ws.startsWith(w) || w.startsWith(ws.substring(0,20))) { foundWs = w; break; }
+      }
+      const targetWs = foundWs || WORKSPACES[0];
+      const ldir = path.join(targetWs, '.learnings');
+      if (!fs.existsSync(ldir)) fs.mkdirSync(ldir, { recursive: true });
+      const fpath = path.join(ldir, t.file);
+      const body = bodyParts.join(' ');
+      const entry = `\n[${lrnId}]
+${body}\n`;
+      fs.appendFileSync(fpath, entry);
+      console.log(`✅ [${lrnId}] 写入 ${targetWs}/.learnings/${t.file}`);
+      console.log(`   ${t.name}: ${body.substring(0,80)}${body.length>80?'...':''}`);
+      break;
+    }
+
+    if (sub === 'list') {
+      console.log('\nlearnings 列表\n');
+      for (const ws of WORKSPACES) {
+        const ldir = path.join(ws, '.learnings');
+        if (!fs.existsSync(ldir)) continue;
+        console.log(`workspace: ${path.basename(ws)}`);
+        for (const [key, t] of Object.entries(TYPES)) {
+          const fpath = path.join(ldir, t.file);
+          if (!fs.existsSync(fpath)) continue;
+          const lines = fs.readFileSync(fpath,'utf-8').split('\n');
+          let count = 0, promoted = 0;
+          for (const l of lines) {
+            if (l.match(/^\[LRN-\d{8}-\d+\]/)) count++;
+            if (l.includes('[PROMOTED]')) promoted++;
+          }
+          console.log(`  ${t.name}: ${count} (promoted: ${promoted})`);
         }
       }
+      break;
     }
-    if (!depExists) return console.log(`❌ 依赖的任务不存在: ${depTaskId}`);
-    
-    if (!ctx.dependencies) ctx.dependencies = [];
-    if (!ctx.dependencies.includes(depTaskId)) {
-      ctx.dependencies.push(depTaskId);
-      ctx.updated_at = new Date().toISOString();
-      fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
-      console.log(`✅ 已添加依赖: ${taskId} → ${depTaskId}`);
-    } else {
-      console.log(`ℹ️ 依赖已存在: ${taskId} → ${depTaskId}`);
+
+    if (sub === 'promote') {
+      // 调用 learnings-promote.cjs --promote
+      const { execSync } = require('child_process');
+      const out = execSync(`node /root/.openclaw/workspace/bin/learnings-promote.cjs --promote`, { encoding:'utf-8' });
+      console.log(out);
+      break;
     }
-    return;
-  }
-  
-  if (depType === 'remove') {
-    if (!depTaskId) return console.log(`用法: atf depend ${taskId} remove <depends_on_task_id>`);
-    
-    if (ctx.dependencies && ctx.dependencies.includes(depTaskId)) {
-      ctx.dependencies = ctx.dependencies.filter(d => d !== depTaskId);
-      ctx.updated_at = new Date().toISOString();
-      fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
-      console.log(`✅ 已移除依赖: ${taskId} → ${depTaskId}`);
-    } else {
-      console.log(`ℹ️ 依赖不存在: ${taskId} → ${depTaskId}`);
-    }
-    return;
-  }
-  
-  console.log(`用法: atf depend <task_id> add|remove|list [depends_on_task_id]`);
-}
 
-// 评分
-else if (cmd === 'rate') {
-  const [taskId, rating, ...reason] = args.slice(1);
-  const r = parseInt(rating);
-  if (r < 1 || r > 10) return console.log('评分 1-10');
-  
-  const result = rateTask(taskId, r, reason.join(' '));
-  if (result.error) return console.log(`❌ ${result.error}`);
-  
-  console.log(`✅ 评分: ${r}/10`);
-  console.log(`   Agent: ${result.agentId}`);
-  console.log(`   平均: ${result.avgRating}/10`);
-}
-
-// 任务列表
-else if (cmd === 'list') {
-  const args = process.argv.slice(3);
-  const showAll = args.includes('all') || args.includes('-a');
-  const knownFlags = ['all', '-a', '-h', '--help'];
-  const filter = args.find(a => !a.startsWith('-') && !knownFlags.includes(a)) || '';
-  
-  let tasks = loadTasks();
-  const statusIcon = { pending: '⏳', assigned: '📤', running: '🔄', done: '✅', failed: '❌' };
-  
-  // 过滤任务
-  if (!showAll) {
-    // 默认只显示未完成的任务
-    tasks = tasks.filter(t => t.status !== 'done' && t.status !== 'failed');
+    console.error('用法:\n  atf learnings add errors|learnings|features <内容>  记录一条\n  atf learnings list                               查看列表\n  atf learnings scan                               扫描统计\n  atf learnings promote                            执行 promote');
+    break;
   }
-  
-  // 搜索过滤
-  if (filter) {
-    tasks = tasks.filter(t => 
-      t.description.toLowerCase().includes(filter.toLowerCase())
-    );
+
+  // ── 标记已送达（completed ≠ delivered）────────────────────
+  case 'delivered': {
+    const taskId = args[0];
+    if (!taskId) { console.error('用法: atf delivered <taskId>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    ctx.status = 'delivered';
+    ctx.protocol = ctx.protocol || {};
+    ctx.protocol.delivery_status = 'delivered';
+    writeCtx(taskId, ctx);
+    const hf = `${TASKS_DIR}/${taskId}/notifications/history.json`;
+    const h = loadJson(hf)||[]; h.push({event:'delivered',at:new Date().toISOString()}); saveJson(hf,h.slice(-50));
+    console.log(`✅ ${taskId} → delivered`);
+    break;
   }
-  
-  // 按 taskNum 排序
-  tasks.sort((a, b) => (a.taskNum || 999) - (b.taskNum || 999));
-  
-  console.log(`📋 任务${showAll ? ' (全部)' : ' (未完成)'}:\n`);
-  
-  if (tasks.length === 0) {
-    console.log('  (无)');
-    return;
+
+  // ── DRI（唯一责任人）─────────────────────────────────────
+  case 'dri': {
+    const [taskId, driAgent] = args;
+    if (!taskId) { console.error('用法: atf dri <taskId> [agent]'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    if (!driAgent) { console.log(`DRI: ${ctx.dri||'-'}  (非DRI只能补充，不能覆盖结论)`); break; }
+    ctx.dri = driAgent;
+    writeCtx(taskId, ctx);
+    console.log(`✅ ${taskId} DRI → ${driAgent}`);
+    break;
   }
-  
-  tasks.forEach((t) => {
-    const icon = statusIcon[t.status] || '❓';
-    const taskNum = t.taskNum ? String(t.taskNum).padStart(2, ' ') : '  ';
-    console.log(`${taskNum}. ${icon} [${t.status}]`);
-    console.log(`    ${t.description}`);
-    if (t.assignedTo) console.log(`    -> ${t.assignedTo}`);
-    if (t.rating) console.log(`    ⭐ ${t.rating}/10`);
-    console.log('');
-  });
-  
-  // 显示帮助
-  if (args.includes('-h') || args.includes('--help')) {
-    console.log('用法:');
-    console.log('  atf list          - 显示未完成任务');
-    console.log('  atf list all     - 显示全部任务');
-    console.log('  atf list <关键词> - 搜索任务');
-    console.log('  atf list -h      - 显示帮助');
-  }
-}
 
-// 统计
-else if (cmd === 'stats') {
-  const tasks = loadTasks();
-  const scores = loadScores();
-  const byStatus = {};
-  tasks.forEach(t => byStatus[t.status] = (byStatus[t.status] || 0) + 1);
-  
-  console.log('📊 统计:\n');
-  console.log(`  总任务: ${tasks.length}`);
-  console.log(`  待处理: ${byStatus.pending || 0}`);
-  console.log(`  进行中: ${byStatus.running || 0}`);
-  console.log(`  已完成: ${byStatus.done || 0}`);
-  console.log(`  失败: ${byStatus.failed || 0}`);
-  console.log(`  Agents: ${Object.keys(scores).length}`);
-}
+  // ── block：阻塞任务，等待 Vinson 决策 ─────────────────────
+  case 'block': {
+    const [taskId, ...questionParts] = args;
+    if (!taskId || !questionParts.length) { console.error('用法: atf block <taskId> <问题>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    const question = questionParts.join(' ');
+    const now = new Date().toISOString();
 
-// 查看评分
-else if (cmd === 'score') {
-  const agentId = args[1];
-  const scores = loadScores();
-  const s = scores[agentId];
-  if (!s) return console.log('无评分记录');
-  
-  console.log(`📊 ${agentId} 评分:\n`);
-  console.log(`  总分: ${s.totalScore}`);
-  console.log(`  任务: ${s.tasksCompleted}`);
-  console.log(`  平均: ${s.avgRating.toFixed(1)}/10`);
-  console.log(`\n历史:`);
-  s.ratings.forEach(r => {
-    console.log(`  ⭐${r.rating}: ${r.reason || '(无评语)'}`);
-  });
-}
+    // 更新 ctx
+    ctx.status = 'blocked';
+    ctx.decision = { status: 'waiting', question, asked_at: now };
+    writeCtx(taskId, ctx);
 
-else {
-  console.log(`未知命令: ${cmd}`);
-}
-
-// 同步任务到目录
-if (cmd === 'sync') {
-  const tasks = loadTasks();
-  console.log(`📂 同步任务到 ${TASKS_DIR}\n`);
-  
-  let count = 0;
-  tasks.forEach(task => {
-    // 如果任务有 taskNum，使用它；否则根据创建时间估算
-    const taskNum = task.taskNum || null;
-    const result = createTaskDir(task.id, task.description, taskNum);
-    if (!result.exists) {
-      console.log(`  ✅ ${result.dirName}`);
-      count++;
-    }
-  });
-  
-  console.log(`\n已创建 ${count} 个任务目录`);
-  console.log(`\n目录结构:`);
-  
-  // 列出所有目录
-  if (fs.existsSync(TASKS_DIR)) {
-    const dirs = fs.readdirSync(TASKS_DIR).sort();
-    dirs.forEach(d => {
-      const taskPath = path.join(TASKS_DIR, d);
-      if (fs.statSync(taskPath).isDirectory()) {
-        const files = fs.readdirSync(taskPath);
-        console.log(`  📁 ${d}/ (${files.length} 文件)`);
+    // 写 pending-decisions.md（供 Watcher 检查并通知 Vinson）
+    const pdPath = '/root/.openclaw/workspace/pending-decisions.md';
+    const entry = {
+      task_id: taskId,
+      description: ctx.description,
+      status: 'waiting',
+      question,
+      asked_by: ctx.assigned_to || 'pinchymeow',
+      asked_at: now,
+    };
+    let pdList = [];
+    if (fs.existsSync(pdPath)) {
+      const content = fs.readFileSync(pdPath, 'utf-8');
+      // 提取现有 JSON 块
+      const matches = [...content.matchAll(/```json\n({[\s\S]*?})\n```/g)];
+      for (const m of matches) {
+        try { pdList.push(JSON.parse(m[1])); } catch {}
       }
-    });
+    }
+    // 替换同 task_id 条目或追加
+    pdList = pdList.filter(p => p.task_id !== taskId);
+    pdList.push(entry);
+    const md = `# Pending Decisions - 待决策事项\n\n**最后更新**: ${now}\n\n---\n\n## 当前议项\n\n${pdList.filter(p => p.status === 'waiting').map(p => `- **[${p.task_id}]** ${p.question}\n  - 任务: ${p.description}\n  - 来自: ${p.asked_by}`).join('\n\n')}\n\n---\n\n## 已关闭议题\n\n${pdList.filter(p => p.status !== 'waiting').map(p => `- ~~${p.task_id}: ${p.question} → **${p.status}** (${p.answer || p.feedback||''})`).join('\n')}\n\n---\n\n## 决策记录\n\n${pdList.filter(p => p.status !== 'waiting').map(p => `### ${p.task_id} - ${p.decided_at||p.asked_at}\n\n**问题**: ${p.question}\n\n**结论**: ${p.answer || p.feedback}\n\n**决策者**: Vinson\n`).join('\n---\n')}\n`;
+    fs.writeFileSync(pdPath, md);
+
+    // Write JSON for Watcher
+    const pdJsonPath = '/root/.openclaw/workspace/pending-decisions.json';
+    const jEntry = {
+      task_id: taskId, description: ctx.description, status: 'waiting',
+      question, asked_by: ctx.assigned_to || 'pinchymeow', asked_at: now,
+    };
+    let jList = loadJson(pdJsonPath) || [];
+    jList = jList.filter(p => p.task_id !== taskId);
+    jList.push(jEntry);
+    saveJson(pdJsonPath, jList);
+
+    // 删除 pending-task.json（阻塞时不让 agent 继续拿任务）
+    const dir = dirOfTaskId(taskId);
+    const ptPath = `${TASKS_DIR}/${dir}/pending-task.json`;
+    if (fs.existsSync(ptPath)) fs.unlinkSync(ptPath);
+
+    console.log(`✅ ${taskId} 已阻塞，等待决策`);
+    console.log(`   问题: ${question}`);
+    console.log(`   → pending-decisions.md 已更新`);
+    break;
   }
+
+  // ── decide：Vinson 回答，继续执行 ────────────────────────
+  case 'decide': {
+    const [taskId, ...answerParts] = args;
+    if (!taskId || !answerParts.length) { console.error('用法: atf decide <taskId> <回答>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    if (ctx.decision?.status !== 'waiting') { console.error('❌ 该任务没有等待中的决策'); break; }
+    const answer = answerParts.join(' ');
+    const now = new Date().toISOString();
+
+    // 更新 ctx
+    ctx.status = 'assigned';
+    ctx.decision = { status: 'decided', question: ctx.decision.question, answer, decided_at: now };
+    writeCtx(taskId, ctx);
+
+    // 写 pending-task.json 恢复 agent 执行
+    const dir = dirOfTaskId(taskId);
+    const ptPath = `${TASKS_DIR}/${dir}/pending-task.json`;
+    const pending = {
+      task_id: taskId,
+      assigned_to: ctx.assigned_to,
+      description: ctx.description,
+      instructions: ctx.instructions || null,
+      decision: { type: 'answered', question: ctx.decision.question, answer },
+      created_by: 'pinchymeow',
+      created_at: now,
+    };
+    fs.writeFileSync(ptPath, JSON.stringify(pending, null, 2));
+
+    // Update pending-decisions.json (Watcher reads this)
+    const pdJsonPath = '/root/.openclaw/workspace/pending-decisions.json';
+    const q = ctx.decision.question;
+    const entry = {
+      task_id: taskId, description: ctx.description, status: 'decided',
+      question: q, answer, asked_by: ctx.assigned_to || 'pinchymeow',
+      asked_at: ctx.decision.asked_at, decided_at: now,
+    };
+    let pdList = loadJson(pdJsonPath) || [];
+    pdList = pdList.filter(p => p.task_id !== taskId);
+    pdList.push(entry);
+    saveJson(pdJsonPath, pdList);
+
+
+    console.log(`✅ ${taskId} 决策已收到，继续执行`);
+    console.log(`   问题: ${ctx.decision.question}`);
+    console.log(`   回答: ${answer}`);
+    console.log(`   → pending-task.json 已写入，agent 继续执行`);
+    break;
+  }
+
+  // ── revise：Vinson 不满意，打回重做 ─────────────────────
+  case 'revise': {
+    const [taskId, ...feedbackParts] = args;
+    if (!taskId || !feedbackParts.length) { console.error('用法: atf revise <taskId> <反馈>'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    const feedback = feedbackParts.join(' ');
+    const now = new Date().toISOString();
+
+    // 更新 ctx
+    ctx.status = 'assigned';
+    ctx.decision = { status: 'needs_revision', feedback, revised_at: now };
+    writeCtx(taskId, ctx);
+
+    // 写 pending-task.json 通知 agent 重做
+    const dir = dirOfTaskId(taskId);
+    const ptPath = `${TASKS_DIR}/${dir}/pending-task.json`;
+    const pending = {
+      task_id: taskId,
+      assigned_to: ctx.assigned_to,
+      description: ctx.description,
+      instructions: ctx.instructions || null,
+      decision: { type: 'revision', feedback },
+      created_by: 'pinchymeow',
+      created_at: now,
+    };
+    fs.writeFileSync(ptPath, JSON.stringify(pending, null, 2));
+
+    console.log(`✅ ${taskId} 已打回重做`);
+    console.log(`   反馈: ${feedback}`);
+    console.log(`   → pending-task.json 已写入，agent 重新执行`);
+    break;
+  }
+
+  default:
+    console.error(`未知命令: ${cmd}`);
+    console.error('用法: atf create|list|status|assign|update|fan-out|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
 }

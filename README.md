@@ -4,6 +4,19 @@
 
 **状态：运行中（v2，2026-04-11 重构）**
 
+## 指导文档
+
+以下文档用于沉淀当前阶段的产品判断和未来方向：
+
+- [docs/README.md](./docs/README.md) - 指导文档索引
+- [docs/ATF_PRODUCT_GUIDE.md](./docs/ATF_PRODUCT_GUIDE.md) - 当前产品定义与边界
+- [docs/ATF_BUSINESS_STRATEGY.md](./docs/ATF_BUSINESS_STRATEGY.md) - 商业价值与演进路径
+- [docs/ATF_AUTONOMY_ROADMAP.md](./docs/ATF_AUTONOMY_ROADMAP.md) - 自主能力缺口与路线图
+- [docs/ATF_CAPABILITY_EVOLUTION.md](./docs/ATF_CAPABILITY_EVOLUTION.md) - 从当前实现到长期能力体系的演进图
+- [docs/ATF_EXTERNAL_REFERENCES.md](./docs/ATF_EXTERNAL_REFERENCES.md) - Clawith、BotCord 等外部参考及可吸收点
+- [docs/ATF_RUNTIME_USAGE.md](./docs/ATF_RUNTIME_USAGE.md) - 当前 CLI 的实际调用说明
+- [docs/ATF_WATCHER_INTEGRATION.md](./docs/ATF_WATCHER_INTEGRATION.md) - cron / watcher / heartbeat 集成说明
+
 ---
 
 ## 核心文件
@@ -11,7 +24,7 @@
 | 文件 | 说明 |
 |------|------|
 | `atf-cli.js` | CLI 入口，所有命令 |
-| `workspace/bin/atf-watcher.cjs` | 状态监控 + 超时 DLQ + 通知 |
+| `workspace/bin/atf-watcher.cjs` | 由 cron 驱动的扫描脚本：状态监控 + 超时 DLQ + 通知 |
 | `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
 | `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
 
@@ -24,7 +37,7 @@ atf create "描述"  → ctx.json + pending-task.json
 atf assign T-X f0x → ctx.assigned_to + pending-task.json
 F0x scan          → 发现 pending-task.json → 查 ctx.status → 执行
 F0x               → atf update T-X completed
-Watcher           → 检测 completed → 通知 PinchyMeow → Vinson 确认 delivered
+Watcher(cron scan) → 检测 completed / timeout → 通知 / 催办 / DLQ
 ```
 
 **状态机：**
@@ -51,6 +64,34 @@ node atf-cli.js update <taskId> <status> # 更新状态（pause/assigned/complet
 node atf-cli.js fan-out <taskId> <a1,a2> # fan-out 分发
 node atf-cli.js delivered <taskId>       # 标记已送达（Vinson 确认）
 node atf-cli.js dri <taskId> [agent]     # 设置/查看 DRI
+node atf-cli.js focus add <taskId> <owner> <title>            # 创建 Focus Item
+node atf-cli.js focus list <taskId> [owner]                   # 列出 Focus Items
+node atf-cli.js focus show <taskId> <focusId>                 # 查看 Focus Item
+node atf-cli.js focus update <taskId> <focusId> <status> [nextAction] # 更新 Focus
+node atf-cli.js trigger add <taskId> <owner> <type> <spec> [focus=FOC-...] # 创建 Trigger
+node atf-cli.js trigger list <taskId> [owner]                 # 列出 Triggers
+node atf-cli.js trigger inbox <agent> [taskId]                # 查看 agent 待处理 Trigger fires
+node atf-cli.js trigger rebuild-index                         # 重建全局 Trigger fire 索引
+node atf-cli.js trigger due <taskId> [owner] [at=ISO]         # 查看已到期 Trigger
+node atf-cli.js trigger scan <taskId> [owner] [at=ISO]        # 扫描并触发当前任务的已到期 Trigger
+node atf-cli.js trigger scan-all [owner] [at=ISO]             # 扫描并触发所有任务的已到期 Trigger
+node atf-cli.js trigger show <taskId> <triggerId>             # 查看 Trigger
+node atf-cli.js trigger update <taskId> <triggerId> <status>  # 更新 Trigger
+node atf-cli.js trigger fire <taskId> <triggerId> <sourceType> [ref=...] [note] # 手动记录 Trigger firing
+node atf-cli.js trigger fires <taskId> [triggerId] [status]   # 查看 Trigger firing 记录
+node atf-cli.js trigger consume <taskId> <fireId> <consumer> [result] # 标记 Trigger firing 已消费
+node atf-cli.js trigger ignore <taskId> <fireId> <consumer> [reason] # 标记 Trigger firing 已忽略
+node atf-cli.js reflect add <taskId> <author> <field> <内容> [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...] # 添加 Reflection
+node atf-cli.js reflect from-fire <taskId> <fireId> <author> <field> <内容> # 从 Trigger fire 创建 Reflection
+node atf-cli.js reflect list <taskId> [field] [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...] # 查看 Reflections
+node atf-cli.js reflect show <taskId> <reflectionId>          # 查看 Reflection
+node atf-cli.js shared add <taskId> <author> <type> <内容>    # 添加共享上下文
+node atf-cli.js shared list <taskId> [type]                   # 查看共享上下文
+node atf-cli.js msg send <taskId> <from> <to> <type> <内容> [focus=FOC-...] [thread=...] [reply=MSG-...] # 发送任务内异步消息
+node atf-cli.js msg inbox <agent> [taskId]                    # 查看 agent 收件箱
+node atf-cli.js msg thread <taskId> [threadId|focus=FOC-...]  # 查看任务消息线程
+node atf-cli.js msg ack <taskId> <messageId> <agent> [type] [note] # 写消息回执
+node atf-cli.js msg receipts <taskId> <messageId>             # 查看消息回执
 node atf-cli.js dlq list                  # 列出 DLQ
 node atf-cli.js dlq retry <taskId>       # DLQ 重试
 node atf-cli.js dlq skip <taskId>       # DLQ 跳过
@@ -88,13 +129,24 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ ctx.json 标准结构（含 protocol/delivery_status/retry_count）
 - ✅ CLI v2（create/list/assign/update/dlq/delivered/dri）
 - ✅ pending-task.json 通知机制
-- ✅ Watcher v1.5（超时 DLQ + 幂等投递 + 文件降级）
+- ✅ Watcher v1.5（通过 cron 扫描驱动：超时 DLQ + 幂等投递 + 文件降级）
 - ✅ fan-out 分发
+- ✅ 任务内异步消息（Message Envelope + Receipt 最小版）
+- ✅ Focus Items 最小版
+- ✅ Trigger Binding 最小版
+- ✅ Trigger firing records / consumption 最小版
+- ✅ Trigger inbox / ignore 最小版
+- ✅ Trigger scan 最小版
+- ✅ 全局 pending-trigger-fires / trigger-inboxes 索引
+- ✅ cron / daily@HH:MM / weekly@mon@HH:MM 形式的最小 next_due_at 计算
+- ✅ Reflection source binding 最小版
+- ✅ shared context 最小版
 - ✅ learnings-promote.cjs（→ MEMORY）
 - ✅ 岚遥机制（learnings/ 即时记录 + promote）
 
 ## 未完成 / 待优化
 
+- [ ] **Trigger 执行引擎** — 当前已支持 `trigger-fires/`、`inbox/due/scan/fire/consume/ignore` 以及 `status_change / focus_change / on_message` 自动产生日志，但 watcher / cron 仍未真正执行后续动作
 - [ ] **learnings → lessons 合并** — 已存在 `memory/lessons/`，learnings 机制是重复的，应迁移到 lessons
 - [ ] **简化 watcher** — 投递确认、delivery-history、pending-decisions 复杂度过高，简化回基本超时 DLQ 即可
 - [ ] **block/decide/revise 命令移除** — 设计过重，用 `update <status>` 代替即可
@@ -106,11 +158,12 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 
 ## 相关路径
 
-- 任务仓库：`/root/.openclaw/atf-tasks/`
-- CLI：`/root/.openclaw/workspace/agent-taskflow/atf-cli.js`
-- Watcher：`/root/.openclaw/workspace/bin/atf-watcher.cjs`
-- learnings promote：`/root/.openclaw/workspace/bin/learnings-promote.cjs`
-- Lessons：`/root/.openclaw/workspace/memory/lessons/`
+- 任务仓库：`ATF_TASKS_DIR`，默认 `/root/.openclaw/atf-tasks/`
+- 数据目录：`ATF_DATA_DIR`，默认 `/root/.openclaw/workspace/agent-taskflow/data/`
+- 全局 Trigger 索引：`ATF_DATA_DIR/pending-trigger-fires.json`
+- Agent Trigger inbox：`ATF_DATA_DIR/trigger-inboxes/*.json`
+- 工作区根目录：`ATF_WORKSPACE_DIR`，默认 `/root/.openclaw/workspace/`
+- learnings promote：`ATF_LEARNINGS_PROMOTE_SCRIPT`
 
 ---
 

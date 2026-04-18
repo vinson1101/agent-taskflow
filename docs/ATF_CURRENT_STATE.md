@@ -21,6 +21,16 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - 超时进入 DLQ
 - 投递失败归档
 
+### Watcher v1.6（服务器已验证）
+
+- 外部 `atf-watcher.cjs` 已按 v1.6 接入 Trigger fire 链路
+- 每轮会先执行 `trigger scan-all`
+- 已可读取 `ATF_DATA_DIR/pending-trigger-fires.json`
+- 已可按 `owner_agent` 路由 fire
+- 已可调用 `trigger consume`
+- 已验证不会破坏旧的 `pending-task / timeout / DLQ / delivery` 主链
+- 服务器隔离 smoke 已通过
+
 ### 最小协作通信层
 
 - 任务目录内的 `messages/` 和 `receipts/`
@@ -56,6 +66,7 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - 同一套链路可以跟踪多个 Agent
 - 不同 Agent 的任务状态可以并行推进
 - 至少在 `pinchymeow` / `f0x` 场景下，异步运行保障链路已经有实际运行证据
+- `watcher v1.6` 的 Trigger fire 消费链也已有服务器侧 smoke 证据
 
 ## 当前系统性质
 
@@ -83,7 +94,7 @@ ATF 当前还不是：
 - 评价、信誉、激励尚未闭环
 
 注：
-当前已经有最小消息协议、最小自治对象、最小 trigger firing 记录、最小全局 pending 索引、最小 due-trigger scan 和最小 firing→reflection 绑定，但仍然不是实时会话系统，也还没有完整的多方讨论模型、签名身份、真正的 Trigger 执行引擎或跨节点通信层。
+当前已经有最小消息协议、最小自治对象、最小 trigger firing 记录、最小全局 pending 索引、最小 due-trigger scan、最小 firing→reflection 绑定，以及已接入的 watcher v1.6 消费链，但仍然不是实时会话系统，也还没有完整的多方讨论模型、签名身份、完整的 Trigger action executor 或跨节点通信层。
 
 ## 当前最重要的事实
 

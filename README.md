@@ -140,13 +140,14 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ 全局 pending-trigger-fires / trigger-inboxes 索引
 - ✅ cron / daily@HH:MM / weekly@mon@HH:MM 形式的最小 next_due_at 计算
 - ✅ Reflection source binding 最小版
+- ✅ 外部 watcher v1.6 已接入 Trigger fire 消费链并通过服务器侧 smoke
 - ✅ shared context 最小版
 - ✅ learnings-promote.cjs（→ MEMORY）
 - ✅ 岚遥机制（learnings/ 即时记录 + promote）
 
 ## 未完成 / 待优化
 
-- [ ] **Trigger 执行引擎** — 当前已支持 `trigger-fires/`、`inbox/due/scan/fire/consume/ignore` 以及 `status_change / focus_change / on_message` 自动产生日志，但 watcher / cron 仍未真正执行后续动作
+- [ ] **Trigger Action Executor** — 当前外部 watcher v1.6 已能消费 Trigger fires，但还没有在仓库内沉淀出“直接触达 agent session / bot / pending-task”的通用执行器
 - [ ] **learnings → lessons 合并** — 已存在 `memory/lessons/`，learnings 机制是重复的，应迁移到 lessons
 - [ ] **简化 watcher** — 投递确认、delivery-history、pending-decisions 复杂度过高，简化回基本超时 DLQ 即可
 - [ ] **block/decide/revise 命令移除** — 设计过重，用 `update <status>` 代替即可
@@ -167,4 +168,4 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 
 ---
 
-*最后更新：2026-04-12*
+*最后更新：2026-04-19*

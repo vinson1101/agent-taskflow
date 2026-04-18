@@ -25,6 +25,21 @@
 3. agent 执行后调用 `trigger consume` / `trigger ignore`
 4. 需要沉淀时调用 `reflect from-fire`
 
+## 1.1 当前状态（2026-04-19）
+
+服务器侧外部 `atf-watcher.cjs` 已完成一版最小接入，可视为 watcher v1.6。
+
+已验证：
+
+- 会先调用 `node atf-cli.js trigger scan-all`
+- 会读取 `pending-trigger-fires.json`
+- 会按 `owner_agent` 路由 fire
+- 会调用 `trigger consume`
+- 不会破坏旧的任务状态机、超时检测、DLQ 和 delivery 检测
+- Feishu 通知链路仍正常
+
+这意味着当前 ATF 的 Trigger fire 协议已经不只是“可定义”，而是已经能被 watcher 消费。
+
 ## 2. 需要消费的文件
 
 最关键的两个文件：
@@ -293,9 +308,9 @@ $env:ATF_DATA_DIR = "D:\\tmp\\atf\\data"
 
 还没做的仍然包括：
 
-- 真正的常驻 `atf-watcher.cjs`
+- 仓库内可见的 `atf-watcher.cjs` 源码快照
 - 更完整的 cron parser
-- 真正的 trigger action executor
+- 真正的 trigger action executor（直接触达 agent session / bot / pending-task）
 - 多节点 / 多 gateway 分布式路由
 
 但对你现在的目标来说，这已经足够把外部 cron / heartbeat 接起来。

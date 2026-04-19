@@ -410,6 +410,7 @@ node atf-cli.js stats tasks
 node atf-cli.js stats tasks type=research review=pending limit=5
 node atf-cli.js stats tasks review=pending min_age=4 limit=20
 node atf-cli.js stats reviews
+node atf-cli.js stats reviews min_age=4
 node atf-cli.js stats reviews agent=f0x status=completed top=10
 node atf-cli.js stats types
 node atf-cli.js stats show f0x
@@ -444,7 +445,9 @@ node atf-cli.js assign recommend T-001 top=5
 - `stats tasks` 用于直接看任务级完成度、反馈状态和完成度积分
 - `stats tasks` 支持 `min_age=` / `max_age=`，可直接筛出 stale review backlog
 - `stats reviews` 用于看外部 review 覆盖率，以及待评价 backlog 在 agent / type / status / age 上的分布
+- `stats reviews` 支持 `min_age=` / `max_age=`，可直接聚焦 4 天以上的 stale backlog
 - 自评会保留为 `self_review` 记录，但不会消除 pending backlog，也不会计入外部 review coverage
+- `stats summary` 现在会直接给出 `stale_pending_reviews`，默认口径是 `age >= 4d`
 - `stats summary` 会直接显示 `oldest_pending_age`，方便巡检时先看最老 backlog
 - `stats types` 用于按 `task_profile.type` 看完成度、反馈和待评价积压
 - `assign` 会在指派时直接显示目标 agent 的 reputation / credits 摘要

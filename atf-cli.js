@@ -2253,6 +2253,8 @@ function buildReviewCoverageStats(options = {}) {
   const agentFilter = isClearedValue(options.agent) ? null : String(options.agent).trim();
   const typeFilter = normalizeTaskTypeValue(options.type);
   const statusFilter = isClearedValue(options.status) ? null : String(options.status).trim().toLowerCase();
+  const minAge = Number.isInteger(options.min_age) && options.min_age >= 0 ? options.min_age : null;
+  const maxAge = Number.isInteger(options.max_age) && options.max_age >= 0 ? options.max_age : null;
   const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 5;
 
   const eligibleRows = getAllTasks()
@@ -2270,6 +2272,7 @@ function buildReviewCoverageStats(options = {}) {
       if (agentFilter && row.ctx.assigned_to !== agentFilter && row.ctx.dri !== agentFilter) return false;
       if (typeFilter && row.task_type !== typeFilter) return false;
       if (statusFilter && row.review_status !== statusFilter) return false;
+      if (!matchesAgeRange(computeAgeDays(row.ctx.updated_at || row.ctx.created_at || null), minAge, maxAge)) return false;
       return true;
     });
 
@@ -2277,6 +2280,8 @@ function buildReviewCoverageStats(options = {}) {
     agent: agentFilter,
     type: typeFilter,
     status: statusFilter,
+    min_age: minAge,
+    max_age: maxAge,
   });
 
   const pendingByAgent = new Map();
@@ -2837,7 +2842,7 @@ ATF CLI v2
   atf stats summary                      查看整体完成/反馈统计
   atf stats agents                       查看 agent 完成度/反馈统计
   atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N]  查看任务级统计
-  atf stats reviews [agent=x] [type=x] [status=completed|delivered] [top=N]  查看 review 覆盖率和 backlog 汇总
+  atf stats reviews [agent=x] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看 review 覆盖率和 backlog 汇总
   atf stats types                        查看任务类型维度统计
   atf stats show <agent>                 查看单个 agent 完成度/反馈统计
   atf profile <taskId>                   查看任务画像
@@ -4350,12 +4355,13 @@ switch (cmd) {
         if (!Number.isInteger(task.age_days)) return max;
         return max === null || task.age_days > max ? task.age_days : max;
       }, null);
+      const stalePendingReviews = pendingReviews.filter(task => Number.isInteger(task.age_days) && task.age_days >= 4).length;
       const oldestPendingAt = pendingReviews.reduce((oldest, task) => {
         if (!task.updated_at) return oldest;
         return !oldest || task.updated_at < oldest ? task.updated_at : oldest;
       }, null);
       console.log('\nATF Stats Summary\n');
-      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  self_reviewed=${reviewCoverage.self_reviewed_tasks}  pending_reviews=${pendingReviews.length}  review_coverage=${reviewCoverageLabel}  external_review_coverage=${formatRate(reviewCoverage.external_review_coverage)}${oldestPendingAgeDays !== null ? `  oldest_pending_age=${oldestPendingAgeDays}d` : ''}`);
+      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  self_reviewed=${reviewCoverage.self_reviewed_tasks}  pending_reviews=${pendingReviews.length}  stale_pending_reviews=${stalePendingReviews}  review_coverage=${reviewCoverageLabel}  external_review_coverage=${formatRate(reviewCoverage.external_review_coverage)}${oldestPendingAgeDays !== null ? `  oldest_pending_age=${oldestPendingAgeDays}d` : ''}`);
       if (statusCounts.size) {
         console.log('\nstatus counts:');
         for (const [status, count] of [...statusCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -4493,6 +4499,8 @@ switch (cmd) {
       let agentFilter = null;
       let typeFilter = null;
       let statusFilter = null;
+      let minAge = null;
+      let maxAge = null;
       let top = 5;
       let topSpecified = false;
       let invalidArgs = false;
@@ -4507,6 +4515,26 @@ switch (cmd) {
         }
         if (part.startsWith('status=')) {
           statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('min_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('min_age='.length));
+          if (value === undefined) {
+            console.error('stats reviews min_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          minAge = value;
+          continue;
+        }
+        if (part.startsWith('max_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('max_age='.length));
+          if (value === undefined) {
+            console.error('stats reviews max_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          maxAge = value;
           continue;
         }
         if (part.startsWith('top=')) {
@@ -4524,23 +4552,31 @@ switch (cmd) {
         break;
       }
       if (invalidArgs) {
-        console.error('用法: atf stats reviews [agent=x] [type=x] [status=completed|delivered] [top=N]');
+        console.error('用法: atf stats reviews [agent=x] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]');
         break;
       }
       if (statusFilter && !['completed', 'delivered'].includes(statusFilter)) {
         console.error('stats reviews status 只支持 completed|delivered');
         break;
       }
+      if (minAge !== null && maxAge !== null && minAge > maxAge) {
+        console.error('stats reviews 要求 min_age <= max_age');
+        break;
+      }
       const reviewStats = buildReviewCoverageStats({
         agent: agentFilter,
         type: typeFilter,
         status: statusFilter,
+        min_age: minAge,
+        max_age: maxAge,
         top,
       });
       const filterLabel = [
         agentFilter ? `agent=${agentFilter}` : null,
         typeFilter ? `type=${typeFilter}` : null,
         statusFilter ? `status=${statusFilter}` : null,
+        minAge !== null ? `min_age=${minAge}` : null,
+        maxAge !== null ? `max_age=${maxAge}` : null,
         topSpecified ? `top=${top}` : null,
       ].filter(Boolean).join('  ');
       console.log(`\nReview Coverage${filterLabel ? `  |  ${filterLabel}` : ''}\n`);

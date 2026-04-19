@@ -143,6 +143,8 @@ function main() {
   const statsTasksAgeFiltered = runCli(['stats', 'tasks', 'review=pending', 'max_age=0', 'limit=1'], env, options);
   const statsTasksTooOld = runCli(['stats', 'tasks', 'review=pending', 'min_age=1'], env, options);
   const statsReviews = runCli(['stats', 'reviews'], env, options);
+  const statsReviewsAgeFiltered = runCli(['stats', 'reviews', 'max_age=0'], env, options);
+  const statsReviewsTooOld = runCli(['stats', 'reviews', 'min_age=1'], env, options);
   const statsTypes = runCli(['stats', 'types'], env, options);
   const statsAgents = runCli(['stats', 'agents'], env, options);
   const statsShowF0x = runCli(['stats', 'show', 'f0x'], env, options);
@@ -158,6 +160,7 @@ function main() {
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
   assertIncludes(statsSummary, 'self_reviewed=1', 'stats summary');
   assertIncludes(statsSummary, 'pending_reviews=1', 'stats summary');
+  assertIncludes(statsSummary, 'stale_pending_reviews=0', 'stats summary');
   assertIncludes(statsSummary, 'oldest_pending_age=0d', 'stats summary');
   assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
   assertIncludes(statsTasks, 'approved', 'stats tasks');
@@ -171,6 +174,9 @@ function main() {
   assertIncludes(statsReviews, 'eligible=3  reviewed=2  self_reviewed=1  pending=1', 'stats reviews');
   assertIncludes(statsReviews, '0-1d: 1', 'stats reviews');
   assertIncludes(statsReviews, 'f0x', 'stats reviews');
+  assertIncludes(statsReviewsAgeFiltered, 'max_age=0', 'age filtered stats reviews');
+  assertIncludes(statsReviewsAgeFiltered, 'pending=1', 'age filtered stats reviews');
+  assertIncludes(statsReviewsTooOld, 'eligible=0  reviewed=0  self_reviewed=0  pending=0', 'too old stats reviews');
   assertIncludes(statsTypes, 'research', 'stats types');
   assertIncludes(statsTypes, 'delivery', 'stats types');
   assertIncludes(statsAgents, 'f0x', 'stats agents');

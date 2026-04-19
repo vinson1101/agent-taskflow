@@ -68,6 +68,7 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
 - `stats reviews`
   直接看 review coverage，以及待评价 backlog 在 agent / type / status / age 上的汇总
   自评会单独留痕，但不计入外部 review coverage，也不会消除 pending review
+  同时支持按 age 过滤，便于日常只看 stale backlog
 
 ### 2. Reputation Index
 

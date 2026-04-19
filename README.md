@@ -15,6 +15,7 @@
 - [docs/ATF_CAPABILITY_EVOLUTION.md](./docs/ATF_CAPABILITY_EVOLUTION.md) - 从当前实现到长期能力体系的演进图
 - [docs/ATF_EXTERNAL_REFERENCES.md](./docs/ATF_EXTERNAL_REFERENCES.md) - Clawith、BotCord 等外部参考及可吸收点
 - [docs/ATF_RUNTIME_USAGE.md](./docs/ATF_RUNTIME_USAGE.md) - 当前 CLI 的实际调用说明
+- [docs/ATF_REPUTATION_LAYER.md](./docs/ATF_REPUTATION_LAYER.md) - Phase C Lite / 内部调度信誉层设计
 - [docs/ATF_WATCHER_INTEGRATION.md](./docs/ATF_WATCHER_INTEGRATION.md) - cron / watcher / heartbeat 集成说明
 
 ---
@@ -54,12 +55,18 @@ created → assigned → confirmed → executing → completed → delivered
 ## CLI 命令
 
 ```bash
-node atf-cli.js create <描述>           # 创建任务
+node atf-cli.js create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b] # 创建任务
 node atf-cli.js list                    # 列出所有任务
 node atf-cli.js nextnum                  # 下一个编号
 node atf-cli.js status <taskId>         # 查看状态
+node atf-cli.js stats summary            # 查看整体完成/反馈统计
+node atf-cli.js stats agents             # 查看 agent 完成度/反馈统计
+node atf-cli.js stats show <agent>       # 查看单个 agent 统计
+node atf-cli.js profile <taskId>         # 查看任务画像
+node atf-cli.js profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b] # 更新任务画像
 node atf-cli.js ctx <taskId>             # 查看 ctx.json
 node atf-cli.js assign <taskId> <agent>  # 指派（写 pending-task.json）
+node atf-cli.js assign recommend <taskId> [top=N] # 查看内部指派建议
 node atf-cli.js update <taskId> <status> # 更新状态（pause/assigned/completed等）
 node atf-cli.js fan-out <taskId> <a1,a2> # fan-out 分发
 node atf-cli.js delivered <taskId>       # 标记已送达（Vinson 确认）
@@ -91,6 +98,16 @@ node atf-cli.js reflect from-fire <taskId> <fireId> <author> <field> <内容> # 
 node atf-cli.js reflect list <taskId> [field] [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...] [author=x] # 查看 Reflections
 node atf-cli.js reflect summary <taskId> [focus=FOC-...] [author=x] # 查看 Reflection 摘要
 node atf-cli.js reflect show <taskId> <reflectionId>          # 查看 Reflection
+node atf-cli.js review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...] # 写入 Review
+node atf-cli.js review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...] # 查看任务 Reviews
+node atf-cli.js review pending [agent]                        # 查看待评价任务
+node atf-cli.js review show <taskId> <reviewId>               # 查看 Review
+node atf-cli.js credits rebuild                               # 重建内部积分索引（完成度 + 反馈）
+node atf-cli.js credits list                                  # 查看 agent 积分概览
+node atf-cli.js credits show <agent>                          # 查看单个 agent 积分账本
+node atf-cli.js reputation rebuild                            # 重建 reputation / scores 索引
+node atf-cli.js reputation list                               # 查看 agent 信誉概览
+node atf-cli.js reputation show <agent>                       # 查看单个 agent 画像
 node atf-cli.js shared add <taskId> <author> <type> <内容> [focus=FOC-...] [thread=...] [tag=x] [tags=a,b] # 添加共享上下文
 node atf-cli.js shared list <taskId> [type] [focus=FOC-...] [thread=...] [author=x] [tag=x] # 查看共享上下文
 node atf-cli.js msg send <taskId> <from> <to> <type> <内容> [focus=FOC-...] [thread=...] [reply=MSG-...] # 发送任务内异步消息
@@ -103,6 +120,13 @@ node atf-cli.js dlq list                  # 列出 DLQ
 node atf-cli.js dlq retry <taskId>       # DLQ 重试
 node atf-cli.js dlq skip <taskId>       # DLQ 跳过
 node atf-cli.js dlq cancel <taskId>     # DLQ 取消
+```
+
+快速自测：
+
+```bash
+npm run atf:phasec:smoke
+node workspace/bin/atf-phasec-smoke.cjs --cleanup
 ```
 
 ---
@@ -180,6 +204,10 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ msg threads 任务线程总览
 - ✅ shared context 的 focus/thread/tag 绑定与过滤
 - ✅ reflect summary 任务级摘要
+- ✅ 任务级 Review（task / delivery / collaboration）
+- ✅ reputation / scores 索引（任务、消息、回执、反思、review 聚合）
+- ✅ `status / assign` 直接显示 review / reputation 摘要
+- ✅ `review pending` 半自动评价闭环入口
 - ✅ Trigger Action Executor 最小版（`execute / execute-pending / executions`）
 - ✅ 仓库内可见 watcher v1（`workspace/bin/atf-watcher.cjs`）
 - ✅ Trigger Action Adapter 第一批（`pending_task / message / room / noop`）
@@ -206,6 +234,7 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - 数据目录：`ATF_DATA_DIR`，默认 `/root/.openclaw/workspace/agent-taskflow/data/`
 - 全局 Trigger 索引：`ATF_DATA_DIR/pending-trigger-fires.json`
 - Agent Trigger inbox：`ATF_DATA_DIR/trigger-inboxes/*.json`
+- reputation 索引：`ATF_DATA_DIR/scores.json`
 - 工作区根目录：`ATF_WORKSPACE_DIR`，默认 `/root/.openclaw/workspace/`
 - learnings promote：`ATF_LEARNINGS_PROMOTE_SCRIPT`
 

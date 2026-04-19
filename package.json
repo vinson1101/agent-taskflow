@@ -8,6 +8,7 @@
     "start": "node index.js",
     "atf:watcher": "node workspace/bin/atf-watcher.cjs",
     "atf:watcher:dry": "node workspace/bin/atf-watcher.cjs --dry-run",
+    "atf:phasec:smoke": "node workspace/bin/atf-phasec-smoke.cjs",
     "test": "jest"
   },
   "keywords": [

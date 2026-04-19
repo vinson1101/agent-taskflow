@@ -337,12 +337,114 @@ node atf-cli.js shared list T-001 author=pinchymeow
 node atf-cli.js shared list T-001 tag=review
 ```
 
+## 6.2 Review 与 Reputation
+
+这一组命令当前更适合 `claw army` 内部协作场景。
+
+它们的目标是：
+
+- 补 review 闭环
+- 统计任务完成度
+- 统计内部反馈质量
+- 形成内部可读画像
+
+它们当前不是：
+
+- 公开市场信誉系统
+- 身份认证系统
+- 激励 / 结算系统
+
+设置任务画像：
+
+```bash
+node atf-cli.js create 修 watcher timeout type=bugfix difficulty=4 priority=high tags=watcher,ops
+node atf-cli.js profile T-001
+node atf-cli.js profile set T-001 type=research difficulty=2 priority=normal tags=analysis
+```
+
+写入 Review：
+
+```bash
+node atf-cli.js review add T-001 pinchymeow f0x approved 这次交付边界清楚且可直接合入 type=delivery overall=4.5 quality=5 timeliness=4 communication=4.5 ownership=4.5
+node atf-cli.js review add T-001 pinchymeow f0x needs_revision 结果可用但需要补回执链路 focus=FOC-xxx type=collaboration communication=3 ownership=3.5 timeliness=4
+node atf-cli.js review add T-001 pinchymeow f0x approved review-trigger 有效闭环 fire=TGF-xxx trigger=TRG-xxx type=task overall=4
+```
+
+查看任务 Reviews：
+
+```bash
+node atf-cli.js review list T-001
+node atf-cli.js review list T-001 f0x
+node atf-cli.js review list T-001 reviewer=pinchymeow
+node atf-cli.js review list T-001 type=delivery
+node atf-cli.js review list T-001 outcome=approved
+node atf-cli.js review pending
+node atf-cli.js review pending f0x
+node atf-cli.js review show T-001 REV-xxx
+```
+
+重建 reputation / scores：
+
+```bash
+node atf-cli.js reputation rebuild
+node atf-cli.js reputation list
+node atf-cli.js reputation show f0x
+```
+
+重建内部 credits 账本：
+
+```bash
+node atf-cli.js credits rebuild
+node atf-cli.js credits list
+node atf-cli.js credits show f0x
+```
+
+直接看内部统计：
+
+```bash
+node atf-cli.js stats summary
+node atf-cli.js stats agents
+node atf-cli.js stats show f0x
+```
+
+跑一轮 Phase C Lite 自测：
+
+```bash
+npm run atf:phasec:smoke
+node workspace/bin/atf-phasec-smoke.cjs --cleanup
+```
+
+默认会把测试数据留在仓库下的 `.tmp-atf-phasec-smoke/`，方便直接检查 `tasks/` 和 `data/` 产物。
+
+用内部画像做辅助参考：
+
+```bash
+node atf-cli.js assign recommend T-001
+node atf-cli.js assign recommend T-001 top=5
+```
+
+说明：
+
+- `review` 当前支持 `task / delivery / collaboration`
+- `outcome` 当前支持 `approved / needs_revision / rejected`
+- `scores.json` 会汇总任务、消息、回执、反思和 review
+- `overall_score` 是可重建的简化画像，不是最终市场信誉分
+- `credits.json` 现在同时聚合“完成度积分 + 反馈积分”，不是预算、结算或 payout 系统
+- `task_profile` 当前只做内部任务画像，支持 `type / difficulty / priority / tags`
+- `status` 会直接显示任务画像、review 摘要，以及 assignee 的 reputation / credits 摘要
+- `stats` 是更直接的内部统计入口，优先服务完成度和反馈查看
+- `assign` 会在指派时直接显示目标 agent 的 reputation / credits 摘要
+- `assign recommend` 仍然只是辅助参考，不应该替代当前固定分工
+- `review pending` 用于找出 `completed / delivered` 但还没有形成 `task / delivery review` 的任务
+- 更重的身份、激励、结算设计会放到未来商用化阶段
+
 ## 7. 全局索引
 
 当前 watcher / cron 最值得直接消费的是这两个文件：
 
 - `ATF_DATA_DIR/pending-trigger-fires.json`
 - `ATF_DATA_DIR/trigger-inboxes/<agent>.json`
+- `ATF_DATA_DIR/scores.json`
 
 其中：
 
@@ -350,6 +452,8 @@ node atf-cli.js shared list T-001 tag=review
   全局 pending fires 汇总
 - `trigger-inboxes/<agent>.json`
   单 agent 待处理 fires 汇总
+- `scores.json`
+  当前可重建的 agent reputation 索引
 
 推荐 watcher 最小工作流：
 

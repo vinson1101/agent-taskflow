@@ -11,7 +11,8 @@
 5. [ATF 能力演进图](./ATF_CAPABILITY_EVOLUTION.md)
 6. [ATF 外部参考](./ATF_EXTERNAL_REFERENCES.md)
 7. [ATF 调用说明](./ATF_RUNTIME_USAGE.md)
-8. [ATF Watcher 集成说明](./ATF_WATCHER_INTEGRATION.md)
+8. [ATF Reputation Layer (Phase C Lite)](./ATF_REPUTATION_LAYER.md)
+9. [ATF Watcher 集成说明](./ATF_WATCHER_INTEGRATION.md)
 
 ## 使用原则
 

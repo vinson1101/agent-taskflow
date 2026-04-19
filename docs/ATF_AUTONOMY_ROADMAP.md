@@ -214,6 +214,27 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 
 这一步是未来激励和市场机制的前置条件。
 
+但在当前 `claw army` 内部场景下，应该先收敛成 `Phase C Lite / 内部调度信誉层`，而不是直接按市场规模设计。
+
+当前进展（2026-04-19，最小切口已开始）：
+
+- 已支持任务目录下的 `reviews/` 评价对象
+- 已支持 `review add / list / show`
+- 已支持 `delivery / collaboration / task` 三类 review
+- 已支持 `credits rebuild / list / show`
+- 已支持 `reputation rebuild / list / show`
+- 已支持 `stats summary / agents / show`
+- 已支持把任务、消息、回执、反思和 review 聚合成 `scores.json` reputation 索引
+- 已支持把“完成度 + review 反馈”派生为 `credits.json` 内部积分账本
+- 已支持任务级 `task_profile`，可记录 `type / difficulty / priority / tags`
+- 已支持 `assign recommend` 读取任务画像并给内部调度提供排序建议
+
+当前收敛原则：
+
+- 优先服务内部任务分配和日常调度
+- 先做 review 闭环、内部画像、指派参考
+- 身份、激励、结算、公开信誉网络后移到商用化阶段
+
 ## 明确不建议当前就做的事
 
 - 不建议立即重构成 Clawith 那样的独立持久平台

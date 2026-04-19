@@ -21,6 +21,7 @@ const DATA_DIR = process.env.ATF_DATA_DIR || `${WORKSPACE_DIR}/agent-taskflow/da
 const AGENTS_FILE = `${DATA_DIR}/agents.json`;
 const TASKS_FILE  = `${DATA_DIR}/tasks.json`;
 const SCORES_FILE = `${DATA_DIR}/scores.json`;
+const CREDITS_FILE = `${DATA_DIR}/credits.json`;
 const TRIGGER_INBOX_DIR = `${DATA_DIR}/trigger-inboxes`;
 const PENDING_TRIGGER_FIRES_FILE = `${DATA_DIR}/pending-trigger-fires.json`;
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
@@ -40,6 +41,10 @@ const TRIGGER_STATUSES = new Set(['active', 'paused', 'fired', 'archived']);
 const TRIGGER_FIRE_STATUSES = new Set(['pending', 'consumed', 'ignored']);
 const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'room', 'noop']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
+const REVIEW_TYPES = new Set(['task', 'delivery', 'collaboration']);
+const REVIEW_OUTCOMES = new Set(['approved', 'needs_revision', 'rejected']);
+const REVIEW_SCORE_FIELDS = ['overall', 'quality', 'timeliness', 'communication', 'ownership'];
+const TASK_PROFILE_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
 const HANDOFF_CONTEXT_LIMIT = 5;
 const HANDOFF_REFLECTION_LIMIT = 2;
 
@@ -138,6 +143,139 @@ function appendNotificationHistory(taskId, event) {
   history.push(event);
   saveJson(historyPath, history.slice(-50));
 }
+
+function roundNumber(value, digits = 2) {
+  if (!Number.isFinite(value)) return null;
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function averageNumbers(values) {
+  const nums = (values || []).filter(value => Number.isFinite(value));
+  if (!nums.length) return null;
+  return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+}
+
+function isClearedValue(value) {
+  if (value === undefined || value === null) return true;
+  const normalized = String(value).trim().toLowerCase();
+  return !normalized || normalized === '-' || normalized === 'none' || normalized === 'null';
+}
+
+function normalizeTaskTypeValue(value) {
+  if (isClearedValue(value)) return null;
+  return String(value).trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+function normalizeTaskTags(tags) {
+  const values = Array.isArray(tags)
+    ? tags
+    : String(tags || '').split(',');
+  return [...new Set(values
+    .map(tag => String(tag || '').trim().toLowerCase().replace(/\s+/g, '-'))
+    .filter(Boolean))].sort();
+}
+
+function normalizeTaskProfile(profile = {}, baseProfile = null) {
+  const base = baseProfile && typeof baseProfile === 'object' ? baseProfile : {};
+  const normalized = {
+    type: Object.prototype.hasOwnProperty.call(profile, 'type')
+      ? normalizeTaskTypeValue(profile.type)
+      : normalizeTaskTypeValue(base.type),
+    difficulty: Object.prototype.hasOwnProperty.call(profile, 'difficulty')
+      ? (Number.isInteger(profile.difficulty) && profile.difficulty >= 1 && profile.difficulty <= 5 ? profile.difficulty : null)
+      : (Number.isInteger(base.difficulty) && base.difficulty >= 1 && base.difficulty <= 5 ? base.difficulty : null),
+    priority: Object.prototype.hasOwnProperty.call(profile, 'priority')
+      ? (isClearedValue(profile.priority) ? null : (TASK_PROFILE_PRIORITIES.has(String(profile.priority).trim().toLowerCase()) ? String(profile.priority).trim().toLowerCase() : null))
+      : (TASK_PROFILE_PRIORITIES.has(String(base.priority || '').trim().toLowerCase()) ? String(base.priority).trim().toLowerCase() : null),
+    tags: Object.prototype.hasOwnProperty.call(profile, 'tags')
+      ? normalizeTaskTags(profile.tags)
+      : normalizeTaskTags(base.tags || []),
+  };
+  return normalized;
+}
+
+function getTaskProfile(ctx) {
+  return normalizeTaskProfile(ctx?.task_profile || {}, null);
+}
+
+function hasTaskProfile(profileInput) {
+  const profile = profileInput?.task_profile !== undefined || profileInput?.task_id !== undefined
+    ? getTaskProfile(profileInput)
+    : normalizeTaskProfile(profileInput || {}, null);
+  return Boolean(profile.type || profile.difficulty || profile.priority || profile.tags.length);
+}
+
+function formatTaskProfileSummary(profileInput, options = {}) {
+  const fallback = options.fallback || 'no profile';
+  const profile = profileInput?.task_profile !== undefined || profileInput?.task_id !== undefined
+    ? getTaskProfile(profileInput)
+    : normalizeTaskProfile(profileInput || {}, null);
+  if (!hasTaskProfile(profile)) return fallback;
+  const parts = [];
+  if (profile.type) parts.push(`type=${profile.type}`);
+  if (profile.difficulty) parts.push(`difficulty=${profile.difficulty}`);
+  if (profile.priority) parts.push(`priority=${profile.priority}`);
+  if (profile.tags.length) parts.push(`tags=${profile.tags.join(',')}`);
+  return parts.join('  ');
+}
+
+function parseTaskProfileArgs(parts = []) {
+  const profile = {};
+  const descriptionTokens = [];
+  const errors = [];
+  const tags = new Set();
+  let matched = false;
+
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('type=')) {
+      matched = true;
+      profile.type = normalizeTaskTypeValue(part.substring('type='.length));
+      continue;
+    }
+    if (part.startsWith('difficulty=')) {
+      matched = true;
+      const raw = part.substring('difficulty='.length);
+      if (isClearedValue(raw)) {
+        profile.difficulty = null;
+      } else {
+        const value = Number(raw);
+        if (!Number.isInteger(value) || value < 1 || value > 5) errors.push('difficulty 必须是 1-5 的整数');
+        else profile.difficulty = value;
+      }
+      continue;
+    }
+    if (part.startsWith('priority=')) {
+      matched = true;
+      const raw = part.substring('priority='.length);
+      if (isClearedValue(raw)) {
+        profile.priority = null;
+      } else {
+        const normalized = String(raw).trim().toLowerCase();
+        if (!TASK_PROFILE_PRIORITIES.has(normalized)) errors.push(`priority 只能是 ${[...TASK_PROFILE_PRIORITIES].join('|')}`);
+        else profile.priority = normalized;
+      }
+      continue;
+    }
+    if (part.startsWith('tags=')) {
+      matched = true;
+      for (const tag of normalizeTaskTags(part.substring('tags='.length))) tags.add(tag);
+      profile.tags = [...tags];
+      continue;
+    }
+    if (part.startsWith('tag=')) {
+      matched = true;
+      for (const tag of normalizeTaskTags(part.substring('tag='.length))) tags.add(tag);
+      profile.tags = [...tags];
+      continue;
+    }
+    descriptionTokens.push(part);
+  }
+
+  if (!profile.tags) profile.tags = [];
+  return { profile, descriptionTokens, errors, matched };
+}
+
 
 const WEEKDAY_MAP = {
   sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
@@ -469,6 +607,42 @@ function compactText(text, maxLength = 220) {
   return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+function normalizeReviewScore(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 1 || numeric > 5) return null;
+  return roundNumber(numeric, 1);
+}
+
+function normalizeReviewScores(scores = {}) {
+  const normalized = {};
+  for (const field of REVIEW_SCORE_FIELDS) {
+    if (scores[field] === undefined || scores[field] === null || scores[field] === '') continue;
+    const value = normalizeReviewScore(scores[field]);
+    if (value === null) return null;
+    normalized[field] = value;
+  }
+  if (normalized.overall === undefined) {
+    const derived = averageNumbers(
+      REVIEW_SCORE_FIELDS
+        .filter(field => field !== 'overall')
+        .map(field => normalized[field])
+    );
+    if (derived !== null) normalized.overall = roundNumber(derived, 1);
+  }
+  return normalized;
+}
+
+function isReputationAgent(actor) {
+  if (!actor || typeof actor !== 'string') return false;
+  const normalized = actor.trim();
+  if (!normalized || normalized.startsWith('room:')) return false;
+  if (normalized === 'trigger-executor') return false;
+  if (normalized.startsWith('watcher')) return false;
+  if (normalized.startsWith('adapter-')) return false;
+  return true;
+}
+
 function sortByTimestamp(items, field = 'created_at') {
   return [...(items || [])].sort((a, b) => (a?.[field] || '').localeCompare(b?.[field] || ''));
 }
@@ -643,6 +817,7 @@ function buildTriggerHandoff(taskId, ctx, trigger, fire, execution, deliveryTarg
       status: ctx.status,
       description: ctx.description,
       instructions: ctx.instructions || null,
+      task_profile: getTaskProfile(ctx),
       assigned_to: ctx.assigned_to || null,
       dri: ctx.dri || null,
     },
@@ -1120,6 +1295,7 @@ function buildPendingTaskFromTrigger(ctx, trigger, fire, executor, options = {})
     assigned_to: fire.owner_agent || trigger.owner_agent || ctx.assigned_to || null,
     description: ctx.description,
     instructions: ctx.instructions || null,
+    task_profile: getTaskProfile(ctx),
     created_by: executor,
     created_at: dispatchedAt,
     source: 'trigger_fire',
@@ -1391,6 +1567,778 @@ function createReflection(taskId, ctx, author, field, content, options = {}) {
   return reflection;
 }
 
+function reviewsDir(taskId) {
+  return `${taskDirPath(taskId)}/reviews`;
+}
+
+function ensureReviewsDir(taskId) {
+  const dir = reviewsDir(taskId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function reviewPath(taskId, reviewId) {
+  ensureReviewsDir(taskId);
+  return `${reviewsDir(taskId)}/${reviewId}.json`;
+}
+
+function readTaskReviews(taskId) {
+  ensureReviewsDir(taskId);
+  return readJsonCollection(reviewsDir(taskId))
+    .sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || ''));
+}
+
+function readReview(taskId, reviewId) {
+  return loadJson(reviewPath(taskId, reviewId));
+}
+
+function saveReview(taskId, review) {
+  review.updated_at = new Date().toISOString();
+  saveJson(reviewPath(taskId, review.review_id), review);
+}
+
+function createReview(taskId, ctx, reviewer, reviewee, outcome, summary, options = {}) {
+  const now = new Date().toISOString();
+  const scores = normalizeReviewScores(options.scores || {});
+  if (!scores || !Object.keys(scores).length || scores.overall === undefined) {
+    throw new Error('review requires overall score or at least one score dimension');
+  }
+  const review = {
+    schema: 'atf.review.v1',
+    review_id: generateId('REV'),
+    task_id: ctx.short_id || ctx.task_id,
+    focus_id: options.focus_id || null,
+    thread_id: options.thread_id || null,
+    trigger_id: options.trigger_id || null,
+    fire_id: options.fire_id || null,
+    review_type: options.review_type || 'task',
+    reviewer,
+    reviewee,
+    outcome,
+    summary,
+    scores,
+    created_at: now,
+    updated_at: now,
+  };
+  saveReview(taskId, review);
+  appendNotificationHistory(taskId, {
+    event: 'review_added',
+    review_id: review.review_id,
+    review_type: review.review_type,
+    reviewer: review.reviewer,
+    reviewee: review.reviewee,
+    outcome: review.outcome,
+    overall: review.scores.overall,
+    at: now,
+  });
+  return review;
+}
+
+function ensureReputationAgentEntry(index, agent) {
+  if (!isReputationAgent(agent)) return null;
+  if (!index.has(agent)) {
+    index.set(agent, {
+      agent,
+      observed_task_ids: new Set(),
+      thread_ids: new Set(),
+      task_stats: {
+        assigned: 0,
+        dri_owned: 0,
+        completed: 0,
+        delivered: 0,
+        blocked: 0,
+        cancelled: 0,
+        archived: 0,
+        active: 0,
+      },
+      collaboration_stats: {
+        messages_sent: 0,
+        messages_received: 0,
+        receipts_written: 0,
+        reflections_authored: 0,
+      },
+      review_stats: {
+        received: 0,
+        given: 0,
+        outcomes: {
+          approved: 0,
+          needs_revision: 0,
+          rejected: 0,
+        },
+        score_totals: REVIEW_SCORE_FIELDS.reduce((acc, field) => ({ ...acc, [field]: 0 }), {}),
+        score_counts: REVIEW_SCORE_FIELDS.reduce((acc, field) => ({ ...acc, [field]: 0 }), {}),
+        reviewers: new Set(),
+        recent_reviews: [],
+        last_review_at: null,
+      },
+      task_type_stats: {},
+    });
+  }
+  return index.get(agent);
+}
+
+function ensureReputationTaskTypeEntry(agentEntry, taskType) {
+  if (!agentEntry || !taskType) return null;
+  if (!agentEntry.task_type_stats[taskType]) {
+    agentEntry.task_type_stats[taskType] = {
+      type: taskType,
+      task_stats: {
+        assigned: 0,
+        completed: 0,
+        delivered: 0,
+        blocked: 0,
+        active: 0,
+      },
+      review_stats: {
+        received: 0,
+        outcomes: {
+          approved: 0,
+          needs_revision: 0,
+          rejected: 0,
+        },
+        score_total: 0,
+        score_count: 0,
+        last_review_at: null,
+      },
+    };
+  }
+  return agentEntry.task_type_stats[taskType];
+}
+
+function buildReputationIndex() {
+  const agentIndex = new Map();
+  const tasks = getAllTasks();
+
+  for (const ctx of tasks) {
+    const taskId = ctx.short_id || ctx.task_id;
+    const taskProfile = getTaskProfile(ctx);
+    const taskType = taskProfile.type;
+    const assignee = ensureReputationAgentEntry(agentIndex, ctx.assigned_to);
+    const dri = ensureReputationAgentEntry(agentIndex, ctx.dri);
+
+    if (assignee) {
+      assignee.observed_task_ids.add(taskId);
+      assignee.task_stats.assigned += 1;
+      const delivered = ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered';
+      if (ctx.status === 'completed' || delivered) assignee.task_stats.completed += 1;
+      if (delivered) assignee.task_stats.delivered += 1;
+      if (ctx.status === 'blocked') assignee.task_stats.blocked += 1;
+      else if (ctx.status === 'cancelled') assignee.task_stats.cancelled += 1;
+      else if (ctx.status === 'archived') assignee.task_stats.archived += 1;
+      else if (ctx.status !== 'completed' && ctx.status !== 'delivered') assignee.task_stats.active += 1;
+      const typeStats = ensureReputationTaskTypeEntry(assignee, taskType);
+      if (typeStats) {
+        typeStats.task_stats.assigned += 1;
+        if (ctx.status === 'completed' || delivered) typeStats.task_stats.completed += 1;
+        if (delivered) typeStats.task_stats.delivered += 1;
+        if (ctx.status === 'blocked') typeStats.task_stats.blocked += 1;
+        else if (ctx.status !== 'completed' && ctx.status !== 'delivered') typeStats.task_stats.active += 1;
+      }
+    }
+
+    if (dri) {
+      dri.observed_task_ids.add(taskId);
+      dri.task_stats.dri_owned += 1;
+    }
+
+    for (const message of readTaskMessages(taskId)) {
+      const sender = ensureReputationAgentEntry(agentIndex, message.from_agent);
+      if (sender) {
+        sender.observed_task_ids.add(taskId);
+        sender.collaboration_stats.messages_sent += 1;
+        if (message.thread_id) sender.thread_ids.add(message.thread_id);
+      }
+
+      const recipient = ensureReputationAgentEntry(agentIndex, message.to_agent);
+      if (recipient) {
+        recipient.observed_task_ids.add(taskId);
+        recipient.collaboration_stats.messages_received += 1;
+        if (message.thread_id) recipient.thread_ids.add(message.thread_id);
+      }
+    }
+
+    for (const receipt of readTaskReceipts(taskId)) {
+      const author = ensureReputationAgentEntry(agentIndex, receipt.from_agent);
+      if (author) {
+        author.observed_task_ids.add(taskId);
+        author.collaboration_stats.receipts_written += 1;
+      }
+    }
+
+    for (const reflection of readTaskReflections(taskId)) {
+      const author = ensureReputationAgentEntry(agentIndex, reflection.author);
+      if (author) {
+        author.observed_task_ids.add(taskId);
+        author.collaboration_stats.reflections_authored += 1;
+      }
+    }
+
+    for (const review of readTaskReviews(taskId)) {
+      const reviewer = ensureReputationAgentEntry(agentIndex, review.reviewer);
+      if (reviewer) {
+        reviewer.observed_task_ids.add(taskId);
+        reviewer.review_stats.given += 1;
+      }
+
+      const reviewee = ensureReputationAgentEntry(agentIndex, review.reviewee);
+      if (!reviewee) continue;
+      reviewee.observed_task_ids.add(taskId);
+      reviewee.review_stats.received += 1;
+      reviewee.review_stats.outcomes[review.outcome] += 1;
+      reviewee.review_stats.last_review_at = review.created_at;
+      reviewee.review_stats.reviewers.add(review.reviewer);
+      for (const field of REVIEW_SCORE_FIELDS) {
+        const value = review?.scores?.[field];
+        if (!Number.isFinite(value)) continue;
+        reviewee.review_stats.score_totals[field] += value;
+        reviewee.review_stats.score_counts[field] += 1;
+      }
+      reviewee.review_stats.recent_reviews.push({
+        review_id: review.review_id,
+        task_id: review.task_id,
+        reviewer: review.reviewer,
+        review_type: review.review_type,
+        outcome: review.outcome,
+        overall: review?.scores?.overall ?? null,
+        summary: compactText(review.summary, 180),
+        created_at: review.created_at,
+      });
+      const typeStats = ensureReputationTaskTypeEntry(reviewee, taskType);
+      if (typeStats) {
+        typeStats.review_stats.received += 1;
+        if (typeStats.review_stats.outcomes[review.outcome] !== undefined) typeStats.review_stats.outcomes[review.outcome] += 1;
+        if (Number.isFinite(review?.scores?.overall)) {
+          typeStats.review_stats.score_total += review.scores.overall;
+          typeStats.review_stats.score_count += 1;
+        }
+        typeStats.review_stats.last_review_at = review.created_at;
+      }
+    }
+  }
+
+  const agents = [...agentIndex.values()]
+    .map(entry => {
+      const average_scores = {};
+      for (const field of REVIEW_SCORE_FIELDS) {
+        const count = entry.review_stats.score_counts[field];
+        average_scores[field] = count ? roundNumber(entry.review_stats.score_totals[field] / count, 2) : null;
+      }
+
+      const assigned = entry.task_stats.assigned;
+      const resolvedAssignments = Math.max(assigned - entry.task_stats.active, 0);
+      const messagesReceived = entry.collaboration_stats.messages_received;
+      const completionRate = resolvedAssignments ? roundNumber(entry.task_stats.completed / resolvedAssignments, 3) : null;
+      const deliveryRate = resolvedAssignments ? roundNumber(entry.task_stats.delivered / resolvedAssignments, 3) : null;
+      const blockedRate = resolvedAssignments ? roundNumber(entry.task_stats.blocked / resolvedAssignments, 3) : null;
+      const responseRate = messagesReceived ? roundNumber(entry.collaboration_stats.receipts_written / messagesReceived, 3) : null;
+      const approvalRate = entry.review_stats.received ? roundNumber(entry.review_stats.outcomes.approved / entry.review_stats.received, 3) : null;
+      const overallScore = averageNumbers([
+        average_scores.overall !== null ? (average_scores.overall / 5) * 100 : null,
+        completionRate !== null ? completionRate * 100 : null,
+        deliveryRate !== null ? deliveryRate * 100 : null,
+        responseRate !== null ? responseRate * 100 : null,
+        approvalRate !== null ? approvalRate * 100 : null,
+      ]);
+      const taskTypes = Object.values(entry.task_type_stats)
+        .map(bucket => {
+          const resolvedAssignments = Math.max(bucket.task_stats.assigned - bucket.task_stats.active, 0);
+          const completion = resolvedAssignments ? roundNumber(bucket.task_stats.completed / resolvedAssignments, 3) : null;
+          const delivery = resolvedAssignments ? roundNumber(bucket.task_stats.delivered / resolvedAssignments, 3) : null;
+          const approval = bucket.review_stats.received ? roundNumber(bucket.review_stats.outcomes.approved / bucket.review_stats.received, 3) : null;
+          const averageOverall = bucket.review_stats.score_count ? roundNumber(bucket.review_stats.score_total / bucket.review_stats.score_count, 2) : null;
+          const bucketScore = averageNumbers([
+            averageOverall !== null ? (averageOverall / 5) * 100 : null,
+            completion !== null ? completion * 100 : null,
+            delivery !== null ? delivery * 100 : null,
+            approval !== null ? approval * 100 : null,
+          ]);
+          return {
+            type: bucket.type,
+            overall_score: bucketScore === null ? null : roundNumber(bucketScore, 1),
+            task_stats: bucket.task_stats,
+            review_stats: {
+              received: bucket.review_stats.received,
+              outcomes: bucket.review_stats.outcomes,
+              average_overall: averageOverall,
+              last_review_at: bucket.review_stats.last_review_at,
+            },
+          };
+        })
+        .sort((a, b) => {
+          const scoreDiff = (b.overall_score ?? -1) - (a.overall_score ?? -1);
+          if (scoreDiff) return scoreDiff;
+          const taskDiff = (b.task_stats.assigned ?? 0) - (a.task_stats.assigned ?? 0);
+          if (taskDiff) return taskDiff;
+          return a.type.localeCompare(b.type);
+        });
+
+      return {
+        agent: entry.agent,
+        overall_score: overallScore === null ? null : roundNumber(overallScore, 1),
+        task_stats: entry.task_stats,
+        collaboration_stats: {
+          ...entry.collaboration_stats,
+          threads_participated: entry.thread_ids.size,
+        },
+        review_stats: {
+          received: entry.review_stats.received,
+          given: entry.review_stats.given,
+          outcomes: entry.review_stats.outcomes,
+          average_scores,
+          approval_rate: approvalRate,
+          unique_reviewers: entry.review_stats.reviewers.size,
+          last_review_at: entry.review_stats.last_review_at,
+          recent_reviews: [...entry.review_stats.recent_reviews]
+            .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+            .slice(0, 5),
+        },
+        derived: {
+          resolved_assignments: resolvedAssignments,
+          completion_rate: completionRate,
+          delivery_rate: deliveryRate,
+          blocked_rate: blockedRate,
+          response_rate: responseRate,
+        },
+        specialization: {
+          dominant_task_type: taskTypes[0]?.type || null,
+          task_types: taskTypes,
+        },
+        observed_task_count: entry.observed_task_ids.size,
+        observed_task_ids: [...entry.observed_task_ids].sort(),
+      };
+    })
+    .sort((a, b) => {
+      const scoreDiff = (b.overall_score ?? -1) - (a.overall_score ?? -1);
+      if (scoreDiff) return scoreDiff;
+      return a.agent.localeCompare(b.agent);
+    });
+
+  const index = {
+    schema: 'atf.reputation-index.v1',
+    updated_at: new Date().toISOString(),
+    total_tasks: tasks.length,
+    total_agents: agents.length,
+    agents,
+  };
+  saveJson(SCORES_FILE, index);
+  return index;
+}
+
+function loadReputationIndex(options = {}) {
+  const existing = loadJson(SCORES_FILE);
+  if (existing?.schema === 'atf.reputation-index.v1' && Array.isArray(existing.agents)) return existing;
+  if (options.rebuildIfMissing === false) return null;
+  return buildReputationIndex();
+}
+
+function findAgentReputation(agentName, index = null) {
+  if (!agentName) return null;
+  const reputationIndex = index || loadReputationIndex({ rebuildIfMissing: false });
+  return reputationIndex?.agents?.find(agent => agent.agent === agentName) || null;
+}
+
+function formatRate(value) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '-';
+  return `${roundNumber(value * 100, 1)}%`;
+}
+
+function buildTaskReviewSummary(taskId, options = {}) {
+  let reviews = readTaskReviews(taskId);
+  if (options.reviewee) reviews = reviews.filter(review => review.reviewee === options.reviewee);
+  if (options.reviewType) reviews = reviews.filter(review => review.review_type === options.reviewType);
+  if (!reviews.length) return null;
+
+  const outcomes = {
+    approved: 0,
+    needs_revision: 0,
+    rejected: 0,
+  };
+  const reviewTypes = {
+    task: 0,
+    delivery: 0,
+    collaboration: 0,
+  };
+  for (const review of reviews) {
+    if (outcomes[review.outcome] !== undefined) outcomes[review.outcome] += 1;
+    if (reviewTypes[review.review_type] !== undefined) reviewTypes[review.review_type] += 1;
+  }
+
+  return {
+    total: reviews.length,
+    avg_overall: roundNumber(averageNumbers(reviews.map(review => review?.scores?.overall)), 2),
+    outcomes,
+    review_types: reviewTypes,
+    reviewees: [...new Set(reviews.map(review => review.reviewee).filter(Boolean))].sort(),
+    reviewers: [...new Set(reviews.map(review => review.reviewer).filter(Boolean))].sort(),
+    last_review_at: [...reviews].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))[0]?.created_at || null,
+  };
+}
+
+function getPrimaryTaskReviewee(ctx) {
+  return ctx?.assigned_to || ctx?.dri || null;
+}
+
+function taskNeedsReview(ctx, reviewee = null) {
+  if (!ctx) return false;
+  const targetReviewee = reviewee || getPrimaryTaskReviewee(ctx);
+  if (!targetReviewee) return false;
+  const delivered = ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered';
+  if (!delivered && ctx.status !== 'completed') return false;
+  const taskId = ctx.short_id || ctx.task_id;
+  const reviews = readTaskReviews(taskId).filter(review =>
+    review.reviewee === targetReviewee
+    && (review.review_type === 'task' || review.review_type === 'delivery')
+  );
+  return reviews.length === 0;
+}
+
+function collectPendingReviewTasks(agent = null) {
+  return getAllTasks()
+    .filter(ctx => {
+      const targetReviewee = agent || getPrimaryTaskReviewee(ctx);
+      if (!targetReviewee) return false;
+      if (agent && ctx.assigned_to !== agent && ctx.dri !== agent) return false;
+      return taskNeedsReview(ctx, targetReviewee);
+    })
+    .map(ctx => {
+      const taskId = ctx.short_id || ctx.task_id;
+      const targetReviewee = agent || getPrimaryTaskReviewee(ctx);
+      return {
+        task_id: taskId,
+        description: ctx.description,
+        status: ctx.status,
+        reviewee: targetReviewee,
+        updated_at: ctx.updated_at,
+        existing_review_summary: buildTaskReviewSummary(taskId),
+      };
+    })
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+}
+
+function formatAgentReputationSummary(agent) {
+  if (!agent) return 'no data';
+  return [
+    `score=${agent.overall_score ?? '-'}`,
+    `delivery=${formatRate(agent.derived.delivery_rate)}`,
+    `response=${formatRate(agent.derived.response_rate)}`,
+    `avg_review=${agent.review_stats.average_scores.overall ?? '-'}`,
+    `reviews=${agent.review_stats.received}`,
+  ].join('  ');
+}
+
+function reviewCreditBase(reviewType) {
+  if (reviewType === 'delivery') return 10;
+  if (reviewType === 'task') return 8;
+  if (reviewType === 'collaboration') return 4;
+  return 6;
+}
+
+function computeReviewCredits(review) {
+  const base = reviewCreditBase(review.review_type);
+  const overall = Number.isFinite(review?.scores?.overall) ? review.scores.overall : null;
+  let revieweeCredits = 0;
+  if (review.outcome === 'approved') {
+    const bonus = overall === null ? 0 : Math.max(0, Math.round((overall - 3) * 2));
+    revieweeCredits = base + bonus;
+  } else if (review.outcome === 'needs_revision') {
+    revieweeCredits = Math.max(1, Math.round(base * 0.3));
+  } else if (review.outcome === 'rejected') {
+    revieweeCredits = -Math.max(3, Math.round(base * 0.8));
+  }
+  const reviewerCredits = review.reviewer && review.reviewer !== review.reviewee ? 1 : 0;
+  return {
+    reviewee_credits: revieweeCredits,
+    reviewer_credits: reviewerCredits,
+  };
+}
+
+function computeTaskCompletionCredits(ctx) {
+  const delivered = ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered';
+  if (delivered) {
+    return {
+      completion_credits: 10,
+      completion_stage: 'delivered',
+    };
+  }
+  if (ctx.status === 'completed') {
+    return {
+      completion_credits: 6,
+      completion_stage: 'completed',
+    };
+  }
+  return null;
+}
+
+function ensureCreditsAgentEntry(index, agent) {
+  if (!isReputationAgent(agent)) return null;
+  if (!index.has(agent)) {
+    index.set(agent, {
+      agent,
+      total_credits: 0,
+      role_credits: {
+        from_completion: 0,
+        as_reviewee: 0,
+        as_reviewer: 0,
+      },
+      completion_stats: {
+        completed: 0,
+        delivered: 0,
+      },
+      review_stats: {
+        received: 0,
+        given: 0,
+        outcomes: {
+          approved: 0,
+          needs_revision: 0,
+          rejected: 0,
+        },
+        by_type: {
+          task: 0,
+          delivery: 0,
+          collaboration: 0,
+        },
+      },
+      last_credit_at: null,
+      recent_events: [],
+    });
+  }
+  return index.get(agent);
+}
+
+function buildCreditsIndex() {
+  const agentIndex = new Map();
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    const completion = computeTaskCompletionCredits(ctx);
+    const assignee = ensureCreditsAgentEntry(agentIndex, ctx.assigned_to);
+    if (assignee && completion) {
+      assignee.total_credits += completion.completion_credits;
+      assignee.role_credits.from_completion += completion.completion_credits;
+      if (completion.completion_stage === 'delivered') assignee.completion_stats.delivered += 1;
+      else assignee.completion_stats.completed += 1;
+      assignee.last_credit_at = ctx.updated_at || ctx.created_at || new Date().toISOString();
+      assignee.recent_events.push({
+        event_id: `CMP-${taskId}`,
+        event_type: 'completion',
+        role: 'assignee',
+        task_id: taskId,
+        completion_stage: completion.completion_stage,
+        credits: completion.completion_credits,
+        summary: compactText(ctx.description, 160),
+        at: ctx.updated_at || ctx.created_at || new Date().toISOString(),
+        counterparty: null,
+      });
+    }
+
+    for (const review of readTaskReviews(taskId)) {
+      const credits = computeReviewCredits(review);
+      const reviewee = ensureCreditsAgentEntry(agentIndex, review.reviewee);
+      if (reviewee) {
+        reviewee.total_credits += credits.reviewee_credits;
+        reviewee.role_credits.as_reviewee += credits.reviewee_credits;
+        reviewee.review_stats.received += 1;
+        if (reviewee.review_stats.outcomes[review.outcome] !== undefined) reviewee.review_stats.outcomes[review.outcome] += 1;
+        if (reviewee.review_stats.by_type[review.review_type] !== undefined) reviewee.review_stats.by_type[review.review_type] += 1;
+        reviewee.last_credit_at = review.created_at;
+        reviewee.recent_events.push({
+          event_id: review.review_id,
+          event_type: 'review',
+          role: 'reviewee',
+          task_id: review.task_id,
+          review_type: review.review_type,
+          outcome: review.outcome,
+          credits: credits.reviewee_credits,
+          summary: compactText(review.summary, 160),
+          at: review.created_at,
+          counterparty: review.reviewer,
+        });
+      }
+
+      const reviewer = ensureCreditsAgentEntry(agentIndex, review.reviewer);
+      if (reviewer && credits.reviewer_credits) {
+        reviewer.total_credits += credits.reviewer_credits;
+        reviewer.role_credits.as_reviewer += credits.reviewer_credits;
+        reviewer.review_stats.given += 1;
+        reviewer.last_credit_at = review.created_at;
+        reviewer.recent_events.push({
+          event_id: review.review_id,
+          event_type: 'review',
+          role: 'reviewer',
+          task_id: review.task_id,
+          review_type: review.review_type,
+          outcome: review.outcome,
+          credits: credits.reviewer_credits,
+          summary: compactText(review.summary, 160),
+          at: review.created_at,
+          counterparty: review.reviewee,
+        });
+      }
+    }
+  }
+
+  const agents = [...agentIndex.values()]
+    .map(entry => ({
+      agent: entry.agent,
+      total_credits: entry.total_credits,
+      role_credits: entry.role_credits,
+      completion_stats: entry.completion_stats,
+      review_stats: entry.review_stats,
+      last_credit_at: entry.last_credit_at,
+      recent_events: [...entry.recent_events]
+        .sort((a, b) => (b.at || '').localeCompare(a.at || ''))
+        .slice(0, 8),
+    }))
+    .sort((a, b) => {
+      const creditDiff = (b.total_credits ?? 0) - (a.total_credits ?? 0);
+      if (creditDiff) return creditDiff;
+      return a.agent.localeCompare(b.agent);
+    });
+
+  const index = {
+    schema: 'atf.credits-index.v1',
+    updated_at: new Date().toISOString(),
+    total_agents: agents.length,
+    agents,
+  };
+  saveJson(CREDITS_FILE, index);
+  return index;
+}
+
+function loadCreditsIndex(options = {}) {
+  const existing = loadJson(CREDITS_FILE);
+  if (existing?.schema === 'atf.credits-index.v1' && Array.isArray(existing.agents)) return existing;
+  if (options.rebuildIfMissing === false) return null;
+  return buildCreditsIndex();
+}
+
+function findAgentCredits(agentName, index = null) {
+  if (!agentName) return null;
+  const creditsIndex = index || loadCreditsIndex({ rebuildIfMissing: false });
+  return creditsIndex?.agents?.find(agent => agent.agent === agentName) || null;
+}
+
+function formatAgentCreditsSummary(agent) {
+  if (!agent) return 'no data';
+  return [
+    `total=${agent.total_credits ?? 0}`,
+    `completion=${agent.role_credits?.from_completion ?? 0}`,
+    `reviewee=${agent.role_credits?.as_reviewee ?? 0}`,
+    `reviewer=${agent.role_credits?.as_reviewer ?? 0}`,
+  ].join('  ');
+}
+
+function findAgentTaskTypeStats(agent, taskType) {
+  if (!agent || !taskType) return null;
+  return agent.specialization?.task_types?.find(item => item.type === taskType) || null;
+}
+
+function computeTaskFitSignal(agentReputation, taskProfile) {
+  if (!taskProfile?.type) {
+    return {
+      score: 0,
+      reason: 'type_fit=n/a',
+    };
+  }
+  const typeStats = findAgentTaskTypeStats(agentReputation, taskProfile.type);
+  const difficulty = taskProfile.difficulty || 3;
+  if (!typeStats) {
+    return {
+      score: difficulty >= 4 ? -10 : -4,
+      reason: `type_fit=none(${taskProfile.type})`,
+    };
+  }
+
+  const assigned = typeStats.task_stats.assigned || 0;
+  const experienceBonus = Math.min(12, assigned * 3);
+  const qualityBonus = typeStats.overall_score === null ? 0 : roundNumber((typeStats.overall_score - 50) * 0.35, 1);
+  const lowExperiencePenalty = difficulty >= 4 && assigned <= 1 ? 6 : 0;
+  const score = roundNumber(experienceBonus + qualityBonus - lowExperiencePenalty, 1);
+
+  return {
+    score,
+    reason: `type_fit=${taskProfile.type}:${typeStats.overall_score ?? '-'}@${assigned}`,
+  };
+}
+
+function collectKnownAgents() {
+  const agents = new Set(Object.keys(AGENT_WORKSPACES));
+  const reputationIndex = loadReputationIndex({ rebuildIfMissing: false });
+  for (const agent of reputationIndex?.agents || []) agents.add(agent.agent);
+  const creditsIndex = loadCreditsIndex({ rebuildIfMissing: false });
+  for (const agent of creditsIndex?.agents || []) agents.add(agent.agent);
+  return [...agents].filter(Boolean).sort();
+}
+
+function isActiveTaskStatus(status) {
+  return !['completed', 'delivered', 'cancelled', 'archived'].includes(status);
+}
+
+function buildAssignmentRecommendations(taskId, options = {}) {
+  const ctx = readCtx(taskId);
+  if (!ctx) return null;
+  const top = Math.max(1, options.top || 3);
+  const reputationIndex = loadReputationIndex();
+  const creditsIndex = loadCreditsIndex();
+  const pendingReviewTasks = collectPendingReviewTasks();
+  const agents = collectKnownAgents();
+  const taskProfile = getTaskProfile(ctx);
+  const priorityMultiplier = ({
+    low: 0.85,
+    normal: 1,
+    high: 1.15,
+    urgent: 1.35,
+  })[taskProfile.priority || 'normal'];
+  const difficultyPenalty = Math.max(((taskProfile.difficulty || 3) - 3) * 3, 0);
+
+  const recommendations = agents.map(agentName => {
+    const reputation = findAgentReputation(agentName, reputationIndex);
+    const credits = findAgentCredits(agentName, creditsIndex);
+    const activeTasks = getAllTasks().filter(task => task.assigned_to === agentName && isActiveTaskStatus(task.status)).length;
+    const pendingReviews = pendingReviewTasks.filter(task => task.reviewee === agentName).length;
+    const reputationScore = reputation?.overall_score ?? 50;
+    const creditSignal = Math.max(-20, Math.min(20, (credits?.total_credits ?? 0) * 1.5));
+    const workloadPenalty = roundNumber(activeTasks * 10 * priorityMultiplier + (activeTasks * difficultyPenalty), 1);
+    const pendingReviewPenalty = roundNumber(pendingReviews * 5 * priorityMultiplier, 1);
+    const taskFit = computeTaskFitSignal(reputation, taskProfile);
+    const recommendationScore = roundNumber(reputationScore + creditSignal + taskFit.score - workloadPenalty - pendingReviewPenalty, 1);
+
+    return {
+      agent: agentName,
+      recommendation_score: recommendationScore,
+      reputation_score: reputation?.overall_score ?? null,
+      total_credits: credits?.total_credits ?? 0,
+      active_tasks: activeTasks,
+      pending_reviews: pendingReviews,
+      task_fit_score: taskFit.score,
+      reasons: [
+        `reputation=${reputation?.overall_score ?? '-'}`,
+        `credits=${credits?.total_credits ?? 0}`,
+        `active=${activeTasks}`,
+        `pending_reviews=${pendingReviews}`,
+        taskFit.reason,
+      ],
+    };
+  })
+    .sort((a, b) => {
+      const scoreDiff = (b.recommendation_score ?? -Infinity) - (a.recommendation_score ?? -Infinity);
+      if (scoreDiff) return scoreDiff;
+      return a.agent.localeCompare(b.agent);
+    });
+
+  return {
+    task: {
+      task_id: ctx.short_id || ctx.task_id,
+      description: ctx.description,
+      task_profile: taskProfile,
+      current_assignee: ctx.assigned_to || null,
+      dri: ctx.dri || null,
+      status: ctx.status,
+    },
+    generated_at: new Date().toISOString(),
+    top,
+    recommendations: recommendations.slice(0, top),
+  };
+}
+
 // ============================================================
 // 任务读写
 // ============================================================
@@ -1421,7 +2369,7 @@ function createTaskDir(taskNum, description) {
   const taskPath = `${TASKS_DIR}/${dirName}`;
   if (fs.existsSync(taskPath)) return { dirName, taskPath };
   fs.mkdirSync(taskPath, { recursive: true });
-  const subdirs = ['research', 'implementation', 'notes', 'notifications', 'messages', 'receipts', 'focus-items', 'triggers', 'trigger-fires', 'trigger-executions', 'reflections'];
+  const subdirs = ['research', 'implementation', 'notes', 'notifications', 'messages', 'receipts', 'focus-items', 'triggers', 'trigger-fires', 'trigger-executions', 'reflections', 'reviews'];
   for (const s of subdirs) fs.mkdirSync(`${taskPath}/${s}`, { recursive: true });
   fs.writeFileSync(`${taskPath}/README.md`, `# ${taskNum} - ${description}\n\n**状态**: created\n`);
   fs.writeFileSync(`${taskPath}/progress.md`, `## 进度记录\n\n### ${new Date().toISOString()}\n- 任务创建\n`);
@@ -1431,6 +2379,7 @@ function createTaskDir(taskNum, description) {
 function initCtx(taskNum, description, options = {}) {
   const { dirName } = createTaskDir(taskNum, description);
   const taskId = dirName;
+  const taskProfile = normalizeTaskProfile(options.task_profile || {}, null);
   const ctx = {
     task_id: `T-${String(taskNum).padStart(3, '0')}`,
     short_id: `T-${String(taskNum).padStart(3, '0')}`,
@@ -1453,6 +2402,7 @@ function initCtx(taskNum, description, options = {}) {
     },
     inputs: options.inputs || {},
     outputs: options.outputs || {},
+    task_profile: taskProfile,
     shared_context: `${TASKS_DIR}/${taskId}/shared-context.json`,
     dri: options.dri || options.assigned_to || null, // DRI：唯一责任人
     dlq_entry: null,
@@ -1495,10 +2445,16 @@ if (!cmd) {
   console.log(`
 ATF CLI v2
 用法:
-  atf create <描述>                       创建任务
+  atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b]  创建任务
   atf list                                列出所有任务
   atf status <taskId>                    查看状态（+投递状态+DRI）
+  atf stats summary                      查看整体完成/反馈统计
+  atf stats agents                       查看 agent 完成度/反馈统计
+  atf stats show <agent>                 查看单个 agent 完成度/反馈统计
+  atf profile <taskId>                   查看任务画像
+  atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]  更新任务画像
   atf assign <taskId> <agent>            指派
+  atf assign recommend <taskId> [top=N]  查看内部指派建议
   atf update <taskId> <status>           更新状态
   atf fan-out <taskId> <agent1,agent2>   fan-out 分发
   atf delivered <taskId>                 手动标记已送达
@@ -1531,6 +2487,16 @@ ATF CLI v2
   atf reflect from-fire <taskId> <fireId> <author> <field> <内容>  从 Trigger fire 创建 Reflection
   atf reflect list <taskId> [field] [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...]      查看 Reflections
   atf reflect show <taskId> <reflectionId>               查看 Reflection
+  atf review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...]
+  atf review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...]
+  atf review pending [agent]                          查看待评价任务
+  atf review show <taskId> <reviewId>                查看单条 Review
+  atf credits rebuild                                重建 credits 积分索引
+  atf credits list                                   查看内部积分概览
+  atf credits show <agent>                           查看单个 agent 积分明细
+  atf reputation rebuild                             重建 reputation / scores 索引
+  atf reputation list                                查看 agent 信誉概览
+  atf reputation show <agent>                        查看单个 agent 信誉画像
   atf shared add <taskId> <author> <type> <内容> 添加 shared context
   atf shared list <taskId> [type]               查看 shared context
   atf msg send <taskId> <from> <to> <type> <内容> [focus=FOC-...] [thread=...] [reply=MSG-...]  发送任务消息
@@ -1567,13 +2533,16 @@ switch (cmd) {
   case 'nextnum': console.log(`下一个编号: ${getNextTaskNum()}`); break;
 
   case 'create': {
-    const description = args.join(' ');
-    if (!description) { console.error('用法: atf create <描述>'); break; }
+    const parsed = parseTaskProfileArgs(args);
+    if (parsed.errors.length) { console.error(`❌ ${parsed.errors.join('；')}`); break; }
+    const description = parsed.descriptionTokens.join(' ');
+    if (!description) { console.error('用法: atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b]'); break; }
     const num = getNextTaskNum();
-    const { taskId, dirName, ctx } = initCtx(num, description);
+    const { taskId, dirName, ctx } = initCtx(num, description, { task_profile: parsed.profile });
     console.log(`\n✅ 任务已创建: ${dirName}`);
     console.log(`   task_id: ${ctx.task_id}  |  status: ${ctx.status}`);
     console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
+    if (hasTaskProfile(ctx)) console.log(`   profile: ${formatTaskProfileSummary(ctx)}`);
     break;
   }
 
@@ -1586,25 +2555,97 @@ switch (cmd) {
     break;
   }
 
+  case 'profile': {
+    if (args[0] === 'set') {
+      const taskId = args[1];
+      if (!taskId) { console.error('用法: atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      const parsed = parseTaskProfileArgs(args.slice(2));
+      if (parsed.errors.length) { console.error(`❌ ${parsed.errors.join('；')}`); break; }
+      if (!parsed.matched || parsed.descriptionTokens.length) {
+        console.error('用法: atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]');
+        break;
+      }
+      ctx.task_profile = normalizeTaskProfile(parsed.profile, getTaskProfile(ctx));
+      writeCtx(taskId, ctx);
+      console.log(`✅ ${ctx.short_id || ctx.task_id} profile 已更新`);
+      console.log(`   ${formatTaskProfileSummary(ctx)}`);
+      break;
+    }
+
+    const taskId = args[0];
+    if (!taskId) { console.error('用法: atf profile <taskId> | atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]'); break; }
+    const ctx = readCtx(taskId);
+    if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    const profile = getTaskProfile(ctx);
+    console.log(`\n${ctx.short_id || ctx.task_id} Profile\n`);
+    console.log(`summary: ${formatTaskProfileSummary(profile)}`);
+    console.log(JSON.stringify(profile, null, 2));
+    console.log('');
+    break;
+  }
+
   case 'status': {
     const taskId = args[0];
     if (!taskId) { console.error('用法: atf status <taskId>'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    const reputationIndex = loadReputationIndex();
+    const creditsIndex = loadCreditsIndex();
+    const assigneeReputation = findAgentReputation(ctx.assigned_to, reputationIndex);
+    const assigneeCredits = findAgentCredits(ctx.assigned_to, creditsIndex);
+    const reviewSummary = buildTaskReviewSummary(taskId);
     const ds = ctx.protocol?.delivery_status || 'N/A';
     const da = ctx.protocol?.delivery_attempts || 0;
     const dri = ctx.dri || '-';
+    const taskProfile = getTaskProfile(ctx);
     console.log(`\n任务: ${ctx.task_id} - ${ctx.description}`);
     console.log(`状态: ${ctx.status}  |  指派: ${ctx.assigned_to||'-'}  |  DRI: ${dri}`);
     console.log(`投递: ${ds} (${da}次)  |  重试: ${ctx.protocol?.retry_count||0}/${ctx.protocol?.max_retries||3}`);
     console.log(`创建: ${ctx.created_at}  |  更新: ${ctx.updated_at}`);
+    if (hasTaskProfile(taskProfile)) console.log(`Profile: ${formatTaskProfileSummary(taskProfile)}`);
     if (ctx.sub_tasks.length) console.log(`子任务: ${ctx.sub_tasks.join(', ')}`);
     if (ctx.parent_id) console.log(`父任务: ${ctx.parent_id}`);
+    if (reviewSummary) {
+      console.log(`Reviews: total=${reviewSummary.total}  approved=${reviewSummary.outcomes.approved}  needs_revision=${reviewSummary.outcomes.needs_revision}  rejected=${reviewSummary.outcomes.rejected}  avg_overall=${reviewSummary.avg_overall ?? '-'}`);
+    } else if (taskNeedsReview(ctx)) {
+      console.log(`Reviews: pending for ${getPrimaryTaskReviewee(ctx)}`);
+    }
+    if (ctx.assigned_to) {
+      console.log(`Reputation(${ctx.assigned_to}): ${formatAgentReputationSummary(assigneeReputation)}`);
+      console.log(`Credits(${ctx.assigned_to}): ${formatAgentCreditsSummary(assigneeCredits)}`);
+    }
     console.log('');
     break;
   }
 
   case 'assign': {
+    if (args[0] === 'recommend') {
+      const taskId = args[1];
+      if (!taskId) { console.error('用法: atf assign recommend <taskId> [top=N]'); break; }
+      let top = 3;
+      for (const part of args.slice(2)) {
+        if (part && part.startsWith('top=')) {
+          const value = Number(part.substring('top='.length));
+          if (Number.isFinite(value) && value > 0) top = Math.floor(value);
+        }
+      }
+      const recommendation = buildAssignmentRecommendations(taskId, { top });
+      if (!recommendation) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      console.log(`\n${recommendation.task.task_id} Assign Recommendations\n`);
+      console.log(`${recommendation.task.description}`);
+      console.log(`status=${recommendation.task.status}${recommendation.task.current_assignee ? `  current=${recommendation.task.current_assignee}` : ''}${recommendation.task.dri ? `  dri=${recommendation.task.dri}` : ''}`);
+      if (hasTaskProfile(recommendation.task.task_profile)) console.log(`profile=${formatTaskProfileSummary(recommendation.task.task_profile)}`);
+      console.log('');
+      for (const item of recommendation.recommendations) {
+        console.log(`${item.agent}  score=${item.recommendation_score}`);
+        console.log(`  ${item.reasons.join('  ')}`);
+      }
+      console.log('');
+      break;
+    }
+
     const [taskId, agent] = args;
     if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent>'); break; }
     const ctx = readCtx(taskId);
@@ -1614,6 +2655,8 @@ switch (cmd) {
     ctx.protocol.delivery_status = 'pending';
     ctx.protocol.delivery_attempts = 0;
     writeCtx(taskId, ctx);
+    buildReputationIndex();
+    buildCreditsIndex();
     // 写 pending-task.json 通知 agent
     const dir = dirOfTaskId(taskId);
     const ws = `${TASKS_DIR}/${dir}`;
@@ -1622,12 +2665,18 @@ switch (cmd) {
       assigned_to: agent,
       description: ctx.description,
       instructions: ctx.instructions || null,
+      task_profile: getTaskProfile(ctx),
       created_by: ctx.assigned_to || 'pinchymeow',
       created_at: new Date().toISOString()
     };
     fs.writeFileSync(`${ws}/pending-task.json`, JSON.stringify(pending, null, 2));
     console.log(`✅ 已指派 ${taskId} → ${agent}`);
     console.log(`   pending-task.json → ${ws}/pending-task.json`);
+    if (hasTaskProfile(ctx)) console.log(`   task_profile: ${formatTaskProfileSummary(ctx)}`);
+    const assigneeReputation = findAgentReputation(agent, loadReputationIndex());
+    const assigneeCredits = findAgentCredits(agent, loadCreditsIndex());
+    console.log(`   reputation: ${formatAgentReputationSummary(assigneeReputation)}`);
+    console.log(`   credits: ${formatAgentCreditsSummary(assigneeCredits)}`);
     break;
   }
 
@@ -1639,6 +2688,8 @@ switch (cmd) {
     const previousStatus = ctx.status;
     const now = new Date().toISOString();
     ctx.status = status; writeCtx(taskId, ctx);
+    buildReputationIndex();
+    buildCreditsIndex();
     appendNotificationHistory(taskId, { event: 'status_change', from: previousStatus, status, at: now });
     const firedTriggers = fireMatchingTriggers(
       taskId,
@@ -2518,6 +3569,372 @@ switch (cmd) {
   }
 
   // =============================================================
+  // review 命令 - 任务交付评价与协作评价
+  // =============================================================
+  case 'review': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'add') {
+      const [taskId, reviewer, reviewee, outcome, ...summaryParts] = restArgs;
+      if (!taskId || !reviewer || !reviewee || !outcome || !summaryParts.length) {
+        console.error('用法: atf review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...]'); break;
+      }
+      if (!REVIEW_OUTCOMES.has(outcome)) {
+        console.error(`Review outcome: ${[...REVIEW_OUTCOMES].join('|')}`); break;
+      }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+
+      let reviewType = 'task';
+      let focusId = null;
+      let threadId = null;
+      let triggerId = null;
+      let fireId = null;
+      const scoreInputs = {};
+      const summaryTokens = [];
+      for (const part of summaryParts) {
+        if (part.startsWith('type=')) reviewType = part.substring('type='.length) || 'task';
+        else if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+        else if (part.startsWith('thread=')) threadId = part.substring('thread='.length);
+        else if (part.startsWith('trigger=')) triggerId = part.substring('trigger='.length);
+        else if (part.startsWith('fire=')) fireId = part.substring('fire='.length);
+        else if (part.startsWith('score=')) scoreInputs.overall = part.substring('score='.length);
+        else if (part.startsWith('overall=')) scoreInputs.overall = part.substring('overall='.length);
+        else if (part.startsWith('quality=')) scoreInputs.quality = part.substring('quality='.length);
+        else if (part.startsWith('timeliness=')) scoreInputs.timeliness = part.substring('timeliness='.length);
+        else if (part.startsWith('communication=')) scoreInputs.communication = part.substring('communication='.length);
+        else if (part.startsWith('ownership=')) scoreInputs.ownership = part.substring('ownership='.length);
+        else summaryTokens.push(part);
+      }
+      if (!REVIEW_TYPES.has(reviewType)) {
+        console.error(`Review type: ${[...REVIEW_TYPES].join('|')}`); break;
+      }
+      if (!summaryTokens.length) {
+        console.error('❌ Review 总结不能为空'); break;
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`❌ Focus 不存在: ${focusId}`); break;
+      }
+      let fire = null;
+      if (fireId) {
+        fire = readTriggerFire(taskId, fireId);
+        if (!fire) { console.error(`❌ Trigger firing 不存在: ${fireId}`); break; }
+        if (!focusId && fire.focus_id) focusId = fire.focus_id;
+        if (!threadId && fire.thread_id) threadId = fire.thread_id;
+        if (!triggerId) triggerId = fire.trigger_id;
+      }
+      if (triggerId && !readTrigger(taskId, triggerId)) {
+        console.error(`❌ Trigger 不存在: ${triggerId}`); break;
+      }
+      if (!threadId) threadId = defaultThreadId(ctx.short_id || ctx.task_id, focusId, null);
+      const scores = normalizeReviewScores(scoreInputs);
+      if (!scores || !Object.keys(scores).length || scores.overall === undefined) {
+        console.error('❌ Review 需要 overall=1-5 或至少一个维度评分（quality/timeliness/communication/ownership）'); break;
+      }
+      try {
+        const review = createReview(taskId, ctx, reviewer, reviewee, outcome, summaryTokens.join(' '), {
+          review_type: reviewType,
+          focus_id: focusId,
+          thread_id: threadId,
+          trigger_id: triggerId,
+          fire_id: fireId,
+          scores,
+        });
+        buildReputationIndex();
+        buildCreditsIndex();
+        console.log(`✅ 已写入 Review ${review.review_id}`);
+        console.log(`   任务: ${review.task_id}  |  ${review.reviewer} -> ${review.reviewee}`);
+        console.log(`   类型: ${review.review_type}  |  outcome: ${review.outcome}  |  overall: ${review.scores.overall}`);
+        const revieweeCredits = findAgentCredits(review.reviewee, loadCreditsIndex());
+        console.log(`   credits(${review.reviewee}): ${formatAgentCreditsSummary(revieweeCredits)}`);
+        if (review.focus_id || review.thread_id) console.log(`   scope: ${review.focus_id ? `focus=${review.focus_id}` : ''}${review.focus_id && review.thread_id ? '  ' : ''}${review.thread_id ? `thread=${review.thread_id}` : ''}`);
+      } catch (error) {
+        console.error(`❌ ${error.message}`);
+      }
+      break;
+    }
+
+    if (sub === 'pending') {
+      const [agent] = restArgs;
+      const pendingTasks = collectPendingReviewTasks(agent || null);
+      if (!pendingTasks.length) {
+        console.log(agent ? `agent ${agent} 暂无待评价任务` : '当前暂无待评价任务');
+        break;
+      }
+      console.log(`\n待评价任务 (${pendingTasks.length} 条)\n`);
+      for (const task of pendingTasks) {
+        console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}`);
+        console.log(`  ${task.description}`);
+        if (task.existing_review_summary) {
+          console.log(`  existing_reviews=${task.existing_review_summary.total}  avg_overall=${task.existing_review_summary.avg_overall ?? '-'}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'list') {
+      const [taskId, ...filterParts] = restArgs;
+      if (!taskId) { console.error('用法: atf review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      let reviewee = null;
+      let reviewer = null;
+      let reviewType = null;
+      let outcomeFilter = null;
+      let focusId = null;
+      for (const part of filterParts.filter(Boolean)) {
+        if (part.startsWith('reviewer=')) reviewer = part.substring('reviewer='.length);
+        else if (part.startsWith('type=')) reviewType = part.substring('type='.length);
+        else if (part.startsWith('outcome=')) outcomeFilter = part.substring('outcome='.length);
+        else if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+        else reviewee = part;
+      }
+      if (reviewType && !REVIEW_TYPES.has(reviewType)) {
+        console.error(`Review type: ${[...REVIEW_TYPES].join('|')}`); break;
+      }
+      if (outcomeFilter && !REVIEW_OUTCOMES.has(outcomeFilter)) {
+        console.error(`Review outcome: ${[...REVIEW_OUTCOMES].join('|')}`); break;
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`❌ Focus 不存在: ${focusId}`); break;
+      }
+      let reviews = readTaskReviews(taskId);
+      if (reviewee) reviews = reviews.filter(review => review.reviewee === reviewee);
+      if (reviewer) reviews = reviews.filter(review => review.reviewer === reviewer);
+      if (reviewType) reviews = reviews.filter(review => review.review_type === reviewType);
+      if (outcomeFilter) reviews = reviews.filter(review => review.outcome === outcomeFilter);
+      if (focusId) reviews = reviews.filter(review => review.focus_id === focusId);
+      if (!reviews.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Reviews`); break; }
+      console.log(`\n${ctx.short_id || ctx.task_id} Reviews (${reviews.length} 条)\n`);
+      for (const review of reviews) {
+        console.log(`${review.review_id}  ${review.reviewer} -> ${review.reviewee}  [${review.review_type}] ${review.outcome}`);
+        console.log(`  overall=${review.scores.overall}${review.focus_id ? `  focus=${review.focus_id}` : ''}${review.thread_id ? `  thread=${review.thread_id}` : ''}`);
+        console.log(`  ${review.summary}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'show') {
+      const [taskId, reviewId] = restArgs;
+      if (!taskId || !reviewId) { console.error('用法: atf review show <taskId> <reviewId>'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      const review = readReview(taskId, reviewId);
+      if (!review) { console.error(`❌ Review 不存在: ${reviewId}`); break; }
+      console.log(JSON.stringify(review, null, 2));
+      break;
+    }
+
+    console.error('用法: atf review add|pending|list|show ...');
+    break;
+  }
+
+  // =============================================================
+  // credits 命令 - 内部积分账本
+  // =============================================================
+  case 'credits': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'rebuild') {
+      const index = buildCreditsIndex();
+      console.log(`✅ credits index 已重建`);
+      console.log(`   agents: ${index.total_agents}`);
+      console.log(`   file: ${CREDITS_FILE}`);
+      break;
+    }
+
+    if (sub === 'list') {
+      const index = buildCreditsIndex();
+      if (!index.agents.length) { console.log('当前暂无 agent credits 数据'); break; }
+      console.log(`\nAgent Credits (${index.agents.length} agents)\n`);
+      console.log('agent           total   completion  feedback  reviewer  completed  delivered  approved  revision  rejected');
+      console.log('─'.repeat(118));
+      for (const agent of index.agents) {
+        console.log(`${agent.agent.padEnd(15)} ${String(agent.total_credits).padEnd(7)} ${String(agent.role_credits.from_completion).padEnd(11)} ${String(agent.role_credits.as_reviewee).padEnd(9)} ${String(agent.role_credits.as_reviewer).padEnd(9)} ${String(agent.completion_stats.completed).padEnd(10)} ${String(agent.completion_stats.delivered).padEnd(10)} ${String(agent.review_stats.outcomes.approved).padEnd(9)} ${String(agent.review_stats.outcomes.needs_revision).padEnd(9)} ${String(agent.review_stats.outcomes.rejected).padEnd(8)}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'show') {
+      const [agentName] = restArgs;
+      if (!agentName) { console.error('用法: atf credits show <agent>'); break; }
+      const index = buildCreditsIndex();
+      const agent = index.agents.find(item => item.agent === agentName);
+      if (!agent) { console.error(`❌ 未找到 agent credits: ${agentName}`); break; }
+      console.log(`\n${agent.agent} Credits\n`);
+      console.log(`total_credits: ${agent.total_credits}`);
+      console.log(`roles: completion=${agent.role_credits.from_completion}  reviewee=${agent.role_credits.as_reviewee}  reviewer=${agent.role_credits.as_reviewer}`);
+      console.log(`completion: completed=${agent.completion_stats.completed}  delivered=${agent.completion_stats.delivered}`);
+      console.log(`feedback: approved=${agent.review_stats.outcomes.approved}  needs_revision=${agent.review_stats.outcomes.needs_revision}  rejected=${agent.review_stats.outcomes.rejected}`);
+      console.log(`types: task=${agent.review_stats.by_type.task}  delivery=${agent.review_stats.by_type.delivery}  collaboration=${agent.review_stats.by_type.collaboration}`);
+      if (agent.recent_events.length) {
+        console.log('\nrecent credit events:');
+        for (const event of agent.recent_events) {
+          const eventLabel = event.event_type === 'completion'
+            ? `${event.role}  credits=${event.credits}  ${event.completion_stage}`
+            : `${event.role}  credits=${event.credits}  ${event.outcome}`;
+          console.log(`- ${event.at}  ${event.event_id}  ${eventLabel}`);
+          console.log(`  task=${event.task_id}${event.counterparty ? `  with=${event.counterparty}` : ''}`);
+          console.log(`  ${event.summary}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    console.error('用法: atf credits rebuild|list|show ...');
+    break;
+  }
+
+  // =============================================================
+  // reputation 命令 - Agent 信誉画像与统计
+  // =============================================================
+  case 'reputation': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'rebuild') {
+      const index = buildReputationIndex();
+      console.log(`✅ reputation index 已重建`);
+      console.log(`   agents: ${index.total_agents}  |  tasks: ${index.total_tasks}`);
+      console.log(`   file: ${SCORES_FILE}`);
+      break;
+    }
+
+    if (sub === 'list') {
+      const index = buildReputationIndex();
+      if (!index.agents.length) { console.log('当前暂无 agent reputation 数据'); break; }
+      console.log(`\nAgent Reputation (${index.agents.length} agents)\n`);
+      console.log('agent           score   tasks  delivered  reviews  avg_review  response');
+      console.log('─'.repeat(78));
+      for (const agent of index.agents) {
+        const score = String(agent.overall_score ?? '-').padEnd(6);
+        const tasks = String(agent.task_stats.assigned).padEnd(5);
+        const delivered = String(agent.task_stats.delivered).padEnd(9);
+        const reviews = String(agent.review_stats.received).padEnd(7);
+        const avgReview = String(agent.review_stats.average_scores.overall ?? '-').padEnd(10);
+        const response = agent.derived.response_rate === null ? '-' : `${roundNumber(agent.derived.response_rate * 100, 1)}%`;
+        console.log(`${agent.agent.padEnd(15)} ${score}  ${tasks}  ${delivered}  ${reviews}  ${avgReview}  ${response}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'show') {
+      const [agentName] = restArgs;
+      if (!agentName) { console.error('用法: atf reputation show <agent>'); break; }
+      const index = buildReputationIndex();
+      const agent = index.agents.find(item => item.agent === agentName);
+      if (!agent) { console.error(`❌ 未找到 agent reputation: ${agentName}`); break; }
+      console.log(`\n${agent.agent} Reputation\n`);
+      console.log(`overall_score: ${agent.overall_score ?? '-'}`);
+      console.log(`tasks: assigned=${agent.task_stats.assigned}  completed=${agent.task_stats.completed}  delivered=${agent.task_stats.delivered}  blocked=${agent.task_stats.blocked}  active=${agent.task_stats.active}  dri=${agent.task_stats.dri_owned}`);
+      console.log(`derived: completion=${agent.derived.completion_rate === null ? '-' : `${roundNumber(agent.derived.completion_rate * 100, 1)}%`}  delivery=${agent.derived.delivery_rate === null ? '-' : `${roundNumber(agent.derived.delivery_rate * 100, 1)}%`}  response=${agent.derived.response_rate === null ? '-' : `${roundNumber(agent.derived.response_rate * 100, 1)}%`}  blocked=${agent.derived.blocked_rate === null ? '-' : `${roundNumber(agent.derived.blocked_rate * 100, 1)}%`}`);
+      console.log(`collaboration: sent=${agent.collaboration_stats.messages_sent}  received=${agent.collaboration_stats.messages_received}  receipts=${agent.collaboration_stats.receipts_written}  reflections=${agent.collaboration_stats.reflections_authored}  threads=${agent.collaboration_stats.threads_participated}`);
+      console.log(`reviews: received=${agent.review_stats.received}  given=${agent.review_stats.given}  approved=${agent.review_stats.outcomes.approved}  needs_revision=${agent.review_stats.outcomes.needs_revision}  rejected=${agent.review_stats.outcomes.rejected}`);
+      console.log(`review_scores: overall=${agent.review_stats.average_scores.overall ?? '-'}  quality=${agent.review_stats.average_scores.quality ?? '-'}  timeliness=${agent.review_stats.average_scores.timeliness ?? '-'}  communication=${agent.review_stats.average_scores.communication ?? '-'}  ownership=${agent.review_stats.average_scores.ownership ?? '-'}  reviewers=${agent.review_stats.unique_reviewers}`);
+      if (agent.specialization?.task_types?.length) {
+        console.log('\nspecialization:');
+        for (const bucket of agent.specialization.task_types.slice(0, 5)) {
+          console.log(`- ${bucket.type}  score=${bucket.overall_score ?? '-'}  tasks=${bucket.task_stats.assigned}  delivered=${bucket.task_stats.delivered}  reviews=${bucket.review_stats.received}  avg_overall=${bucket.review_stats.average_overall ?? '-'}`);
+        }
+      }
+      if (agent.review_stats.recent_reviews.length) {
+        console.log('\nrecent reviews:');
+        for (const review of agent.review_stats.recent_reviews) {
+          console.log(`- ${review.created_at}  ${review.review_id}  ${review.reviewer}  [${review.review_type}] ${review.outcome}  overall=${review.overall ?? '-'}`);
+          console.log(`  ${review.summary}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    console.error('用法: atf reputation rebuild|list|show ...');
+    break;
+  }
+
+  // =============================================================
+  // stats 命令 - 内部完成度 / 反馈统计
+  // =============================================================
+  case 'stats': {
+    const [sub, ...restArgs] = args;
+
+    if (!sub || sub === 'summary') {
+      const tasks = getAllTasks();
+      const statusCounts = new Map();
+      for (const task of tasks) {
+        const status = task.status || 'unknown';
+        statusCounts.set(status, (statusCounts.get(status) || 0) + 1);
+      }
+      const pendingReviews = collectPendingReviewTasks();
+      const deliveredTasks = tasks.filter(task => task.status === 'delivered' || task.protocol?.delivery_status === 'delivered').length;
+      const completedTasks = tasks.filter(task => task.status === 'completed' || task.status === 'delivered' || task.protocol?.delivery_status === 'delivered').length;
+      console.log('\nATF Stats Summary\n');
+      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  pending_reviews=${pendingReviews.length}`);
+      if (statusCounts.size) {
+        console.log('\nstatus counts:');
+        for (const [status, count] of [...statusCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+          console.log(`- ${status}: ${count}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'agents' || sub === 'list') {
+      const index = buildReputationIndex();
+      const pendingByAgent = new Map();
+      for (const item of collectPendingReviewTasks()) {
+        pendingByAgent.set(item.reviewee, (pendingByAgent.get(item.reviewee) || 0) + 1);
+      }
+      if (!index.agents.length) { console.log('当前暂无 agent 统计数据'); break; }
+      console.log(`\nAgent Stats (${index.agents.length} agents)\n`);
+      console.log('agent           assigned  completed  delivered  completion  reviews  avg_review  approved  revision  rejected  pending');
+      console.log('─'.repeat(122));
+      for (const agent of index.agents) {
+        const completion = agent.derived.completion_rate === null ? '-' : `${roundNumber(agent.derived.completion_rate * 100, 1)}%`;
+        console.log(`${agent.agent.padEnd(15)} ${String(agent.task_stats.assigned).padEnd(8)} ${String(agent.task_stats.completed).padEnd(9)} ${String(agent.task_stats.delivered).padEnd(9)} ${String(completion).padEnd(11)} ${String(agent.review_stats.received).padEnd(7)} ${String(agent.review_stats.average_scores.overall ?? '-').padEnd(11)} ${String(agent.review_stats.outcomes.approved).padEnd(9)} ${String(agent.review_stats.outcomes.needs_revision).padEnd(9)} ${String(agent.review_stats.outcomes.rejected).padEnd(9)} ${String(pendingByAgent.get(agent.agent) || 0).padEnd(7)}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'show') {
+      const [agentName] = restArgs;
+      if (!agentName) { console.error('用法: atf stats show <agent>'); break; }
+      const reputationIndex = buildReputationIndex();
+      const creditsIndex = buildCreditsIndex();
+      const agent = reputationIndex.agents.find(item => item.agent === agentName);
+      if (!agent) { console.error(`❌ 未找到 agent: ${agentName}`); break; }
+      const credits = findAgentCredits(agentName, creditsIndex);
+      const pendingReviews = collectPendingReviewTasks(agentName).length;
+      console.log(`\n${agent.agent} Stats\n`);
+      console.log(`completion: assigned=${agent.task_stats.assigned}  completed=${agent.task_stats.completed}  delivered=${agent.task_stats.delivered}  blocked=${agent.task_stats.blocked}  active=${agent.task_stats.active}`);
+      console.log(`rates: completion=${agent.derived.completion_rate === null ? '-' : `${roundNumber(agent.derived.completion_rate * 100, 1)}%`}  delivery=${agent.derived.delivery_rate === null ? '-' : `${roundNumber(agent.derived.delivery_rate * 100, 1)}%`}  response=${agent.derived.response_rate === null ? '-' : `${roundNumber(agent.derived.response_rate * 100, 1)}%`}  pending_reviews=${pendingReviews}`);
+      console.log(`feedback: received=${agent.review_stats.received}  given=${agent.review_stats.given}  approved=${agent.review_stats.outcomes.approved}  needs_revision=${agent.review_stats.outcomes.needs_revision}  rejected=${agent.review_stats.outcomes.rejected}`);
+      console.log(`review_scores: overall=${agent.review_stats.average_scores.overall ?? '-'}  quality=${agent.review_stats.average_scores.quality ?? '-'}  timeliness=${agent.review_stats.average_scores.timeliness ?? '-'}  communication=${agent.review_stats.average_scores.communication ?? '-'}  ownership=${agent.review_stats.average_scores.ownership ?? '-'}`);
+      if (credits) {
+        console.log(`credits: total=${credits.total_credits}  completion=${credits.role_credits.from_completion}  feedback=${credits.role_credits.as_reviewee}  reviewer=${credits.role_credits.as_reviewer}`);
+      }
+      if (agent.review_stats.recent_reviews.length) {
+        console.log('\nrecent feedback:');
+        for (const review of agent.review_stats.recent_reviews) {
+          console.log(`- ${review.created_at}  ${review.reviewer}  [${review.review_type}] ${review.outcome}  overall=${review.overall ?? '-'}`);
+          console.log(`  ${review.summary}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    console.error('用法: atf stats summary|agents|show ...');
+    break;
+  }
+
+  // =============================================================
   // 消息命令 - 同一 gateway 内的异步任务消息
   // =============================================================
   case 'msg': {
@@ -2819,12 +4236,15 @@ switch (cmd) {
       ctx.dlq_entry = null;
       ctx.updated_at = new Date().toISOString();
       writeCtx(taskId, ctx);
+      buildReputationIndex();
+      buildCreditsIndex();
       fs.unlinkSync(dlqFile);
       // 写 pending-task.json 通知 agent
       const ws = resolveAgentWorkspace(ctx.assigned_to);
       const pending = {
         task_id: ctx.task_id,
         description: ctx.description,
+        task_profile: getTaskProfile(ctx),
         assigned_at: new Date().toISOString(),
         retry_count: newRetry,
       };
@@ -2838,6 +4258,8 @@ switch (cmd) {
     if (dlqCmd === 'skip') {
       const ctx = readCtx(taskId);
       if (ctx) { ctx.status = 'archived'; writeCtx(taskId, ctx); }
+      buildReputationIndex();
+      buildCreditsIndex();
       fs.unlinkSync(dlqFile);
       console.log(`✅ ${taskId} 已跳过 (archived)`);
       break;
@@ -2847,6 +4269,8 @@ switch (cmd) {
     if (dlqCmd === 'cancel') {
       const ctx = readCtx(taskId);
       if (ctx) { ctx.status = 'cancelled'; writeCtx(taskId, ctx); }
+      buildReputationIndex();
+      buildCreditsIndex();
       fs.unlinkSync(dlqFile);
       console.log(`✅ ${taskId} 已取消`);
       break;
@@ -2978,6 +4402,8 @@ ${body}\n`;
     ctx.protocol = ctx.protocol || {};
     ctx.protocol.delivery_status = 'delivered';
     writeCtx(taskId, ctx);
+    buildReputationIndex();
+    buildCreditsIndex();
     const hf = `${TASKS_DIR}/${taskId}/notifications/history.json`;
     const h = loadJson(hf)||[]; h.push({event:'delivered',at:new Date().toISOString()}); saveJson(hf,h.slice(-50));
     console.log(`✅ ${taskId} → delivered`);
@@ -3081,6 +4507,7 @@ ${body}\n`;
       assigned_to: ctx.assigned_to,
       description: ctx.description,
       instructions: ctx.instructions || null,
+      task_profile: getTaskProfile(ctx),
       decision: { type: 'answered', question: ctx.decision.question, answer },
       created_by: 'pinchymeow',
       created_at: now,
@@ -3130,6 +4557,7 @@ ${body}\n`;
       assigned_to: ctx.assigned_to,
       description: ctx.description,
       instructions: ctx.instructions || null,
+      task_profile: getTaskProfile(ctx),
       decision: { type: 'revision', feedback },
       created_by: 'pinchymeow',
       created_at: now,
@@ -3144,5 +4572,5 @@ ${body}\n`;
 
   default:
     console.error(`未知命令: ${cmd}`);
-    console.error('用法: atf create|list|status|assign|update|fan-out|focus|trigger|reflect|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
+    console.error('用法: atf create|list|status|stats|profile|assign|update|fan-out|focus|trigger|reflect|review|credits|reputation|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
 }

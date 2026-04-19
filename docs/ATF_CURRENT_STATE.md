@@ -134,6 +134,13 @@ ATF 的价值已经不只是“记录任务”，而是：
 
 在这之后，再做评价、信誉和激励才是合理顺序。
 
+当前已经开始进入 Phase C 的最小切口，但对 `claw army` 内部场景先收敛为 Lite 版本：
+
+- 任务级 `review`
+- `delivery / collaboration / task` 三类评价记录
+- `scores.json` reputation 聚合索引
+- 基于任务、消息、回执、反思和 review 的简化画像
+
 ## Phase B 当前进展
 
 `Phase B / 协作自治层` 已按当前定义范围完成：
@@ -148,3 +155,34 @@ ATF 的价值已经不只是“记录任务”，而是：
 - `pending_task / message / room / noop` adapter 已落地
 - handoff schema 已显式传递 shared context / thread context / reflection summary
 - execution 失败模型已落地，不会因 adapter 配置错误误消费 fire
+
+## Phase C 当前进展
+
+`Phase C Lite / 内部调度信誉层` 已开始落地最小闭环：
+
+- 已支持任务目录下的 `reviews/` 评价记录
+- 已支持 `review add / list / show`
+- 已支持 `review pending` 列出待评价任务
+- 已支持 `delivery / collaboration / task` 三类评价
+- 已支持 `approved / needs_revision / rejected` outcome
+- 已支持 `overall / quality / timeliness / communication / ownership` 评分维度
+- 已支持 `credits rebuild / list / show`
+- 已支持 `reputation rebuild / list / show`
+- 已支持 `stats summary / agents / show`
+- 已支持把任务、消息、回执、反思和 review 聚合为 `ATF_DATA_DIR/scores.json`
+- 已支持把“完成度 + review 反馈”聚合为 `ATF_DATA_DIR/credits.json` 内部积分账本
+- 已支持任务级 `task_profile`，可记录 `type / difficulty / priority / tags`
+- 已支持在 `status / assign` 中直接读取 review / reputation / credits 摘要
+- 已支持 `assign recommend` 结合任务画像给内部指派提供排序参考
+
+当前仍未完成的部分：
+
+- 还没有签名身份和 reviewer 权限治理
+- 还没有自动验收和争议处理
+- 还没有与预算、结算、激励绑定
+
+当前定位说明：
+
+- 这套能力优先服务 `claw army` 内部调度
+- 当前目标是让完成度和反馈更可统计、review 闭环更轻、历史表现更可读，并给内部积分反馈与轻量任务画像
+- 更重的市场化设计会后移到未来商用化阶段

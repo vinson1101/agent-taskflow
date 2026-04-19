@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const util = require('util');
+const vm = require('vm');
+const { createRequire } = require('module');
+
+const repoRoot = path.resolve(__dirname, '..', '..');
+const cliPath = path.join(repoRoot, 'atf-cli.js');
+const smokeRoot = path.join(repoRoot, '.tmp-atf-phasec-smoke');
+
+function parseArgs(argv) {
+  return {
+    cleanup: argv.includes('--cleanup'),
+    quiet: argv.includes('--quiet'),
+  };
+}
+
+function safeResetDir(target) {
+  if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
+  fs.mkdirSync(target, { recursive: true });
+}
+
+function runCli(args, env, options = {}) {
+  const source = fs.readFileSync(cliPath, 'utf8');
+  const stdout = [];
+  const stderr = [];
+  const exitSignal = { code: 0 };
+  const cliRequire = createRequire(cliPath);
+  const cliProcess = {
+    ...process,
+    argv: [process.execPath, cliPath, ...args],
+    env: {
+      ...process.env,
+      ...env,
+    },
+    cwd: () => repoRoot,
+    exit(code = 0) {
+      exitSignal.code = code;
+      throw exitSignal;
+    },
+  };
+
+  const context = {
+    require: cliRequire,
+    module: { exports: {} },
+    exports: {},
+    __dirname: path.dirname(cliPath),
+    __filename: cliPath,
+    process: cliProcess,
+    console: {
+      log: (...parts) => stdout.push(util.format(...parts)),
+      error: (...parts) => stderr.push(util.format(...parts)),
+    },
+    Buffer,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+  };
+
+  try {
+    vm.runInNewContext(source, context, { filename: cliPath });
+  } catch (error) {
+    if (error !== exitSignal) {
+      const message = [
+        `node atf-cli.js ${args.join(' ')}`,
+        stdout.length ? `stdout:\n${stdout.join('\n').trim()}` : null,
+        stderr.length ? `stderr:\n${stderr.join('\n').trim()}` : null,
+        error && error.message ? `error:\n${error.message}` : null,
+      ].filter(Boolean).join('\n');
+      throw new Error(message);
+    }
+  }
+
+  if (exitSignal.code !== 0 || stderr.length) {
+    const message = [
+      `node atf-cli.js ${args.join(' ')}`,
+      stdout.length ? `stdout:\n${stdout.join('\n').trim()}` : null,
+      stderr.length ? `stderr:\n${stderr.join('\n').trim()}` : null,
+      exitSignal.code ? `exit=${exitSignal.code}` : null,
+    ].filter(Boolean).join('\n');
+    throw new Error(message);
+  }
+
+  const output = stdout.join('\n').trim();
+  if (!options.quiet && output) {
+    console.log(`$ node atf-cli.js ${args.join(' ')}`);
+    console.log(output);
+    console.log('');
+  }
+  return output;
+}
+
+function extractTaskId(output) {
+  const match = output.match(/T-\d+/);
+  if (!match) throw new Error(`task id not found in output:\n${output}`);
+  return match[0];
+}
+
+function assertIncludes(output, fragment, label) {
+  if (!output.includes(fragment)) {
+    throw new Error(`${label} missing fragment: ${fragment}\n--- output ---\n${output}`);
+  }
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+  safeResetDir(smokeRoot);
+
+  const env = {
+    ATF_TASKS_DIR: path.join(smokeRoot, 'tasks'),
+    ATF_WORKSPACE_DIR: path.join(smokeRoot, 'workspace'),
+    ATF_DATA_DIR: path.join(smokeRoot, 'data'),
+  };
+
+  fs.mkdirSync(env.ATF_TASKS_DIR, { recursive: true });
+  fs.mkdirSync(env.ATF_WORKSPACE_DIR, { recursive: true });
+  fs.mkdirSync(env.ATF_DATA_DIR, { recursive: true });
+
+  const createCompleted = runCli(['create', 'Phase C completed demo', 'type=ops', 'difficulty=3', 'priority=normal'], env, options);
+  const completedTaskId = extractTaskId(createCompleted);
+  runCli(['assign', completedTaskId, 'f0x'], env, options);
+  runCli(['update', completedTaskId, 'completed'], env, options);
+  runCli(['review', 'add', completedTaskId, 'pinchymeow', 'f0x', 'approved', 'completed and acceptable', 'type=task', 'overall=4', 'quality=4', 'timeliness=4', 'communication=4', 'ownership=4'], env, options);
+
+  const createDelivered = runCli(['create', 'Phase C delivered demo', 'type=delivery', 'difficulty=4', 'priority=high'], env, options);
+  const deliveredTaskId = extractTaskId(createDelivered);
+  runCli(['assign', deliveredTaskId, 'pinchymeow'], env, options);
+  runCli(['delivered', deliveredTaskId], env, options);
+  runCli(['review', 'add', deliveredTaskId, 'f0x', 'pinchymeow', 'approved', 'delivered well', 'type=delivery', 'overall=5', 'quality=5', 'timeliness=4', 'communication=4', 'ownership=5'], env, options);
+
+  const statsSummary = runCli(['stats', 'summary'], env, options);
+  const statsAgents = runCli(['stats', 'agents'], env, options);
+  const statsShowF0x = runCli(['stats', 'show', 'f0x'], env, options);
+  const creditsList = runCli(['credits', 'list'], env, options);
+  const creditsShowPinchy = runCli(['credits', 'show', 'pinchymeow'], env, options);
+  const reviewPending = runCli(['review', 'pending'], env, options);
+
+  assertIncludes(statsSummary, 'tasks: total=2', 'stats summary');
+  assertIncludes(statsSummary, 'pending_reviews=0', 'stats summary');
+  assertIncludes(statsAgents, 'f0x', 'stats agents');
+  assertIncludes(statsAgents, 'pinchymeow', 'stats agents');
+  assertIncludes(statsShowF0x, 'credits: total=', 'stats show f0x');
+  assertIncludes(statsShowF0x, 'completion=', 'stats show f0x');
+  assertIncludes(creditsList, 'completion', 'credits list');
+  assertIncludes(creditsShowPinchy, 'completion: completed=0  delivered=1', 'credits show pinchymeow');
+  assertIncludes(reviewPending, '当前暂无待评价任务', 'review pending');
+
+  console.log('ATF Phase C Lite smoke passed.');
+  console.log(`Smoke data: ${smokeRoot}`);
+  console.log(`Tasks dir: ${env.ATF_TASKS_DIR}`);
+  console.log(`Data dir: ${env.ATF_DATA_DIR}`);
+
+  if (options.cleanup) {
+    fs.rmSync(smokeRoot, { recursive: true, force: true });
+    console.log('Smoke directory removed.');
+  }
+}
+
+try {
+  main();
+} catch (error) {
+  console.error('ATF Phase C Lite smoke failed.');
+  console.error(error.message || String(error));
+  process.exit(1);
+}

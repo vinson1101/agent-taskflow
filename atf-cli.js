@@ -1941,6 +1941,29 @@ function formatRate(value) {
   return `${roundNumber(value * 100, 1)}%`;
 }
 
+function parseIsoTimestamp(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function computeAgeDays(value, referenceTime = null) {
+  const date = value instanceof Date ? value : parseIsoTimestamp(value);
+  const reference = referenceTime instanceof Date ? referenceTime : new Date();
+  if (!date) return null;
+  const diffMs = reference.getTime() - date.getTime();
+  if (!Number.isFinite(diffMs) || diffMs < 0) return 0;
+  return Math.floor(diffMs / (24 * 60 * 60 * 1000));
+}
+
+function getAgeBucketLabel(ageDays) {
+  if (!Number.isInteger(ageDays) || ageDays < 0) return 'unknown';
+  if (ageDays <= 1) return '0-1d';
+  if (ageDays <= 3) return '2-3d';
+  if (ageDays <= 7) return '4-7d';
+  return '8d+';
+}
+
 function getEffectiveTaskReviewStatus(ctx) {
   if (!ctx) return 'unknown';
   if (ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered') return 'delivered';
@@ -2025,12 +2048,14 @@ function collectPendingReviewTasks(agentOrOptions = null, options = {}) {
       const taskId = ctx.short_id || ctx.task_id;
       const targetReviewee = agent || getPrimaryTaskReviewee(ctx);
       const taskProfile = getTaskProfile(ctx);
+      const updatedAt = ctx.updated_at || ctx.created_at || null;
       return {
         task_id: taskId,
         description: ctx.description,
         status: getEffectiveTaskReviewStatus(ctx),
         reviewee: targetReviewee,
-        updated_at: ctx.updated_at,
+        updated_at: updatedAt,
+        age_days: computeAgeDays(updatedAt),
         task_type: taskProfile.type || null,
         task_profile: taskProfile,
         existing_review_summary: buildTaskReviewSummary(taskId),
@@ -2192,11 +2217,17 @@ function buildReviewCoverageStats(options = {}) {
   const pendingByAgent = new Map();
   const pendingByType = new Map();
   const pendingByStatus = new Map();
+  const pendingByAgeBucket = new Map();
+  const oldestTasks = [];
+  let oldestPendingAt = null;
+  let oldestPendingAgeDays = null;
 
   for (const task of pendingTasks) {
     const agentKey = task.reviewee || '-';
     const typeKey = task.task_type || 'untyped';
     const statusKey = task.status || 'unknown';
+    const ageDays = Number.isInteger(task.age_days) ? task.age_days : null;
+    const ageBucketKey = getAgeBucketLabel(ageDays);
 
     if (!pendingByAgent.has(agentKey)) {
       pendingByAgent.set(agentKey, {
@@ -2217,6 +2248,16 @@ function buildReviewCoverageStats(options = {}) {
       });
     }
 
+    oldestTasks.push({
+      task_id: task.task_id,
+      reviewee: task.reviewee,
+      status: task.status,
+      type: task.task_type || 'untyped',
+      age_days: ageDays,
+      updated_at: task.updated_at || null,
+      description: task.description,
+    });
+
     const agentBucket = pendingByAgent.get(agentKey);
     agentBucket.pending += 1;
     if (statusKey === 'delivered') agentBucket.delivered += 1;
@@ -2230,6 +2271,10 @@ function buildReviewCoverageStats(options = {}) {
     else if (statusKey === 'completed') typeBucket.completed += 1;
 
     pendingByStatus.set(statusKey, (pendingByStatus.get(statusKey) || 0) + 1);
+    pendingByAgeBucket.set(ageBucketKey, (pendingByAgeBucket.get(ageBucketKey) || 0) + 1);
+
+    if (task.updated_at && (!oldestPendingAt || task.updated_at < oldestPendingAt)) oldestPendingAt = task.updated_at;
+    if (ageDays !== null && (oldestPendingAgeDays === null || ageDays > oldestPendingAgeDays)) oldestPendingAgeDays = ageDays;
   }
 
   const eligible = eligibleRows.length;
@@ -2241,6 +2286,8 @@ function buildReviewCoverageStats(options = {}) {
     reviewed_tasks: reviewed,
     pending_reviews: pending,
     review_coverage: eligible ? reviewed / eligible : null,
+    oldest_pending_at: oldestPendingAt,
+    oldest_pending_age_days: oldestPendingAgeDays,
     by_agent: [...pendingByAgent.values()]
       .sort((a, b) => {
         if (b.pending !== a.pending) return b.pending - a.pending;
@@ -2256,6 +2303,20 @@ function buildReviewCoverageStats(options = {}) {
     by_status: [...pendingByStatus.entries()]
       .map(([status, count]) => ({ status, count }))
       .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status)),
+    by_age_bucket: [...pendingByAgeBucket.entries()]
+      .map(([bucket, count]) => ({ bucket, count }))
+      .sort((a, b) => {
+        const order = ['0-1d', '2-3d', '4-7d', '8d+', 'unknown'];
+        return order.indexOf(a.bucket) - order.indexOf(b.bucket);
+      }),
+    oldest_tasks: oldestTasks
+      .sort((a, b) => {
+        const ageA = Number.isInteger(a.age_days) ? a.age_days : -1;
+        const ageB = Number.isInteger(b.age_days) ? b.age_days : -1;
+        if (ageB !== ageA) return ageB - ageA;
+        return (a.updated_at || '').localeCompare(b.updated_at || '');
+      })
+      .slice(0, top),
   };
 }
 
@@ -3960,7 +4021,7 @@ switch (cmd) {
       }
       console.log(`\n待评价任务 (${pendingTasks.length}${filterLabel ? `  |  ${filterLabel}` : ''})\n`);
       for (const task of pendingTasks) {
-        console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}`);
+        console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}`);
         console.log(`  ${task.description}`);
         if (task.existing_review_summary) {
           console.log(`  existing_reviews=${task.existing_review_summary.total}  avg_overall=${task.existing_review_summary.avg_overall ?? '-'}`);
@@ -4171,14 +4232,23 @@ switch (cmd) {
       const completedTasks = tasks.filter(task => isReviewEligibleTaskStatus(getEffectiveTaskReviewStatus(task))).length;
       const reviewedTasks = Math.max(completedTasks - pendingReviews.length, 0);
       const reviewCoverage = completedTasks ? `${roundNumber((reviewedTasks / completedTasks) * 100, 1)}%` : '-';
+      const oldestPendingAgeDays = pendingReviews.reduce((max, task) => {
+        if (!Number.isInteger(task.age_days)) return max;
+        return max === null || task.age_days > max ? task.age_days : max;
+      }, null);
+      const oldestPendingAt = pendingReviews.reduce((oldest, task) => {
+        if (!task.updated_at) return oldest;
+        return !oldest || task.updated_at < oldest ? task.updated_at : oldest;
+      }, null);
       console.log('\nATF Stats Summary\n');
-      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  pending_reviews=${pendingReviews.length}  review_coverage=${reviewCoverage}`);
+      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  pending_reviews=${pendingReviews.length}  review_coverage=${reviewCoverage}${oldestPendingAgeDays !== null ? `  oldest_pending_age=${oldestPendingAgeDays}d` : ''}`);
       if (statusCounts.size) {
         console.log('\nstatus counts:');
         for (const [status, count] of [...statusCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
           console.log(`- ${status}: ${count}`);
         }
       }
+      if (oldestPendingAt) console.log(`\noldest pending review: ${oldestPendingAt}`);
       console.log('');
       break;
     }
@@ -4330,11 +4400,18 @@ switch (cmd) {
         topSpecified ? `top=${top}` : null,
       ].filter(Boolean).join('  ');
       console.log(`\nReview Coverage${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
-      console.log(`eligible=${reviewStats.eligible_tasks}  reviewed=${reviewStats.reviewed_tasks}  pending=${reviewStats.pending_reviews}  coverage=${formatRate(reviewStats.review_coverage)}`);
+      console.log(`eligible=${reviewStats.eligible_tasks}  reviewed=${reviewStats.reviewed_tasks}  pending=${reviewStats.pending_reviews}  coverage=${formatRate(reviewStats.review_coverage)}${reviewStats.oldest_pending_age_days !== null ? `  oldest_age=${reviewStats.oldest_pending_age_days}d` : ''}`);
+      if (reviewStats.oldest_pending_at) console.log(`oldest_pending_at=${reviewStats.oldest_pending_at}`);
       if (reviewStats.by_status.length) {
         console.log('\npending by status:');
         for (const bucket of reviewStats.by_status) {
           console.log(`- ${bucket.status}: ${bucket.count}`);
+        }
+      }
+      if (reviewStats.by_age_bucket.length) {
+        console.log('\npending by age:');
+        for (const bucket of reviewStats.by_age_bucket) {
+          console.log(`- ${bucket.bucket}: ${bucket.count}`);
         }
       }
       if (reviewStats.by_agent.length) {
@@ -4351,6 +4428,15 @@ switch (cmd) {
         console.log('─'.repeat(54));
         for (const bucket of reviewStats.by_type) {
           console.log(`${bucket.type.padEnd(16)} ${String(bucket.pending).padEnd(7)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)}`);
+        }
+      }
+      if (reviewStats.oldest_tasks.length) {
+        console.log('\noldest pending tasks:');
+        console.log('task     age  agent           status      type             updated');
+        console.log('─'.repeat(88));
+        for (const task of reviewStats.oldest_tasks) {
+          console.log(`${task.task_id.padEnd(8)} ${String(task.age_days ?? '-').padEnd(4)} ${String(task.reviewee || '-').padEnd(15)} ${task.status.padEnd(11)} ${task.type.padEnd(16)} ${task.updated_at || '-'}`);
+          console.log(`  ${task.description}`);
         }
       }
       console.log('');

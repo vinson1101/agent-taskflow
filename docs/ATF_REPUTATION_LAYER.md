@@ -66,7 +66,7 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
 - `stats tasks`
   直接看任务级完成度、反馈状态和 completion credits，可按 agent / type / status / review 过滤
 - `stats reviews`
-  直接看 review coverage，以及待评价 backlog 在 agent / type / status 上的汇总
+  直接看 review coverage，以及待评价 backlog 在 agent / type / status / age 上的汇总
 
 ### 2. Reputation Index
 

@@ -151,11 +151,13 @@ function main() {
   assertIncludes(statsSummary, 'tasks: total=3', 'stats summary');
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
   assertIncludes(statsSummary, 'pending_reviews=1', 'stats summary');
+  assertIncludes(statsSummary, 'oldest_pending_age=0d', 'stats summary');
   assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
   assertIncludes(statsTasks, 'approved', 'stats tasks');
   assertIncludes(statsTasksFiltered, pendingTaskId, 'filtered stats tasks');
   assertIncludes(statsTasksFiltered, 'pending', 'filtered stats tasks');
   assertIncludes(statsReviews, 'eligible=3  reviewed=2  pending=1', 'stats reviews');
+  assertIncludes(statsReviews, '0-1d: 1', 'stats reviews');
   assertIncludes(statsReviews, 'f0x', 'stats reviews');
   assertIncludes(statsTypes, 'research', 'stats types');
   assertIncludes(statsTypes, 'delivery', 'stats types');
@@ -167,6 +169,7 @@ function main() {
   assertIncludes(creditsShowPinchy, 'completion: completed=0  delivered=1', 'credits show pinchymeow');
   assertIncludes(reviewPending, pendingTaskId, 'review pending');
   assertIncludes(reviewPending, 'type=research', 'review pending');
+  assertIncludes(reviewPending, 'age=0d', 'review pending');
   assertIncludes(reviewPendingFiltered, pendingTaskId, 'filtered review pending');
   assertIncludes(reviewPendingFiltered, 'status=completed', 'filtered review pending');
 

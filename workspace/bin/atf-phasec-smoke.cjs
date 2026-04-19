@@ -158,8 +158,6 @@ function main() {
     ATF_TASKS_DIR: path.join(smokeRoot, 'tasks'),
     ATF_WORKSPACE_DIR: path.join(smokeRoot, 'workspace'),
     ATF_DATA_DIR: path.join(smokeRoot, 'data'),
-    ATF_WORKSPACE_PINCHYMEOW: path.join(smokeRoot, 'workspace-pinchymeow'),
-    ATF_WORKSPACE_F0X: path.join(smokeRoot, 'workspace-f0x'),
     ATF_WORKSPACE_ACESTOCK: path.join(smokeRoot, 'workspace-acestock'),
     ATF_WORKSPACE_HUNTMIND: path.join(smokeRoot, 'workspace-huntmind'),
   };
@@ -167,10 +165,12 @@ function main() {
   fs.mkdirSync(env.ATF_TASKS_DIR, { recursive: true });
   fs.mkdirSync(env.ATF_WORKSPACE_DIR, { recursive: true });
   fs.mkdirSync(env.ATF_DATA_DIR, { recursive: true });
-  fs.mkdirSync(env.ATF_WORKSPACE_PINCHYMEOW, { recursive: true });
-  fs.mkdirSync(env.ATF_WORKSPACE_F0X, { recursive: true });
   fs.mkdirSync(env.ATF_WORKSPACE_ACESTOCK, { recursive: true });
   fs.mkdirSync(env.ATF_WORKSPACE_HUNTMIND, { recursive: true });
+  const pinchyWorkspace = path.join(smokeRoot, 'workspace-pinchymeow');
+  const f0xWorkspace = path.join(smokeRoot, 'workspace-f0x');
+  fs.mkdirSync(pinchyWorkspace, { recursive: true });
+  fs.mkdirSync(f0xWorkspace, { recursive: true });
 
   const claudeWorkspace = path.join(smokeRoot, 'workspace-claude');
   fs.mkdirSync(claudeWorkspace, { recursive: true });
@@ -187,6 +187,9 @@ function main() {
       },
     },
   });
+  const agentListSeedless = runCli(['agent', 'list'], env, options);
+  const registerF0x = runCli(['agent', 'register', 'f0x', `workspace=${f0xWorkspace}`], env, options);
+  const registerPinchy = runCli(['agent', 'register', 'pinchymeow', `workspace=${pinchyWorkspace}`], env, options);
 
   const createCompleted = runCli(['create', 'Phase C completed demo', 'type=ops', 'difficulty=3', 'priority=normal'], env, options);
   const completedTaskId = extractTaskId(createCompleted);
@@ -303,13 +306,22 @@ function main() {
   assertIncludes(reviewBacklog, staleTaskId, 'review backlog');
   assertIncludes(reviewBacklogStale, 'pending=1  self_reviewed=0  oldest_age=5d', 'review backlog stale');
   assertIncludes(reviewBacklogStale, staleTaskId, 'review backlog stale');
+  assertIncludes(agentListSeedless, 'acestock', 'seedless agent list');
+  assertIncludes(agentListSeedless, 'huntmind', 'seedless agent list');
+  assertIncludes(agentListSeedless, 'purplewolf', 'seedless agent list');
+  assertIncludes(agentListSeedless, 'claude', 'seedless agent list');
+  assertNotIncludes(agentListSeedless, 'f0x', 'seedless agent list');
+  assertNotIncludes(agentListSeedless, 'pinchymeow', 'seedless agent list');
+  assertIncludes(registerF0x, 'created=true', 'register f0x');
+  assertIncludes(registerPinchy, 'created=true', 'register pinchymeow');
   assertIncludes(agentList, 'f0x', 'agent list');
   assertIncludes(agentList, 'pinchymeow', 'agent list');
   assertIncludes(agentList, 'acestock', 'agent list');
   assertIncludes(agentList, 'huntmind', 'agent list');
   assertIncludes(agentList, 'purplewolf', 'agent list');
   assertIncludes(agentList, 'claude', 'agent list');
-  assertIncludes(agentList, env.ATF_WORKSPACE_PINCHYMEOW, 'agent list');
+  assertIncludes(agentList, pinchyWorkspace, 'agent list');
+  assertIncludes(agentList, f0xWorkspace, 'agent list');
   assertIncludes(agentList, env.ATF_WORKSPACE_ACESTOCK, 'agent list');
   assertIncludes(agentList, claudeWorkspace, 'agent list');
 
@@ -345,6 +357,30 @@ function main() {
   assertIncludes(agentRemapApply, 'apply=true', 'agent remap apply');
   assertIncludes(agentRemapApply, 'replacements=4', 'agent remap apply');
   assertIncludes(agentAuditClean, 'unknown_agents=0', 'agent audit clean');
+
+  const manualWorkspace = path.join(smokeRoot, 'workspace-manual-agent');
+  fs.mkdirSync(manualWorkspace, { recursive: true });
+  setTaskActors(staleTaskId, env, {
+    assigned_to: 'manual-agent',
+    dri: 'manual-agent',
+  });
+  const agentAuditNeedsRegister = runCli(['agent', 'audit'], env, options);
+  const agentRegister = runCli(['agent', 'register', 'manual-agent', `workspace=${manualWorkspace}`], env, options);
+  const agentListAfterRegister = runCli(['agent', 'list'], env, options);
+  const reviewBacklogAfterRegister = runCli(['review', 'backlog', 'min_age=4', 'top=5'], env, options);
+  const agentAuditAfterRegister = runCli(['agent', 'audit'], env, options);
+
+  assertIncludes(agentAuditNeedsRegister, 'unknown_agents=1', 'agent audit needs register');
+  assertIncludes(agentAuditNeedsRegister, 'manual-agent [unknown]', 'agent audit needs register');
+  assertIncludes(agentRegister, 'created=true', 'agent register');
+  assertIncludes(agentRegister, 'updated=false', 'agent register');
+  assertIncludes(agentRegister, 'source=manual', 'agent register');
+  assertIncludes(agentRegister, manualWorkspace, 'agent register');
+  assertIncludes(agentListAfterRegister, 'manual-agent', 'agent list after register');
+  assertIncludes(agentListAfterRegister, manualWorkspace, 'agent list after register');
+  assertIncludes(reviewBacklogAfterRegister, 'manual-agent', 'review backlog after register');
+  assertNotIncludes(reviewBacklogAfterRegister, 'manual-agent [unknown]', 'review backlog after register');
+  assertIncludes(agentAuditAfterRegister, 'unknown_agents=0', 'agent audit after register');
 
   console.log('ATF Phase C Lite smoke passed.');
   console.log(`Smoke data: ${smokeRoot}`);

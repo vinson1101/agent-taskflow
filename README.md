@@ -80,6 +80,7 @@ node atf-cli.js dri <taskId> [agent]     # 设置/查看 DRI
 node atf-cli.js review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N] # 查看待评价 backlog 汇总
 node atf-cli.js agent list             # 查看注册 agent 列表
 node atf-cli.js agent audit [top=N]    # 审计未知/脏 agent 引用
+node atf-cli.js agent register <agent> [workspace=/path] [source=x] [enabled=true|false] # 手动补注册 agent
 node atf-cli.js agent remap <from> <to> [apply=true] # 重映射错误 agent 名（默认 dry-run）
 node atf-cli.js focus add <taskId> <owner> <title>            # 创建 Focus Item
 node atf-cli.js focus list <taskId> [owner]                   # 列出 Focus Items

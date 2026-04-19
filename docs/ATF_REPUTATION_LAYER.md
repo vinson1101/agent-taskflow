@@ -79,6 +79,8 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
   直接按 agent / type / age 汇总 pending reviews，并列出最需要补 review 的任务
 - `agent audit`
   直接列出未知 agent / 脏 agent 的来源，让巡检结果能暴露历史数据污染
+- `agent register`
+  在不改代码、不手改 `agents.json` 的情况下补齐注册来源，适合服务器上的缺失 agent
 - `agent remap`
   提供安全的 dry-run / apply 两段式修复入口，把错误 agent 名映射回真实 agent
 

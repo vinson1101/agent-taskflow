@@ -179,6 +179,7 @@ ATF 的价值已经不只是“记录任务”，而是：
 - 已支持 `stats digest` 汇总最近活动、review 覆盖率和 stale backlog，方便日常 first look
 - 已支持 `review backlog` 直接按 agent / type / age 汇总待评价积压，并列出最该清的任务
 - 已支持 `agent audit` 审计未知 / 脏 agent 引用，并暴露污染来源
+- 已取消代码内置 agent seed；默认注册集改为由环境变量、`agents.json` 和 `agent register` 驱动
 - 已支持 `agent remap` 以 dry-run / apply 两段式修复错误 agent 名
 - 已支持在 `status / assign` 中直接读取 review / reputation / credits 摘要
 - 已支持 `assign recommend` 结合任务画像给内部指派提供排序参考

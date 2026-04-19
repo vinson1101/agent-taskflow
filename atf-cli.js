@@ -29,10 +29,7 @@ const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORK
 const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
 const DEFAULT_AGENT_WORKSPACE = process.env.ATF_DEFAULT_AGENT_WORKSPACE || WORKSPACE_DIR;
 function buildConfiguredAgentWorkspaces() {
-  const workspaces = {
-    pinchymeow: process.env.ATF_WORKSPACE_PINCHYMEOW || WORKSPACE_DIR,
-    f0x: process.env.ATF_WORKSPACE_F0X || `${OPENCLAW_ROOT}/workspace-f0x`,
-  };
+  const workspaces = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith('ATF_WORKSPACE_') || !value) continue;
     const suffix = key.substring('ATF_WORKSPACE_'.length);
@@ -772,6 +769,32 @@ function saveAgentRegistry(registry) {
   normalized.updated_at = new Date().toISOString();
   saveJson(AGENTS_FILE, normalized);
   return normalized;
+}
+
+function upsertAgentRegistryEntry(agent, options = {}) {
+  const normalized = normalizeAgentName(agent);
+  if (!normalized) throw new Error('非法 agent 名');
+  const registry = loadAgentRegistry({ persistIfMissing: true });
+  const existing = registry.agents.find(entry => entry.agent === normalized) || null;
+  const nextEntry = {
+    agent: normalized,
+    workspace: options.workspace || existing?.workspace || inferAgentWorkspace(normalized),
+    source: options.source || existing?.source || 'manual',
+    enabled: options.enabled === undefined ? (existing ? existing.enabled !== false : true) : options.enabled !== false,
+  };
+  const saved = saveAgentRegistry({
+    ...registry,
+    agents: [
+      ...registry.agents.filter(entry => entry.agent !== normalized),
+      nextEntry,
+    ],
+  });
+  return {
+    created: !existing,
+    updated: Boolean(existing),
+    entry: saved.agents.find(item => item.agent === normalized) || nextEntry,
+    registry: saved,
+  };
 }
 
 function getRegisteredAgentSet(options = {}) {
@@ -5779,6 +5802,53 @@ switch (cmd) {
       break;
     }
 
+    if (sub === 'register') {
+      const [agentRaw, ...optionParts] = restArgs;
+      if (!agentRaw) {
+        console.error('用法: atf agent register <agent> [workspace=/path] [source=x] [enabled=true|false]');
+        break;
+      }
+      const agentName = normalizeAgentName(agentRaw);
+      if (!agentName) {
+        console.error('agent register 要求合法 agent 名');
+        break;
+      }
+      let workspace = null;
+      let source = null;
+      let enabled;
+      let invalidArgs = false;
+      for (const part of optionParts.filter(Boolean)) {
+        if (part.startsWith('workspace=')) {
+          workspace = part.substring('workspace='.length);
+          continue;
+        }
+        if (part.startsWith('source=')) {
+          source = part.substring('source='.length);
+          continue;
+        }
+        if (part.startsWith('enabled=')) {
+          const value = part.substring('enabled='.length).toLowerCase();
+          if (['true', '1', 'yes'].includes(value)) enabled = true;
+          else if (['false', '0', 'no'].includes(value)) enabled = false;
+          else invalidArgs = true;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf agent register <agent> [workspace=/path] [source=x] [enabled=true|false]');
+        break;
+      }
+      const result = upsertAgentRegistryEntry(agentName, { workspace, source, enabled });
+      console.log('\nAgent Register\n');
+      console.log(`agent=${result.entry.agent}  created=${result.created}  updated=${result.updated}  enabled=${result.entry.enabled !== false}  source=${result.entry.source || '-'}`);
+      console.log(`workspace=${result.entry.workspace || '-'}`);
+      console.log(`registry_total=${result.registry.agents.length}`);
+      console.log('');
+      break;
+    }
+
     if (sub === 'remap') {
       const [fromAgentRaw, toAgentRaw, ...optionParts] = restArgs;
       if (!fromAgentRaw || !toAgentRaw) {
@@ -5836,7 +5906,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf agent list|audit|remap ...');
+    console.error('用法: atf agent list|audit|register|remap ...');
     break;
   }
 

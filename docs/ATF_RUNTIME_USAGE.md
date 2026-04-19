@@ -24,10 +24,8 @@ ATF 现在支持通过环境变量改写路径，不再强依赖 `/root/.opencla
   `learnings promote` 调用的脚本路径
 - `ATF_DEFAULT_AGENT_WORKSPACE`
   默认 agent workspace
-- `ATF_WORKSPACE_F0X`
-  `f0x` 的 workspace
-- `ATF_WORKSPACE_PINCHYMEOW`
-  `pinchymeow` 的 workspace
+- `ATF_WORKSPACE_<AGENT>`
+  任意 agent 的 workspace；设置后会自动进入注册集，例如 `ATF_WORKSPACE_HUNTMIND`
 
 本地测试示例：
 
@@ -386,6 +384,7 @@ node atf-cli.js review backlog
 node atf-cli.js review backlog f0x min_age=4 top=10
 node atf-cli.js agent list
 node atf-cli.js agent audit
+node atf-cli.js agent register huntmind workspace=/root/.openclaw/workspace-huntmind
 node atf-cli.js agent remap fake-no-such-agent f0x
 node atf-cli.js agent remap fake-no-such-agent f0x apply=true
 node atf-cli.js review show T-001 REV-xxx
@@ -472,7 +471,9 @@ node atf-cli.js assign recommend T-001 top=5
 - `review pending` 支持 `min_age=` / `max_age=`，便于只看 4 天以上或最近 1 天内的 backlog
 - `review backlog` 会把 pending reviews 直接按 agent / type / age 汇总，并列出最该清的 backlog 任务
 - `agent audit` 会列出未知 agent / 脏 agent 的来源，帮助定位历史数据污染
+- `agent register` 用于在服务器上补齐注册来源，不需要手改 `data/agents.json`
 - `agent remap` 默认是 dry-run，只有加 `apply=true` 才会真正写回并重建索引
+- 当前默认不再内置 `f0x` / `pinchymeow`；agent 来源统一走环境变量、`agents.json` 或 `agent register`
 - 更重的身份、激励、结算设计会放到未来商用化阶段
 
 ## 7. 全局索引

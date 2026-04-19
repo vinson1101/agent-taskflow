@@ -229,6 +229,7 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 - 已支持任务级 `task_profile`，可记录 `type / difficulty / priority / tags`
 - 已支持 `review pending` 通过 `type / status / min_age / max_age / limit` 过滤待评价积压
 - 已支持 backlog aging 巡检，能直接看最老 pending review 和 age bucket
+- 已支持 self review 留痕，但 self review 不会冲掉外部 review backlog / coverage
 - 已支持 `assign recommend` 读取任务画像并给内部调度提供排序建议
 
 当前收敛原则：

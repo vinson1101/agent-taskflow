@@ -443,7 +443,8 @@ node atf-cli.js assign recommend T-001 top=5
 - `stats` 是更直接的内部统计入口，优先服务完成度和反馈查看
 - `stats tasks` 用于直接看任务级完成度、反馈状态和完成度积分
 - `stats tasks` 支持 `min_age=` / `max_age=`，可直接筛出 stale review backlog
-- `stats reviews` 用于看 review 覆盖率，以及待评价 backlog 在 agent / type / status / age 上的分布
+- `stats reviews` 用于看外部 review 覆盖率，以及待评价 backlog 在 agent / type / status / age 上的分布
+- 自评会保留为 `self_review` 记录，但不会消除 pending backlog，也不会计入外部 review coverage
 - `stats summary` 会直接显示 `oldest_pending_age`，方便巡检时先看最老 backlog
 - `stats types` 用于按 `task_profile.type` 看完成度、反馈和待评价积压
 - `assign` 会在指派时直接显示目标 agent 的 reputation / credits 摘要

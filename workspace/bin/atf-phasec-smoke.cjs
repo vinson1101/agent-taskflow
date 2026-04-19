@@ -135,6 +135,7 @@ function main() {
   const pendingTaskId = extractTaskId(createPending);
   runCli(['assign', pendingTaskId, 'f0x'], env, options);
   runCli(['update', pendingTaskId, 'completed'], env, options);
+  const selfReview = runCli(['review', 'add', pendingTaskId, 'f0x', 'f0x', 'approved', 'self check only', 'type=task', 'overall=4', 'quality=4', 'timeliness=4', 'communication=4', 'ownership=4'], env, options);
 
   const statsSummary = runCli(['stats', 'summary'], env, options);
   const statsTasks = runCli(['stats', 'tasks'], env, options);
@@ -147,6 +148,7 @@ function main() {
   const statsShowF0x = runCli(['stats', 'show', 'f0x'], env, options);
   const creditsList = runCli(['credits', 'list'], env, options);
   const creditsShowPinchy = runCli(['credits', 'show', 'pinchymeow'], env, options);
+  const creditsShowF0x = runCli(['credits', 'show', 'f0x'], env, options);
   const reviewPending = runCli(['review', 'pending'], env, options);
   const reviewPendingFiltered = runCli(['review', 'pending', 'type=research', 'status=completed', 'limit=1'], env, options);
   const reviewPendingAgeFiltered = runCli(['review', 'pending', 'max_age=0', 'limit=1'], env, options);
@@ -154,17 +156,19 @@ function main() {
 
   assertIncludes(statsSummary, 'tasks: total=3', 'stats summary');
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
+  assertIncludes(statsSummary, 'self_reviewed=1', 'stats summary');
   assertIncludes(statsSummary, 'pending_reviews=1', 'stats summary');
   assertIncludes(statsSummary, 'oldest_pending_age=0d', 'stats summary');
   assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
   assertIncludes(statsTasks, 'approved', 'stats tasks');
+  assertIncludes(statsTasks, 'self', 'stats tasks');
   assertIncludes(statsTasks, 'age', 'stats tasks');
   assertIncludes(statsTasksFiltered, pendingTaskId, 'filtered stats tasks');
   assertIncludes(statsTasksFiltered, 'pending', 'filtered stats tasks');
   assertIncludes(statsTasksAgeFiltered, pendingTaskId, 'age filtered stats tasks');
   assertIncludes(statsTasksAgeFiltered, 'max_age=0', 'age filtered stats tasks');
   assertIncludes(statsTasksTooOld, '暂无任务统计结果', 'too old stats tasks');
-  assertIncludes(statsReviews, 'eligible=3  reviewed=2  pending=1', 'stats reviews');
+  assertIncludes(statsReviews, 'eligible=3  reviewed=2  self_reviewed=1  pending=1', 'stats reviews');
   assertIncludes(statsReviews, '0-1d: 1', 'stats reviews');
   assertIncludes(statsReviews, 'f0x', 'stats reviews');
   assertIncludes(statsTypes, 'research', 'stats types');
@@ -175,11 +179,15 @@ function main() {
   assertIncludes(statsShowF0x, 'completion=', 'stats show f0x');
   assertIncludes(creditsList, 'completion', 'credits list');
   assertIncludes(creditsShowPinchy, 'completion: completed=0  delivered=1', 'credits show pinchymeow');
+  assertIncludes(creditsShowF0x, 'total_credits: 23', 'credits show f0x');
+  assertIncludes(selfReview, 'self_review=true', 'self review add');
   assertIncludes(reviewPending, pendingTaskId, 'review pending');
   assertIncludes(reviewPending, 'type=research', 'review pending');
   assertIncludes(reviewPending, 'age=0d', 'review pending');
+  assertIncludes(reviewPending, 'self_reviews=1', 'review pending');
   assertIncludes(reviewPendingFiltered, pendingTaskId, 'filtered review pending');
   assertIncludes(reviewPendingFiltered, 'status=completed', 'filtered review pending');
+  assertIncludes(reviewPendingFiltered, 'self_reviews=1', 'filtered review pending');
   assertIncludes(reviewPendingAgeFiltered, pendingTaskId, 'age filtered review pending');
   assertIncludes(reviewPendingAgeFiltered, 'max_age=0', 'age filtered review pending');
   assertIncludes(reviewPendingTooOld, '暂无待评价任务', 'too old review pending');

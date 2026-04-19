@@ -1584,6 +1584,10 @@ function reviewPath(taskId, reviewId) {
 function readTaskReviews(taskId) {
   ensureReviewsDir(taskId);
   return readJsonCollection(reviewsDir(taskId))
+    .map(review => ({
+      ...review,
+      self_review: review?.self_review === undefined ? review?.reviewer === review?.reviewee : Boolean(review.self_review),
+    }))
     .sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || ''));
 }
 
@@ -1594,6 +1598,10 @@ function readReview(taskId, reviewId) {
 function saveReview(taskId, review) {
   review.updated_at = new Date().toISOString();
   saveJson(reviewPath(taskId, review.review_id), review);
+}
+
+function isSelfReview(review) {
+  return Boolean(review?.self_review ?? (review?.reviewer && review?.reviewer === review?.reviewee));
 }
 
 function createReview(taskId, ctx, reviewer, reviewee, outcome, summary, options = {}) {
@@ -1613,6 +1621,7 @@ function createReview(taskId, ctx, reviewer, reviewee, outcome, summary, options
     review_type: options.review_type || 'task',
     reviewer,
     reviewee,
+    self_review: reviewer === reviewee,
     outcome,
     summary,
     scores,
@@ -1626,6 +1635,7 @@ function createReview(taskId, ctx, reviewer, reviewee, outcome, summary, options
     review_type: review.review_type,
     reviewer: review.reviewer,
     reviewee: review.reviewee,
+    self_review: review.self_review,
     outcome: review.outcome,
     overall: review.scores.overall,
     at: now,
@@ -1773,6 +1783,7 @@ function buildReputationIndex() {
     }
 
     for (const review of readTaskReviews(taskId)) {
+      if (isSelfReview(review)) continue;
       const reviewer = ensureReputationAgentEntry(agentIndex, review.reviewer);
       if (reviewer) {
         reviewer.observed_task_ids.add(taskId);
@@ -1993,7 +2004,31 @@ function buildTaskReviewSummary(taskId, options = {}) {
   let reviews = readTaskReviews(taskId);
   if (options.reviewee) reviews = reviews.filter(review => review.reviewee === options.reviewee);
   if (options.reviewType) reviews = reviews.filter(review => review.review_type === options.reviewType);
-  if (!reviews.length) return null;
+  const selfReviews = reviews.filter(review => isSelfReview(review));
+  const externalReviews = reviews.filter(review => !isSelfReview(review));
+  if (options.externalOnly) reviews = externalReviews;
+  if (!reviews.length) {
+    if (!selfReviews.length || options.externalOnly) return null;
+    return {
+      total: 0,
+      external_total: 0,
+      self_total: selfReviews.length,
+      avg_overall: null,
+      outcomes: {
+        approved: 0,
+        needs_revision: 0,
+        rejected: 0,
+      },
+      review_types: {
+        task: 0,
+        delivery: 0,
+        collaboration: 0,
+      },
+      reviewees: [...new Set(selfReviews.map(review => review.reviewee).filter(Boolean))].sort(),
+      reviewers: [...new Set(selfReviews.map(review => review.reviewer).filter(Boolean))].sort(),
+      last_review_at: [...selfReviews].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))[0]?.created_at || null,
+    };
+  }
 
   const outcomes = {
     approved: 0,
@@ -2012,6 +2047,8 @@ function buildTaskReviewSummary(taskId, options = {}) {
 
   return {
     total: reviews.length,
+    external_total: externalReviews.length,
+    self_total: selfReviews.length,
     avg_overall: roundNumber(averageNumbers(reviews.map(review => review?.scores?.overall)), 2),
     outcomes,
     review_types: reviewTypes,
@@ -2034,6 +2071,7 @@ function taskNeedsReview(ctx, reviewee = null) {
   const taskId = ctx.short_id || ctx.task_id;
   const reviews = readTaskReviews(taskId).filter(review =>
     review.reviewee === targetReviewee
+    && !isSelfReview(review)
     && (review.review_type === 'task' || review.review_type === 'delivery')
   );
   return reviews.length === 0;
@@ -2075,7 +2113,8 @@ function collectPendingReviewTasks(agentOrOptions = null, options = {}) {
         age_days: computeAgeDays(updatedAt),
         task_type: taskProfile.type || null,
         task_profile: taskProfile,
-        existing_review_summary: buildTaskReviewSummary(taskId),
+        existing_review_summary: buildTaskReviewSummary(taskId, { externalOnly: true }),
+        self_review_count: readTaskReviews(taskId).filter(review => isSelfReview(review)).length,
       };
     })
     .filter(task => matchesAgeRange(task.age_days, minAge, maxAge))
@@ -2117,6 +2156,7 @@ function buildTaskTypeStats() {
     if (reviewStatus === 'delivered') bucket.delivered += 1;
 
     for (const review of readTaskReviews(taskId)) {
+      if (isSelfReview(review)) continue;
       bucket.reviews += 1;
       if (bucket.outcomes[review.outcome] !== undefined) bucket.outcomes[review.outcome] += 1;
       if (Number.isFinite(review?.scores?.overall)) bucket.overall_scores.push(review.scores.overall);
@@ -2171,9 +2211,10 @@ function collectTaskStatsRows(options = {}) {
     .map(ctx => {
       const taskId = ctx.short_id || ctx.task_id;
       const taskProfile = getTaskProfile(ctx);
-      const reviewSummary = buildTaskReviewSummary(taskId);
+      const reviewSummary = buildTaskReviewSummary(taskId, { externalOnly: true });
       const completion = computeTaskCompletionCredits(ctx);
       const updatedAt = ctx.updated_at || ctx.created_at || null;
+      const selfReviewCount = readTaskReviews(taskId).filter(review => isSelfReview(review)).length;
       return {
         task_id: taskId,
         status: getEffectiveTaskReviewStatus(ctx),
@@ -2185,6 +2226,7 @@ function collectTaskStatsRows(options = {}) {
         feedback_state: deriveTaskFeedbackState(ctx, reviewSummary),
         avg_overall: reviewSummary?.avg_overall ?? null,
         review_count: reviewSummary?.total ?? 0,
+        self_review_count: selfReviewCount,
         completion_credits: completion?.completion_credits ?? 0,
         updated_at: updatedAt,
         age_days: computeAgeDays(updatedAt),
@@ -2244,6 +2286,17 @@ function buildReviewCoverageStats(options = {}) {
   const oldestTasks = [];
   let oldestPendingAt = null;
   let oldestPendingAgeDays = null;
+  const selfReviewedTasks = new Set();
+
+  for (const row of eligibleRows) {
+    const taskId = row.ctx.short_id || row.ctx.task_id;
+    const hasSelfReview = readTaskReviews(taskId).some(review =>
+      review.reviewee === row.reviewee
+      && isSelfReview(review)
+      && (review.review_type === 'task' || review.review_type === 'delivery')
+    );
+    if (hasSelfReview) selfReviewedTasks.add(taskId);
+  }
 
   for (const task of pendingTasks) {
     const agentKey = task.reviewee || '-';
@@ -2307,8 +2360,11 @@ function buildReviewCoverageStats(options = {}) {
   return {
     eligible_tasks: eligible,
     reviewed_tasks: reviewed,
+    external_reviewed_tasks: reviewed,
     pending_reviews: pending,
     review_coverage: eligible ? reviewed / eligible : null,
+    external_review_coverage: eligible ? reviewed / eligible : null,
+    self_reviewed_tasks: selfReviewedTasks.size,
     oldest_pending_at: oldestPendingAt,
     oldest_pending_age_days: oldestPendingAgeDays,
     by_agent: [...pendingByAgent.values()]
@@ -2459,6 +2515,7 @@ function buildCreditsIndex() {
     }
 
     for (const review of readTaskReviews(taskId)) {
+      if (isSelfReview(review)) continue;
       const credits = computeReviewCredits(review);
       const reviewee = ensureCreditsAgentEntry(agentIndex, review.reviewee);
       if (reviewee) {
@@ -2928,6 +2985,7 @@ switch (cmd) {
     const assigneeReputation = findAgentReputation(ctx.assigned_to, reputationIndex);
     const assigneeCredits = findAgentCredits(ctx.assigned_to, creditsIndex);
     const reviewSummary = buildTaskReviewSummary(taskId);
+    const externalReviewSummary = buildTaskReviewSummary(taskId, { externalOnly: true });
     const ds = ctx.protocol?.delivery_status || 'N/A';
     const da = ctx.protocol?.delivery_attempts || 0;
     const dri = ctx.dri || '-';
@@ -2939,11 +2997,12 @@ switch (cmd) {
     if (hasTaskProfile(taskProfile)) console.log(`Profile: ${formatTaskProfileSummary(taskProfile)}`);
     if (ctx.sub_tasks.length) console.log(`子任务: ${ctx.sub_tasks.join(', ')}`);
     if (ctx.parent_id) console.log(`父任务: ${ctx.parent_id}`);
-    if (reviewSummary) {
-      console.log(`Reviews: total=${reviewSummary.total}  approved=${reviewSummary.outcomes.approved}  needs_revision=${reviewSummary.outcomes.needs_revision}  rejected=${reviewSummary.outcomes.rejected}  avg_overall=${reviewSummary.avg_overall ?? '-'}`);
+    if (externalReviewSummary) {
+      console.log(`Reviews: total=${externalReviewSummary.total}  approved=${externalReviewSummary.outcomes.approved}  needs_revision=${externalReviewSummary.outcomes.needs_revision}  rejected=${externalReviewSummary.outcomes.rejected}  avg_overall=${externalReviewSummary.avg_overall ?? '-'}`);
     } else if (taskNeedsReview(ctx)) {
       console.log(`Reviews: pending for ${getPrimaryTaskReviewee(ctx)}`);
     }
+    if (reviewSummary?.self_total) console.log(`Self Reviews: ${reviewSummary.self_total}`);
     if (ctx.assigned_to) {
       console.log(`Reputation(${ctx.assigned_to}): ${formatAgentReputationSummary(assigneeReputation)}`);
       console.log(`Credits(${ctx.assigned_to}): ${formatAgentCreditsSummary(assigneeCredits)}`);
@@ -3976,7 +4035,7 @@ switch (cmd) {
         buildCreditsIndex();
         console.log(`✅ 已写入 Review ${review.review_id}`);
         console.log(`   任务: ${review.task_id}  |  ${review.reviewer} -> ${review.reviewee}`);
-        console.log(`   类型: ${review.review_type}  |  outcome: ${review.outcome}  |  overall: ${review.scores.overall}`);
+        console.log(`   类型: ${review.review_type}  |  outcome: ${review.outcome}  |  overall: ${review.scores.overall}${review.self_review ? '  |  self_review=true' : ''}`);
         const revieweeCredits = findAgentCredits(review.reviewee, loadCreditsIndex());
         console.log(`   credits(${review.reviewee}): ${formatAgentCreditsSummary(revieweeCredits)}`);
         if (review.focus_id || review.thread_id) console.log(`   scope: ${review.focus_id ? `focus=${review.focus_id}` : ''}${review.focus_id && review.thread_id ? '  ' : ''}${review.thread_id ? `thread=${review.thread_id}` : ''}`);
@@ -4079,6 +4138,7 @@ switch (cmd) {
         if (task.existing_review_summary) {
           console.log(`  existing_reviews=${task.existing_review_summary.total}  avg_overall=${task.existing_review_summary.avg_overall ?? '-'}`);
         }
+        if (task.self_review_count) console.log(`  self_reviews=${task.self_review_count}`);
       }
       console.log('');
       break;
@@ -4119,7 +4179,7 @@ switch (cmd) {
       if (!reviews.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Reviews`); break; }
       console.log(`\n${ctx.short_id || ctx.task_id} Reviews (${reviews.length} 条)\n`);
       for (const review of reviews) {
-        console.log(`${review.review_id}  ${review.reviewer} -> ${review.reviewee}  [${review.review_type}] ${review.outcome}`);
+        console.log(`${review.review_id}  ${review.reviewer} -> ${review.reviewee}  [${review.review_type}] ${review.outcome}${isSelfReview(review) ? '  [self]' : ''}`);
         console.log(`  overall=${review.scores.overall}${review.focus_id ? `  focus=${review.focus_id}` : ''}${review.thread_id ? `  thread=${review.thread_id}` : ''}`);
         console.log(`  ${review.summary}`);
       }
@@ -4280,11 +4340,12 @@ switch (cmd) {
         const status = task.status || 'unknown';
         statusCounts.set(status, (statusCounts.get(status) || 0) + 1);
       }
+      const reviewCoverage = buildReviewCoverageStats();
       const pendingReviews = collectPendingReviewTasks();
       const deliveredTasks = tasks.filter(task => getEffectiveTaskReviewStatus(task) === 'delivered').length;
       const completedTasks = tasks.filter(task => isReviewEligibleTaskStatus(getEffectiveTaskReviewStatus(task))).length;
-      const reviewedTasks = Math.max(completedTasks - pendingReviews.length, 0);
-      const reviewCoverage = completedTasks ? `${roundNumber((reviewedTasks / completedTasks) * 100, 1)}%` : '-';
+      const reviewedTasks = reviewCoverage.external_reviewed_tasks;
+      const reviewCoverageLabel = completedTasks ? `${roundNumber((reviewedTasks / completedTasks) * 100, 1)}%` : '-';
       const oldestPendingAgeDays = pendingReviews.reduce((max, task) => {
         if (!Number.isInteger(task.age_days)) return max;
         return max === null || task.age_days > max ? task.age_days : max;
@@ -4294,7 +4355,7 @@ switch (cmd) {
         return !oldest || task.updated_at < oldest ? task.updated_at : oldest;
       }, null);
       console.log('\nATF Stats Summary\n');
-      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  pending_reviews=${pendingReviews.length}  review_coverage=${reviewCoverage}${oldestPendingAgeDays !== null ? `  oldest_pending_age=${oldestPendingAgeDays}d` : ''}`);
+      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  self_reviewed=${reviewCoverage.self_reviewed_tasks}  pending_reviews=${pendingReviews.length}  review_coverage=${reviewCoverageLabel}  external_review_coverage=${formatRate(reviewCoverage.external_review_coverage)}${oldestPendingAgeDays !== null ? `  oldest_pending_age=${oldestPendingAgeDays}d` : ''}`);
       if (statusCounts.size) {
         console.log('\nstatus counts:');
         for (const [status, count] of [...statusCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -4418,10 +4479,10 @@ switch (cmd) {
         break;
       }
       console.log(`\nTask Stats (${rows.length}${filterLabel ? `  |  ${filterLabel}` : ''})\n`);
-      console.log('task     status      agent           type             feedback        avg   pts  age  updated');
-      console.log('─'.repeat(112));
+      console.log('task     status      agent           type             feedback        avg   pts  self  age  updated');
+      console.log('─'.repeat(119));
       for (const row of rows) {
-        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
+        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${String(row.self_review_count || 0).padEnd(5)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
         console.log(`  ${row.description}`);
       }
       console.log('');
@@ -4483,7 +4544,7 @@ switch (cmd) {
         topSpecified ? `top=${top}` : null,
       ].filter(Boolean).join('  ');
       console.log(`\nReview Coverage${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
-      console.log(`eligible=${reviewStats.eligible_tasks}  reviewed=${reviewStats.reviewed_tasks}  pending=${reviewStats.pending_reviews}  coverage=${formatRate(reviewStats.review_coverage)}${reviewStats.oldest_pending_age_days !== null ? `  oldest_age=${reviewStats.oldest_pending_age_days}d` : ''}`);
+      console.log(`eligible=${reviewStats.eligible_tasks}  reviewed=${reviewStats.reviewed_tasks}  self_reviewed=${reviewStats.self_reviewed_tasks}  pending=${reviewStats.pending_reviews}  coverage=${formatRate(reviewStats.review_coverage)}  external_review_coverage=${formatRate(reviewStats.external_review_coverage)}${reviewStats.oldest_pending_age_days !== null ? `  oldest_age=${reviewStats.oldest_pending_age_days}d` : ''}`);
       if (reviewStats.oldest_pending_at) console.log(`oldest_pending_at=${reviewStats.oldest_pending_at}`);
       if (reviewStats.by_status.length) {
         console.log('\npending by status:');

@@ -643,6 +643,91 @@ function isReputationAgent(actor) {
   return true;
 }
 
+function buildDefaultAgentRegistry() {
+  return {
+    schema: 'atf.agents.v1',
+    updated_at: new Date().toISOString(),
+    agents: Object.entries(AGENT_WORKSPACES)
+      .filter(([agent]) => isReputationAgent(agent))
+      .map(([agent, workspace]) => ({
+        agent,
+        workspace: workspace || null,
+        source: 'workspace',
+        enabled: true,
+      }))
+      .sort((a, b) => a.agent.localeCompare(b.agent)),
+  };
+}
+
+function normalizeAgentRegistry(registry) {
+  const defaults = buildDefaultAgentRegistry();
+  const agents = new Map(defaults.agents.map(entry => [entry.agent, entry]));
+  const items = Array.isArray(registry?.agents)
+    ? registry.agents
+    : Array.isArray(registry)
+      ? registry
+      : [];
+
+  for (const item of items) {
+    const agentName = typeof item === 'string' ? item : item?.agent;
+    if (!isReputationAgent(agentName)) continue;
+    const normalized = String(agentName).trim();
+    agents.set(normalized, {
+      agent: normalized,
+      workspace: typeof item === 'string' ? (AGENT_WORKSPACES[normalized] || null) : (item.workspace || AGENT_WORKSPACES[normalized] || null),
+      source: typeof item === 'string' ? 'registry' : (item.source || 'registry'),
+      enabled: typeof item === 'string' ? true : item.enabled !== false,
+    });
+  }
+
+  return {
+    schema: 'atf.agents.v1',
+    updated_at: registry?.updated_at || defaults.updated_at,
+    agents: [...agents.values()]
+      .filter(entry => isReputationAgent(entry.agent))
+      .sort((a, b) => a.agent.localeCompare(b.agent)),
+  };
+}
+
+function loadAgentRegistry(options = {}) {
+  const existing = loadJson(AGENTS_FILE);
+  const normalized = existing ? normalizeAgentRegistry(existing) : buildDefaultAgentRegistry();
+  if (options.persistIfMissing && !existing) saveJson(AGENTS_FILE, normalized);
+  return normalized;
+}
+
+function saveAgentRegistry(registry) {
+  const normalized = normalizeAgentRegistry(registry);
+  normalized.updated_at = new Date().toISOString();
+  saveJson(AGENTS_FILE, normalized);
+  return normalized;
+}
+
+function getRegisteredAgentSet(options = {}) {
+  return new Set(
+    loadAgentRegistry(options).agents
+      .filter(entry => entry.enabled !== false)
+      .map(entry => entry.agent)
+  );
+}
+
+function isRegisteredAgent(agent, registryOrSet = null) {
+  if (!isReputationAgent(agent)) return false;
+  const normalized = String(agent).trim();
+  const set = registryOrSet instanceof Set
+    ? registryOrSet
+    : getRegisteredAgentSet();
+  return set.has(normalized);
+}
+
+function formatAgentDisplay(agent, registryOrSet = null) {
+  if (!agent) return '-';
+  const normalized = String(agent).trim();
+  return isRegisteredAgent(normalized, registryOrSet)
+    ? normalized
+    : `${normalized} [unknown]`;
+}
+
 function sortByTimestamp(items, field = 'created_at') {
   return [...(items || [])].sort((a, b) => (a?.[field] || '').localeCompare(b?.[field] || ''));
 }
@@ -2256,6 +2341,7 @@ function buildReviewCoverageStats(options = {}) {
   const minAge = Number.isInteger(options.min_age) && options.min_age >= 0 ? options.min_age : null;
   const maxAge = Number.isInteger(options.max_age) && options.max_age >= 0 ? options.max_age : null;
   const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 5;
+  const registeredAgents = getRegisteredAgentSet();
 
   const eligibleRows = getAllTasks()
     .map(ctx => {
@@ -2313,6 +2399,7 @@ function buildReviewCoverageStats(options = {}) {
     if (!pendingByAgent.has(agentKey)) {
       pendingByAgent.set(agentKey, {
         agent: agentKey,
+        registered: isRegisteredAgent(agentKey, registeredAgents),
         pending: 0,
         completed: 0,
         delivered: 0,
@@ -2332,6 +2419,7 @@ function buildReviewCoverageStats(options = {}) {
     oldestTasks.push({
       task_id: task.task_id,
       reviewee: task.reviewee,
+      reviewee_registered: isRegisteredAgent(task.reviewee, registeredAgents),
       status: task.status,
       type: task.task_type || 'untyped',
       age_days: ageDays,
@@ -2407,6 +2495,7 @@ function buildReviewCoverageStats(options = {}) {
 function buildRecentTaskWindow(options = {}) {
   const days = Number.isInteger(options.days) && options.days >= 0 ? options.days : 1;
   const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 10;
+  const registeredAgents = getRegisteredAgentSet();
   const rows = collectTaskStatsRows({
     agent: options.agent,
     type: options.type,
@@ -2428,6 +2517,7 @@ function buildRecentTaskWindow(options = {}) {
     if (!agentCounts.has(agentKey)) {
       agentCounts.set(agentKey, {
         agent: agentKey,
+        registered: isRegisteredAgent(agentKey, registeredAgents),
         tasks: 0,
         completed: 0,
         delivered: 0,
@@ -2503,6 +2593,7 @@ function buildStaleBacklogStats(options = {}) {
 
 function buildReviewBacklogStats(options = {}) {
   const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 10;
+  const registeredAgents = getRegisteredAgentSet();
   const tasks = collectPendingReviewTasks({
     agent: options.agent,
     type: options.type,
@@ -2534,6 +2625,7 @@ function buildReviewBacklogStats(options = {}) {
     if (!byAgent.has(agentKey)) {
       byAgent.set(agentKey, {
         agent: agentKey,
+        registered: isRegisteredAgent(agentKey, registeredAgents),
         pending: 0,
         self_reviewed: 0,
         completed: 0,
@@ -2883,12 +2975,256 @@ function computeTaskFitSignal(agentReputation, taskProfile) {
 }
 
 function collectKnownAgents() {
-  const agents = new Set(Object.keys(AGENT_WORKSPACES));
-  const reputationIndex = loadReputationIndex({ rebuildIfMissing: false });
-  for (const agent of reputationIndex?.agents || []) agents.add(agent.agent);
-  const creditsIndex = loadCreditsIndex({ rebuildIfMissing: false });
-  for (const agent of creditsIndex?.agents || []) agents.add(agent.agent);
-  return [...agents].filter(Boolean).sort();
+  return loadAgentRegistry({ persistIfMissing: false }).agents
+    .filter(entry => entry.enabled !== false)
+    .map(entry => entry.agent)
+    .filter(Boolean)
+    .sort();
+}
+
+function recordAgentObservation(observed, registeredAgents, agent, source, taskId = null, filePath = null) {
+  if (!isReputationAgent(agent)) return;
+  const normalized = String(agent).trim();
+  if (!observed.has(normalized)) {
+    observed.set(normalized, {
+      agent: normalized,
+      registered: isRegisteredAgent(normalized, registeredAgents),
+      count: 0,
+      sources: new Map(),
+      task_ids: new Set(),
+      files: new Set(),
+      examples: [],
+    });
+  }
+  const bucket = observed.get(normalized);
+  bucket.count += 1;
+  bucket.sources.set(source, (bucket.sources.get(source) || 0) + 1);
+  if (taskId) bucket.task_ids.add(taskId);
+  if (filePath) bucket.files.add(filePath);
+  if (bucket.examples.length < 5) {
+    bucket.examples.push({
+      source,
+      task_id: taskId || null,
+      file_path: filePath || null,
+    });
+  }
+}
+
+function buildAgentAudit(top = 10) {
+  const registry = loadAgentRegistry({ persistIfMissing: false });
+  const registeredAgents = new Set(registry.agents.filter(entry => entry.enabled !== false).map(entry => entry.agent));
+  const observed = new Map();
+  const unknownSourceCounts = new Map();
+
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    const dir = taskDirPath(taskId);
+    recordAgentObservation(observed, registeredAgents, ctx.assigned_to, 'task.assigned_to', taskId, `${dir}/ctx.json`);
+    recordAgentObservation(observed, registeredAgents, ctx.dri, 'task.dri', taskId, `${dir}/ctx.json`);
+    recordAgentObservation(observed, registeredAgents, ctx.created_by, 'task.created_by', taskId, `${dir}/ctx.json`);
+
+    for (const focus of readTaskFocus(taskId)) {
+      recordAgentObservation(observed, registeredAgents, focus.owner_agent, 'focus.owner_agent', taskId, focusPath(taskId, focus.focus_id));
+    }
+    for (const trigger of readTaskTriggers(taskId)) {
+      recordAgentObservation(observed, registeredAgents, trigger.owner_agent, 'trigger.owner_agent', taskId, triggerPath(taskId, trigger.trigger_id));
+    }
+    for (const fire of readTaskTriggerFires(taskId)) {
+      recordAgentObservation(observed, registeredAgents, fire.owner_agent, 'trigger_fire.owner_agent', taskId, triggerFirePath(taskId, fire.fire_id));
+      recordAgentObservation(observed, registeredAgents, fire.consumed_by, 'trigger_fire.consumed_by', taskId, triggerFirePath(taskId, fire.fire_id));
+      recordAgentObservation(observed, registeredAgents, fire.executed_by, 'trigger_fire.executed_by', taskId, triggerFirePath(taskId, fire.fire_id));
+    }
+    for (const execution of readTaskTriggerExecutions(taskId)) {
+      recordAgentObservation(observed, registeredAgents, execution.owner_agent, 'trigger_execution.owner_agent', taskId, triggerExecutionPath(taskId, execution.execution_id));
+      recordAgentObservation(observed, registeredAgents, execution.executor, 'trigger_execution.executor', taskId, triggerExecutionPath(taskId, execution.execution_id));
+      recordAgentObservation(observed, registeredAgents, execution.delivery_target?.agent, 'trigger_execution.delivery_agent', taskId, triggerExecutionPath(taskId, execution.execution_id));
+    }
+    for (const message of readTaskMessages(taskId)) {
+      recordAgentObservation(observed, registeredAgents, message.from_agent, 'message.from_agent', taskId, messagePath(taskId, message.message_id));
+      recordAgentObservation(observed, registeredAgents, message.to_agent, 'message.to_agent', taskId, messagePath(taskId, message.message_id));
+    }
+    for (const receipt of readTaskReceipts(taskId)) {
+      recordAgentObservation(observed, registeredAgents, receipt.from_agent, 'receipt.from_agent', taskId, receiptPath(taskId, receipt.receipt_id));
+      recordAgentObservation(observed, registeredAgents, receipt.to_agent, 'receipt.to_agent', taskId, receiptPath(taskId, receipt.receipt_id));
+    }
+    for (const review of readTaskReviews(taskId)) {
+      recordAgentObservation(observed, registeredAgents, review.reviewer, 'review.reviewer', taskId, reviewPath(taskId, review.review_id));
+      recordAgentObservation(observed, registeredAgents, review.reviewee, 'review.reviewee', taskId, reviewPath(taskId, review.review_id));
+    }
+  }
+
+  const observedAgents = [...observed.values()]
+    .map(entry => ({
+      agent: entry.agent,
+      registered: entry.registered,
+      count: entry.count,
+      sources: [...entry.sources.entries()]
+        .map(([source, count]) => ({ source, count }))
+        .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source)),
+      task_ids: [...entry.task_ids].sort(),
+      files: [...entry.files].sort(),
+      examples: entry.examples,
+    }))
+    .sort((a, b) => {
+      if (a.registered !== b.registered) return a.registered ? 1 : -1;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.agent.localeCompare(b.agent);
+    });
+
+  const unknownAgents = observedAgents.filter(entry => !entry.registered);
+  for (const entry of unknownAgents) {
+    for (const source of entry.sources) {
+      unknownSourceCounts.set(source.source, (unknownSourceCounts.get(source.source) || 0) + source.count);
+    }
+  }
+
+  return {
+    registry,
+    registered_agents: registry.agents.filter(entry => entry.enabled !== false),
+    observed_agents: observedAgents,
+    unknown_agents: unknownAgents,
+    unknown_source_counts: [...unknownSourceCounts.entries()]
+      .map(([source, count]) => ({ source, count }))
+      .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source)),
+    top,
+  };
+}
+
+const AGENT_REFERENCE_FIELDS = new Set([
+  'assigned_to',
+  'dri',
+  'created_by',
+  'reviewer',
+  'reviewee',
+  'from_agent',
+  'to_agent',
+  'owner_agent',
+  'consumed_by',
+  'executed_by',
+  'executor',
+  'agent',
+]);
+
+function remapAgentReferencesInValue(value, fromAgent, toAgent, counters) {
+  let changed = false;
+  if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (remapAgentReferencesInValue(item, fromAgent, toAgent, counters)) changed = true;
+    }
+    return changed;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (AGENT_REFERENCE_FIELDS.has(key) && child === fromAgent) {
+      value[key] = toAgent;
+      counters.replacements += 1;
+      counters.fields.set(key, (counters.fields.get(key) || 0) + 1);
+      changed = true;
+      continue;
+    }
+    if (child && typeof child === 'object') {
+      if (remapAgentReferencesInValue(child, fromAgent, toAgent, counters)) changed = true;
+    }
+  }
+  return changed;
+}
+
+function buildTaskRemapFileEntries(taskId) {
+  const dir = taskDirPath(taskId);
+  const entries = [
+    { file_path: `${dir}/ctx.json`, source: 'task', task_id: taskId },
+    { file_path: `${dir}/latest.json`, source: 'task', task_id: taskId },
+  ];
+  for (const focus of readTaskFocus(taskId)) {
+    entries.push({ file_path: focusPath(taskId, focus.focus_id), source: 'focus', task_id: taskId });
+  }
+  for (const trigger of readTaskTriggers(taskId)) {
+    entries.push({ file_path: triggerPath(taskId, trigger.trigger_id), source: 'trigger', task_id: taskId });
+  }
+  for (const fire of readTaskTriggerFires(taskId)) {
+    entries.push({ file_path: triggerFirePath(taskId, fire.fire_id), source: 'trigger_fire', task_id: taskId });
+  }
+  for (const execution of readTaskTriggerExecutions(taskId)) {
+    entries.push({ file_path: triggerExecutionPath(taskId, execution.execution_id), source: 'trigger_execution', task_id: taskId });
+  }
+  for (const message of readTaskMessages(taskId)) {
+    entries.push({ file_path: messagePath(taskId, message.message_id), source: 'message', task_id: taskId });
+  }
+  for (const receipt of readTaskReceipts(taskId)) {
+    entries.push({ file_path: receiptPath(taskId, receipt.receipt_id), source: 'receipt', task_id: taskId });
+  }
+  for (const review of readTaskReviews(taskId)) {
+    entries.push({ file_path: reviewPath(taskId, review.review_id), source: 'review', task_id: taskId });
+  }
+  return entries;
+}
+
+function remapAgentReferences(fromAgent, toAgent, options = {}) {
+  const apply = Boolean(options.apply);
+  const registry = loadAgentRegistry({ persistIfMissing: apply });
+  const registeredAgents = new Set(registry.agents.filter(entry => entry.enabled !== false).map(entry => entry.agent));
+  const sourceCounts = new Map();
+  const fieldCounts = new Map();
+  const touchedTasks = new Set();
+  const touchedFiles = [];
+  let replacements = 0;
+
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    for (const entry of buildTaskRemapFileEntries(taskId)) {
+      const data = loadJson(entry.file_path);
+      if (!data) continue;
+      const counters = { replacements: 0, fields: new Map() };
+      if (!remapAgentReferencesInValue(data, fromAgent, toAgent, counters)) continue;
+      replacements += counters.replacements;
+      sourceCounts.set(entry.source, (sourceCounts.get(entry.source) || 0) + counters.replacements);
+      for (const [field, count] of counters.fields.entries()) {
+        fieldCounts.set(field, (fieldCounts.get(field) || 0) + count);
+      }
+      touchedTasks.add(entry.task_id);
+      touchedFiles.push(entry.file_path);
+      if (apply) saveJson(entry.file_path, data);
+    }
+  }
+
+  let registryChanged = false;
+  if (apply) {
+    const fromEntry = registry.agents.find(entry => entry.agent === fromAgent);
+    const toEntry = registry.agents.find(entry => entry.agent === toAgent);
+    if (fromEntry && !toEntry) {
+      fromEntry.agent = toAgent;
+      fromEntry.workspace = fromEntry.workspace || AGENT_WORKSPACES[toAgent] || null;
+      fromEntry.source = 'registry';
+      registryChanged = true;
+    } else if (fromEntry && toEntry) {
+      registry.agents = registry.agents.filter(entry => entry.agent !== fromAgent);
+      registryChanged = true;
+    }
+    if (registryChanged) saveAgentRegistry(registry);
+  }
+
+  if (apply && replacements > 0) {
+    refreshTriggerIndexes();
+    buildReputationIndex();
+    buildCreditsIndex();
+  }
+
+  return {
+    from_agent: fromAgent,
+    to_agent: toAgent,
+    apply,
+    target_registered: isRegisteredAgent(toAgent, registeredAgents),
+    source_counts: [...sourceCounts.entries()]
+      .map(([source, count]) => ({ source, count }))
+      .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source)),
+    field_counts: [...fieldCounts.entries()]
+      .map(([field, count]) => ({ field, count }))
+      .sort((a, b) => b.count - a.count || a.field.localeCompare(b.field)),
+    touched_tasks: [...touchedTasks].sort(),
+    touched_files: touchedFiles.sort(),
+    replacements,
+    registry_changed: registryChanged,
+  };
 }
 
 function isActiveTaskStatus(status) {
@@ -3121,6 +3457,9 @@ ATF CLI v2
   atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]  查看待评价任务
   atf review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看待评价 backlog 汇总
   atf review show <taskId> <reviewId>                查看单条 Review
+  atf agent list                                     查看注册 agent 列表
+  atf agent audit [top=N]                            审计未知/脏 agent 引用
+  atf agent remap <from> <to> [apply=true]          重映射错误 agent 名（默认 dry-run）
   atf credits rebuild                                重建 credits 积分索引
   atf credits list                                   查看内部积分概览
   atf credits show <agent>                           查看单个 agent 积分明细
@@ -4374,7 +4713,7 @@ switch (cmd) {
       }
       console.log(`\n待评价任务 (${pendingTasks.length}${filterLabel ? `  |  ${filterLabel}` : ''})\n`);
       for (const task of pendingTasks) {
-        console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}`);
+        console.log(`[${task.task_id}] ${formatAgentDisplay(task.reviewee)}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}`);
         console.log(`  ${task.description}`);
         if (task.existing_review_summary) {
           console.log(`  existing_reviews=${task.existing_review_summary.total}  avg_overall=${task.existing_review_summary.avg_overall ?? '-'}`);
@@ -4487,7 +4826,7 @@ switch (cmd) {
         console.log('agent           pending  self  completed  delivered  oldest_age  oldest');
         console.log('-'.repeat(78));
         for (const bucket of backlog.by_agent) {
-          console.log(`${bucket.agent.padEnd(15)} ${String(bucket.pending).padEnd(8)} ${String(bucket.self_reviewed).padEnd(5)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)} ${String(Number.isInteger(bucket.oldest_age_days) ? `${bucket.oldest_age_days}d` : '-').padEnd(11)} ${bucket.oldest_updated_at || '-'}`);
+          console.log(`${formatAgentDisplay(bucket.agent).padEnd(15)} ${String(bucket.pending).padEnd(8)} ${String(bucket.self_reviewed).padEnd(5)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)} ${String(Number.isInteger(bucket.oldest_age_days) ? `${bucket.oldest_age_days}d` : '-').padEnd(11)} ${bucket.oldest_updated_at || '-'}`);
         }
       }
       if (backlog.by_type.length) {
@@ -4501,7 +4840,7 @@ switch (cmd) {
       if (backlog.tasks.length) {
         console.log('\nbacklog tasks:');
         for (const task of backlog.tasks) {
-          console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}${task.self_review_count ? `  self_reviews=${task.self_review_count}` : ''}`);
+          console.log(`[${task.task_id}] ${formatAgentDisplay(task.reviewee)}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}${task.self_review_count ? `  self_reviews=${task.self_review_count}` : ''}`);
           console.log(`  ${task.description}`);
         }
       }
@@ -4786,27 +5125,27 @@ switch (cmd) {
       console.log('overview:');
       console.log(`- tasks=${digest.total_tasks}  review_eligible=${digest.review_coverage.eligible_tasks}  reviewed=${digest.review_coverage.reviewed_tasks}  self_reviewed=${digest.review_coverage.self_reviewed_tasks}  pending=${digest.review_coverage.pending_reviews}  stale=${digest.backlog.pending_tasks}`);
       console.log(`- recent_tasks=${digest.recent.total}  completed=${digest.recent.completed}  delivered=${digest.recent.delivered}  reviewed=${digest.recent.reviewed}  pending=${digest.recent.pending}`);
-      console.log(`- external_review_coverage=${formatRate(digest.review_coverage.external_review_coverage)}  active_agents=${digest.active_agents}  backlog_agents=${digest.backlog_agents}${digest.backlog.oldest_pending_age_days !== null ? `  oldest_pending_age=${digest.backlog.oldest_pending_age_days}d` : ''}`);
+      console.log(`- external_review_coverage=${formatRate(digest.review_coverage.external_review_coverage)}  active_agents=${digest.active_agents}  backlog_agents=${digest.backlog_agents}  unknown_recent_agents=${digest.recent.by_agent.filter(bucket => !bucket.registered).length}  unknown_backlog_agents=${digest.backlog.by_agent.filter(bucket => !bucket.registered).length}${digest.backlog.oldest_pending_age_days !== null ? `  oldest_pending_age=${digest.backlog.oldest_pending_age_days}d` : ''}`);
       if (digest.backlog.oldest_pending_at) console.log(`- oldest_pending_at=${digest.backlog.oldest_pending_at}`);
 
       if (digest.recent.by_agent.length) {
         console.log('\nrecent by agent:');
         for (const bucket of digest.recent.by_agent.slice(0, digest.top)) {
-          console.log(`- ${bucket.agent}: tasks=${bucket.tasks}  completed=${bucket.completed}  delivered=${bucket.delivered}  reviewed=${bucket.reviewed}  pending=${bucket.pending}  self=${bucket.self_reviewed}`);
+          console.log(`- ${formatAgentDisplay(bucket.agent)}: tasks=${bucket.tasks}  completed=${bucket.completed}  delivered=${bucket.delivered}  reviewed=${bucket.reviewed}  pending=${bucket.pending}  self=${bucket.self_reviewed}`);
         }
       }
 
       if (digest.backlog.by_agent.length) {
         console.log('\nstale backlog by agent:');
         for (const bucket of digest.backlog.by_agent) {
-          console.log(`- ${bucket.agent}: pending=${bucket.pending}  self=${bucket.self_reviewed}  completed=${bucket.completed}  delivered=${bucket.delivered}${Number.isInteger(bucket.oldest_age_days) ? `  oldest_age=${bucket.oldest_age_days}d` : ''}${bucket.oldest_updated_at ? `  oldest=${bucket.oldest_updated_at}` : ''}`);
+          console.log(`- ${formatAgentDisplay(bucket.agent)}: pending=${bucket.pending}  self=${bucket.self_reviewed}  completed=${bucket.completed}  delivered=${bucket.delivered}${Number.isInteger(bucket.oldest_age_days) ? `  oldest_age=${bucket.oldest_age_days}d` : ''}${bucket.oldest_updated_at ? `  oldest=${bucket.oldest_updated_at}` : ''}`);
         }
       }
 
       if (digest.backlog.tasks.length) {
         console.log('\noldest stale tasks:');
         for (const task of digest.backlog.tasks) {
-          console.log(`- [${task.task_id}] ${task.reviewee}  ${task.status}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}${task.self_review_count ? `  self_reviews=${task.self_review_count}` : ''}`);
+          console.log(`- [${task.task_id}] ${formatAgentDisplay(task.reviewee)}  ${task.status}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}${task.self_review_count ? `  self_reviews=${task.self_review_count}` : ''}`);
           console.log(`  ${task.description}`);
         }
       }
@@ -4993,7 +5332,7 @@ switch (cmd) {
       if (stale.review_stats.by_agent.length) {
         console.log('\nstale by agent:');
         for (const bucket of stale.review_stats.by_agent) {
-          console.log(`- ${bucket.agent}: pending=${bucket.pending}  completed=${bucket.completed}  delivered=${bucket.delivered}  oldest=${bucket.oldest_updated_at || '-'}`);
+          console.log(`- ${formatAgentDisplay(bucket.agent)}: pending=${bucket.pending}  completed=${bucket.completed}  delivered=${bucket.delivered}  oldest=${bucket.oldest_updated_at || '-'}`);
         }
       }
       if (stale.review_stats.by_type.length) {
@@ -5007,7 +5346,7 @@ switch (cmd) {
         console.log('task     age  agent           status      type             updated');
         console.log('-'.repeat(88));
         for (const task of stale.tasks) {
-          console.log(`${task.task_id.padEnd(8)} ${String(Number.isInteger(task.age_days) ? `${task.age_days}d` : '-').padEnd(4)} ${String(task.reviewee || '-').padEnd(15)} ${task.status.padEnd(11)} ${String(task.task_type || 'untyped').padEnd(16)} ${task.updated_at || '-'}`);
+          console.log(`${task.task_id.padEnd(8)} ${String(Number.isInteger(task.age_days) ? `${task.age_days}d` : '-').padEnd(4)} ${formatAgentDisplay(task.reviewee).padEnd(15)} ${task.status.padEnd(11)} ${String(task.task_type || 'untyped').padEnd(16)} ${task.updated_at || '-'}`);
           console.log(`  ${task.description}`);
         }
       }
@@ -5227,7 +5566,7 @@ switch (cmd) {
         console.log('agent           pending  completed  delivered  oldest');
         console.log('─'.repeat(72));
         for (const bucket of reviewStats.by_agent) {
-          console.log(`${bucket.agent.padEnd(15)} ${String(bucket.pending).padEnd(7)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)} ${bucket.oldest_updated_at || '-'}`);
+          console.log(`${formatAgentDisplay(bucket.agent).padEnd(15)} ${String(bucket.pending).padEnd(7)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)} ${bucket.oldest_updated_at || '-'}`);
         }
       }
       if (reviewStats.by_type.length) {
@@ -5243,7 +5582,7 @@ switch (cmd) {
         console.log('task     age  agent           status      type             updated');
         console.log('─'.repeat(88));
         for (const task of reviewStats.oldest_tasks) {
-          console.log(`${task.task_id.padEnd(8)} ${String(task.age_days ?? '-').padEnd(4)} ${String(task.reviewee || '-').padEnd(15)} ${task.status.padEnd(11)} ${task.type.padEnd(16)} ${task.updated_at || '-'}`);
+          console.log(`${task.task_id.padEnd(8)} ${String(task.age_days ?? '-').padEnd(4)} ${formatAgentDisplay(task.reviewee).padEnd(15)} ${task.status.padEnd(11)} ${task.type.padEnd(16)} ${task.updated_at || '-'}`);
           console.log(`  ${task.description}`);
         }
       }
@@ -5298,6 +5637,135 @@ switch (cmd) {
     }
 
     console.error('用法: atf stats summary|digest|recent|stale|agents|tasks|reviews|types|show ...');
+    break;
+  }
+
+  // =============================================================
+  // agent 命令 - 注册集 / 脏数据审计 / 安全 remap
+  // =============================================================
+  case 'agent': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'list') {
+      const registry = loadAgentRegistry({ persistIfMissing: false });
+      if (!registry.agents.length) { console.log('当前暂无注册 agent'); break; }
+      console.log(`\nRegistered Agents (${registry.agents.length})\n`);
+      console.log('agent           enabled  source      workspace');
+      console.log('-'.repeat(88));
+      for (const entry of registry.agents) {
+        console.log(`${entry.agent.padEnd(15)} ${String(entry.enabled !== false).padEnd(8)} ${String(entry.source || '-').padEnd(10)} ${entry.workspace || '-'}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'audit') {
+      let top = 10;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('top=')) {
+          const value = Number(part.substring('top='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('agent audit top 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          top = value;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf agent audit [top=N]');
+        break;
+      }
+      const audit = buildAgentAudit(top);
+      const unknownReferenceCount = audit.unknown_agents.reduce((sum, item) => sum + item.count, 0);
+      console.log(`\nAgent Audit  |  top=${top}\n`);
+      console.log(`registered=${audit.registered_agents.length}  observed=${audit.observed_agents.length}  unknown_agents=${audit.unknown_agents.length}  unknown_references=${unknownReferenceCount}`);
+      if (audit.registered_agents.length) {
+        console.log(`registered_set=${audit.registered_agents.map(entry => entry.agent).join(', ')}`);
+      }
+      if (!audit.unknown_agents.length) {
+        console.log('\nunknown agents: none');
+        console.log('');
+        break;
+      }
+      if (audit.unknown_source_counts.length) {
+        console.log('\nunknown by source:');
+        for (const bucket of audit.unknown_source_counts.slice(0, top)) {
+          console.log(`- ${bucket.source}: ${bucket.count}`);
+        }
+      }
+      console.log('\nunknown agents:');
+      for (const item of audit.unknown_agents.slice(0, top)) {
+        console.log(`- ${formatAgentDisplay(item.agent)}  refs=${item.count}  tasks=${item.task_ids.length}  sources=${item.sources.map(source => `${source.source}:${source.count}`).join(', ')}`);
+        if (item.task_ids.length) console.log(`  task_ids=${item.task_ids.slice(0, 5).join(', ')}`);
+        if (item.files.length) console.log(`  sample_file=${item.files[0]}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'remap') {
+      const [fromAgentRaw, toAgentRaw, ...optionParts] = restArgs;
+      if (!fromAgentRaw || !toAgentRaw) {
+        console.error('用法: atf agent remap <from> <to> [apply=true]');
+        break;
+      }
+      const fromAgent = String(fromAgentRaw).trim();
+      const toAgent = String(toAgentRaw).trim();
+      if (!isReputationAgent(fromAgent) || !isReputationAgent(toAgent)) {
+        console.error('agent remap 要求 from/to 都是合法 agent 名');
+        break;
+      }
+      if (fromAgent === toAgent) {
+        console.error('agent remap 要求 from 和 to 不同');
+        break;
+      }
+      let apply = false;
+      let invalidArgs = false;
+      for (const part of optionParts.filter(Boolean)) {
+        if (part === 'apply' || part === '--apply' || part === 'apply=true') {
+          apply = true;
+          continue;
+        }
+        if (part === 'apply=false') {
+          apply = false;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf agent remap <from> <to> [apply=true]');
+        break;
+      }
+      const result = remapAgentReferences(fromAgent, toAgent, { apply });
+      console.log(`\nAgent Remap\n`);
+      console.log(`from=${result.from_agent}  to=${result.to_agent}  apply=${result.apply}  replacements=${result.replacements}  touched_tasks=${result.touched_tasks.length}  touched_files=${result.touched_files.length}`);
+      console.log(`target_registered=${result.target_registered}${result.registry_changed ? '  registry_changed=true' : ''}`);
+      if (result.source_counts.length) {
+        console.log('\nreplacements by source:');
+        for (const bucket of result.source_counts) {
+          console.log(`- ${bucket.source}: ${bucket.count}`);
+        }
+      }
+      if (result.field_counts.length) {
+        console.log('\nreplacements by field:');
+        for (const bucket of result.field_counts) {
+          console.log(`- ${bucket.field}: ${bucket.count}`);
+        }
+      }
+      if (result.touched_tasks.length) console.log(`\ntask_ids=${result.touched_tasks.join(', ')}`);
+      if (!result.target_registered) console.log('\nwarning: target agent is not in the registered agent set');
+      if (!result.apply) console.log('\ndry_run=true  要真正写回请追加 apply=true');
+      console.log('');
+      break;
+    }
+
+    console.error('用法: atf agent list|audit|remap ...');
     break;
   }
 

@@ -78,6 +78,9 @@ node atf-cli.js fan-out <taskId> <a1,a2> # fan-out 分发
 node atf-cli.js delivered <taskId>       # 标记已送达（Vinson 确认）
 node atf-cli.js dri <taskId> [agent]     # 设置/查看 DRI
 node atf-cli.js review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N] # 查看待评价 backlog 汇总
+node atf-cli.js agent list             # 查看注册 agent 列表
+node atf-cli.js agent audit [top=N]    # 审计未知/脏 agent 引用
+node atf-cli.js agent remap <from> <to> [apply=true] # 重映射错误 agent 名（默认 dry-run）
 node atf-cli.js focus add <taskId> <owner> <title>            # 创建 Focus Item
 node atf-cli.js focus list <taskId> [owner]                   # 列出 Focus Items
 node atf-cli.js focus show <taskId> <focusId>                 # 查看 Focus Item

@@ -134,6 +134,17 @@ function setTaskUpdatedAt(taskId, env, updatedAt, createdAt = updatedAt) {
   fs.writeFileSync(ctxFile, `${JSON.stringify(ctx, null, 2)}\n`);
 }
 
+function setTaskActors(taskId, env, updates) {
+  const taskDir = resolveTaskDir(taskId, env);
+  for (const fileName of ['ctx.json', 'latest.json']) {
+    const filePath = path.join(taskDir, fileName);
+    if (!fs.existsSync(filePath)) continue;
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    Object.assign(data, updates);
+    fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
+  }
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   safeResetDir(smokeRoot);
@@ -198,6 +209,7 @@ function main() {
   const reviewPendingTooOld = runCli(['review', 'pending', 'min_age=6'], env, options);
   const reviewBacklog = runCli(['review', 'backlog'], env, options);
   const reviewBacklogStale = runCli(['review', 'backlog', 'min_age=4', 'top=5'], env, options);
+  const agentList = runCli(['agent', 'list'], env, options);
 
   assertIncludes(statsSummary, 'tasks: total=4', 'stats summary');
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
@@ -262,6 +274,31 @@ function main() {
   assertIncludes(reviewBacklog, staleTaskId, 'review backlog');
   assertIncludes(reviewBacklogStale, 'pending=1  self_reviewed=0  oldest_age=5d', 'review backlog stale');
   assertIncludes(reviewBacklogStale, staleTaskId, 'review backlog stale');
+  assertIncludes(agentList, 'f0x', 'agent list');
+  assertIncludes(agentList, 'pinchymeow', 'agent list');
+
+  setTaskActors(staleTaskId, env, {
+    assigned_to: 'fake-no-such-agent',
+    dri: 'fake-no-such-agent',
+  });
+
+  const statsDigestDirty = runCli(['stats', 'digest'], env, options);
+  const reviewBacklogDirty = runCli(['review', 'backlog', 'min_age=4', 'top=5'], env, options);
+  const agentAuditDirty = runCli(['agent', 'audit'], env, options);
+  const agentRemapDryRun = runCli(['agent', 'remap', 'fake-no-such-agent', 'f0x'], env, options);
+  const agentRemapApply = runCli(['agent', 'remap', 'fake-no-such-agent', 'f0x', 'apply=true'], env, options);
+  const agentAuditClean = runCli(['agent', 'audit'], env, options);
+
+  assertIncludes(statsDigestDirty, 'unknown_backlog_agents=1', 'dirty stats digest');
+  assertIncludes(reviewBacklogDirty, 'fake-no-such-agent [unknown]', 'dirty review backlog');
+  assertIncludes(agentAuditDirty, 'unknown_agents=1', 'agent audit dirty');
+  assertIncludes(agentAuditDirty, 'fake-no-such-agent [unknown]', 'agent audit dirty');
+  assertIncludes(agentAuditDirty, 'task.assigned_to', 'agent audit dirty');
+  assertIncludes(agentRemapDryRun, 'apply=false', 'agent remap dry-run');
+  assertIncludes(agentRemapDryRun, 'replacements=4', 'agent remap dry-run');
+  assertIncludes(agentRemapApply, 'apply=true', 'agent remap apply');
+  assertIncludes(agentRemapApply, 'replacements=4', 'agent remap apply');
+  assertIncludes(agentAuditClean, 'unknown_agents=0', 'agent audit clean');
 
   console.log('ATF Phase C Lite smoke passed.');
   console.log(`Smoke data: ${smokeRoot}`);

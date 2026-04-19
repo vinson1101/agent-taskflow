@@ -384,6 +384,10 @@ node atf-cli.js review pending type=research status=completed limit=5
 node atf-cli.js review pending status=completed min_age=4 limit=20
 node atf-cli.js review backlog
 node atf-cli.js review backlog f0x min_age=4 top=10
+node atf-cli.js agent list
+node atf-cli.js agent audit
+node atf-cli.js agent remap fake-no-such-agent f0x
+node atf-cli.js agent remap fake-no-such-agent f0x apply=true
 node atf-cli.js review show T-001 REV-xxx
 ```
 
@@ -467,6 +471,8 @@ node atf-cli.js assign recommend T-001 top=5
 - `review pending` 支持 `type=` / `status=` / `limit=` 过滤，并直接显示 `age=Xd`
 - `review pending` 支持 `min_age=` / `max_age=`，便于只看 4 天以上或最近 1 天内的 backlog
 - `review backlog` 会把 pending reviews 直接按 agent / type / age 汇总，并列出最该清的 backlog 任务
+- `agent audit` 会列出未知 agent / 脏 agent 的来源，帮助定位历史数据污染
+- `agent remap` 默认是 dry-run，只有加 `apply=true` 才会真正写回并重建索引
 - 更重的身份、激励、结算设计会放到未来商用化阶段
 
 ## 7. 全局索引

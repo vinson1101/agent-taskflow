@@ -233,6 +233,8 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 - 已支持 `stats reviews min_age=...` 聚焦 stale backlog，`stats summary` 直接暴露 stale count
 - 已支持 `stats digest` 生成日常巡检摘要，把 recent / coverage / stale backlog 压成一条视图
 - 已支持 `review backlog` 直接按 agent / type / age 汇总待评价积压，便于清 backlog
+- 已支持 `agent audit` 发现未知 / 脏 agent 引用，让巡检可以直接暴露数据卫生问题
+- 已支持 `agent remap` 用 dry-run / apply 两段式修复错误 agent 名
 - 已支持 `assign recommend` 读取任务画像并给内部调度提供排序建议
 
 当前收敛原则：

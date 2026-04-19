@@ -509,6 +509,45 @@ node atf-cli.js action watcher-status f0x warn_after_minutes=20
 - 默认不执行 `requires_confirmation=true` 的动作
 - `--dry-run --json` 会明确列出 `below_confidence / risk_exceeds_max / unregistered_owner / requires_confirmation`
 
+统一 launcher 的最小入口：
+
+```bash
+node atf-cli.js launch scan
+node atf-cli.js launch scan huntmind cooldown_minutes=15
+node atf-cli.js launch list status=pending
+node atf-cli.js launch inbox huntmind
+node atf-cli.js launch show LCH-xxxxxxxx-xxxx
+node atf-cli.js launch dispatch-pending huntmind mode=noop dispatcher=host-launcher
+node workspace/bin/atf-launcher.cjs --agent huntmind --mode noop
+node workspace/bin/atf-launcher.cjs --dry-run --json
+```
+
+当前 launcher 的定位是：
+
+- 读取 agent workspace 里的 `pending-task.json`
+- 生成去重、带 cooldown / lease 的 `atf.launch-request.v1`
+- 由控制平面统一 dispatch，而不是让 cron 直接硬绑到外部 `sessions_spawn`
+
+当前支持的 dispatch mode 只有：
+
+- `manual`
+- `noop`
+
+运行审计与健康检查入口：
+
+```bash
+node atf-cli.js launch runs limit=10
+node atf-cli.js launch run-show latest
+node atf-cli.js launch launcher-status
+node atf-cli.js launch status
+node atf-cli.js launch status huntmind json
+```
+
+其中：
+
+- `launch status` 看 queue 本身有没有 `pending / leased / archived`
+- `launch launcher-status` 看 launcher wrapper 最近有没有真的跑过、最近 run 是不是 stale / failed
+
 默认根目录现在按平台走：
 
 - Linux / WSL：`/root/.openclaw`
@@ -557,6 +596,7 @@ node atf-cli.js assign recommend T-001 top=5
 - `action execute / execute-pending` 会先做 `preflight`，确认源信号仍成立，再做 `postflight` 检查产物是否真的写入
 - 如果消息或决策信号在执行前已经被人闭环，对应 action 会被安全标记为 `skipped`，不会继续误发 follow-up
 - `pending-actions.json` 和 `action-inboxes/<agent>.json` 是 Phase D 对 watcher / cron 最友好的消费入口
+- `pending-launch-requests.json` 和 `launch-inboxes/<agent>.json` 是统一 launcher queue 的消费入口
 - `agent audit` 会列出未知 agent / 脏 agent 的来源，帮助定位历史数据污染
 - `agent register` 用于在服务器上补齐注册来源，不需要手改 `data/agents.json`
 - `agent remap` 默认是 dry-run，只有加 `apply=true` 才会真正写回并重建索引
@@ -571,6 +611,8 @@ node atf-cli.js assign recommend T-001 top=5
 - `ATF_DATA_DIR/trigger-inboxes/<agent>.json`
 - `ATF_DATA_DIR/pending-actions.json`
 - `ATF_DATA_DIR/action-inboxes/<agent>.json`
+- `ATF_DATA_DIR/pending-launch-requests.json`
+- `ATF_DATA_DIR/launch-inboxes/<agent>.json`
 - `ATF_DATA_DIR/scores.json`
 
 其中：
@@ -583,6 +625,10 @@ node atf-cli.js assign recommend T-001 top=5
   全局 pending actions 汇总
 - `action-inboxes/<agent>.json`
   单 agent 待执行动作 inbox
+- `pending-launch-requests.json`
+  全局 pending launch request 汇总
+- `launch-inboxes/<agent>.json`
+  单 agent 待 dispatch 的 launch request inbox
 - `scores.json`
   当前可重建的 agent reputation 索引
 

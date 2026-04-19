@@ -32,6 +32,11 @@ const ACTION_INBOX_DIR = `${DATA_DIR}/action-inboxes`;
 const PENDING_ACTIONS_FILE = `${DATA_DIR}/pending-actions.json`;
 const ACTION_WATCHER_RUNS_DIR = `${DATA_DIR}/action-watcher-runs`;
 const ACTION_WATCHER_LATEST_FILE = `${ACTION_WATCHER_RUNS_DIR}/latest.json`;
+const LAUNCHER_RUNS_DIR = `${DATA_DIR}/launcher-runs`;
+const LAUNCHER_LATEST_FILE = `${LAUNCHER_RUNS_DIR}/latest.json`;
+const LAUNCH_REQUESTS_DIR = `${DATA_DIR}/agent-launch-requests`;
+const LAUNCH_INBOX_DIR = `${DATA_DIR}/launch-inboxes`;
+const PENDING_LAUNCH_REQUESTS_FILE = `${DATA_DIR}/pending-launch-requests.json`;
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
 const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORKSPACE_DIR}/pending-decisions.json`;
 const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
@@ -61,6 +66,9 @@ const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up
 const ACTION_STATUSES = new Set(['pending', 'executed', 'skipped', 'archived']);
 const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
 const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
+const LAUNCHER_RUN_STATUSES = new Set(['completed', 'failed']);
+const LAUNCH_REQUEST_STATUSES = new Set(['pending', 'leased', 'failed', 'archived']);
+const LAUNCH_DISPATCH_MODES = new Set(['manual', 'noop']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
 const REVIEW_TYPES = new Set(['task', 'delivery', 'collaboration']);
 const REVIEW_OUTCOMES = new Set(['approved', 'needs_revision', 'rejected']);
@@ -73,6 +81,8 @@ if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR))  fs.mkdirSync(DATA_DIR,   { recursive: true });
 if (!fs.existsSync(TRIGGER_INBOX_DIR)) fs.mkdirSync(TRIGGER_INBOX_DIR, { recursive: true });
 if (!fs.existsSync(ACTION_INBOX_DIR)) fs.mkdirSync(ACTION_INBOX_DIR, { recursive: true });
+if (!fs.existsSync(LAUNCH_REQUESTS_DIR)) fs.mkdirSync(LAUNCH_REQUESTS_DIR, { recursive: true });
+if (!fs.existsSync(LAUNCH_INBOX_DIR)) fs.mkdirSync(LAUNCH_INBOX_DIR, { recursive: true });
 
 // ============================================================
 // 工具函数
@@ -2959,6 +2969,134 @@ function readActionWatcherRun(runId) {
   return loadJson(actionWatcherRunPath(runId));
 }
 
+function ensureLauncherRunsDir() {
+  if (!fs.existsSync(LAUNCHER_RUNS_DIR)) fs.mkdirSync(LAUNCHER_RUNS_DIR, { recursive: true });
+}
+
+function launcherRunPath(runId) {
+  ensureLauncherRunsDir();
+  return `${LAUNCHER_RUNS_DIR}/${runId}.json`;
+}
+
+function readLauncherRuns(options = {}) {
+  if (!fs.existsSync(LAUNCHER_RUNS_DIR)) return [];
+  const status = options.status || null;
+  const agent = options.agent || null;
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const runs = fs.readdirSync(LAUNCHER_RUNS_DIR)
+    .filter(file => file.endsWith('.json') && file !== 'latest.json')
+    .map(file => loadJson(path.join(LAUNCHER_RUNS_DIR, file)))
+    .filter(Boolean)
+    .filter(run => !status || run.status === status)
+    .filter(run => !agent || run.agent === agent)
+    .sort((a, b) => (b.completed_at || b.started_at || b.created_at || '').localeCompare(a.completed_at || a.started_at || a.created_at || ''));
+  return limit ? runs.slice(0, limit) : runs;
+}
+
+function readLauncherRun(runId) {
+  if (!runId) return null;
+  if (runId === 'latest') return loadJson(LAUNCHER_LATEST_FILE);
+  return loadJson(launcherRunPath(runId));
+}
+
+function ensureLaunchRequestsDir() {
+  if (!fs.existsSync(LAUNCH_REQUESTS_DIR)) fs.mkdirSync(LAUNCH_REQUESTS_DIR, { recursive: true });
+}
+
+function launchRequestPath(launchId) {
+  ensureLaunchRequestsDir();
+  return `${LAUNCH_REQUESTS_DIR}/${launchId}.json`;
+}
+
+function readLaunchRequests() {
+  ensureLaunchRequestsDir();
+  return readJsonCollection(LAUNCH_REQUESTS_DIR)
+    .sort((a, b) => (a.updated_at || a.created_at || '').localeCompare(b.updated_at || b.created_at || ''));
+}
+
+function readLaunchRequest(launchId) {
+  return loadJson(launchRequestPath(launchId));
+}
+
+function saveLaunchRequest(request) {
+  request.updated_at = new Date().toISOString();
+  saveJson(launchRequestPath(request.launch_id), request);
+}
+
+function launchInboxPath(agent) {
+  return `${LAUNCH_INBOX_DIR}/${agent}.json`;
+}
+
+function normalizeLaunchDispatchMode(mode) {
+  if (!mode) return null;
+  const normalized = String(mode).trim().toLowerCase();
+  return LAUNCH_DISPATCH_MODES.has(normalized) ? normalized : null;
+}
+
+function deriveLaunchCooldownMinutes(entity) {
+  if (Number.isInteger(entity?.cooldown_minutes) && entity.cooldown_minutes >= 0) return entity.cooldown_minutes;
+  if (Number.isInteger(entity?.payload?.launch_cooldown_minutes) && entity.payload.launch_cooldown_minutes >= 0) {
+    return entity.payload.launch_cooldown_minutes;
+  }
+  if (entity?.source_type === 'pending_task') return 15;
+  return 15;
+}
+
+function deriveLaunchLeaseMinutes(entity, override = null) {
+  if (Number.isInteger(override) && override >= 0) return override;
+  if (Number.isInteger(entity?.lease_minutes) && entity.lease_minutes >= 0) return entity.lease_minutes;
+  return Math.max(5, deriveLaunchCooldownMinutes(entity));
+}
+
+function collectLaunchRequests(options = {}) {
+  const agentFilter = isClearedValue(options.agent) ? null : String(options.agent).trim();
+  const statusFilter = isClearedValue(options.status) ? null : String(options.status).trim().toLowerCase();
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const rows = [];
+  for (const request of readLaunchRequests()) {
+    if (agentFilter && request.agent !== agentFilter) continue;
+    if (statusFilter && request.status !== statusFilter) continue;
+    rows.push(request);
+  }
+  rows.sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''));
+  return limit ? rows.slice(0, limit) : rows;
+}
+
+function refreshLaunchIndexes() {
+  const now = new Date().toISOString();
+  const pendingRequests = [];
+  const inboxes = {};
+  for (const request of readLaunchRequests()) {
+    if (request.status !== 'pending') continue;
+    pendingRequests.push(request);
+    if (!request.agent) continue;
+    if (!inboxes[request.agent]) inboxes[request.agent] = [];
+    inboxes[request.agent].push(request);
+  }
+  pendingRequests.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  saveJson(PENDING_LAUNCH_REQUESTS_FILE, {
+    schema: 'atf.pending-launch-requests.v1',
+    updated_at: now,
+    total: pendingRequests.length,
+    items: pendingRequests,
+  });
+
+  if (!fs.existsSync(LAUNCH_INBOX_DIR)) fs.mkdirSync(LAUNCH_INBOX_DIR, { recursive: true });
+  for (const file of fs.readdirSync(LAUNCH_INBOX_DIR)) {
+    if (file.endsWith('.json')) fs.unlinkSync(path.join(LAUNCH_INBOX_DIR, file));
+  }
+  for (const [agent, items] of Object.entries(inboxes)) {
+    items.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+    saveJson(launchInboxPath(agent), {
+      schema: 'atf.launch-inbox.v1',
+      updated_at: now,
+      agent,
+      total: items.length,
+      items,
+    });
+  }
+}
+
 function summarizePendingActions(actions = []) {
   const byAgent = new Map();
   const byKind = new Map();
@@ -3046,6 +3184,409 @@ function buildActionWatcherStatus(options = {}) {
       failed: failedRuns,
     },
     pending_actions: pending,
+  };
+}
+
+function buildLauncherWatcherStatus(options = {}) {
+  const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const recentLimit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 10;
+  const recentRuns = readLauncherRuns({ agent, limit: recentLimit });
+  const latestRun = recentRuns[0] || (!agent ? readLauncherRun('latest') : null);
+  const latestAt = latestRun?.completed_at || latestRun?.started_at || latestRun?.created_at || null;
+  const latestAgeMinutes = latestAt ? computeAgeMinutes(latestAt) : null;
+  const queueStatus = buildLaunchStatus({
+    agent,
+    warn_after_minutes: warnAfterMinutes,
+  });
+  const completedRuns = recentRuns.filter(run => run.status === 'completed').length;
+  const failedRuns = recentRuns.filter(run => run.status === 'failed').length;
+
+  let status = 'ok';
+  let code = 'healthy';
+  if (!latestRun) {
+    status = 'never_run';
+    code = 'no_runs_recorded';
+  } else if (latestRun.status === 'failed') {
+    status = 'failed';
+    code = 'latest_run_failed';
+  } else if (Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
+    status = 'stale';
+    code = 'latest_run_stale';
+  }
+
+  return {
+    schema: 'atf.launcher-watcher-status.v1',
+    status,
+    code,
+    scope: {
+      agent,
+      warn_after_minutes: warnAfterMinutes,
+      recent_runs_limit: recentLimit,
+    },
+    generated_at: new Date().toISOString(),
+    latest_run: latestRun ? {
+      run_id: latestRun.run_id || null,
+      status: latestRun.status || null,
+      started_at: latestRun.started_at || null,
+      completed_at: latestRun.completed_at || null,
+      age_minutes: latestAgeMinutes,
+      dry_run: Boolean(latestRun.dryRun),
+      created: latestRun.created ?? 0,
+      leased: latestRun.leased ?? 0,
+      archived: latestRun.archived ?? 0,
+      pending_after_scan: latestRun.pendingAfterScan ?? 0,
+      pending_after_dispatch: latestRun.pendingAfterDispatch ?? 0,
+    } : null,
+    recent_runs: {
+      total: recentRuns.length,
+      completed: completedRuns,
+      failed: failedRuns,
+    },
+    launch_queue: queueStatus,
+  };
+}
+
+function readWorkspacePendingTask(workspace) {
+  if (!workspace) return null;
+  return loadJson(path.join(workspace, 'pending-task.json'));
+}
+
+function buildLaunchCandidates(options = {}) {
+  const agentFilter = isClearedValue(options.agent) ? null : String(options.agent).trim();
+  const registry = loadAgentRegistry({ persistIfMissing: true });
+  const candidates = [];
+  for (const entry of registry.agents.filter(item => item.enabled !== false)) {
+    if (agentFilter && entry.agent !== agentFilter) continue;
+    const workspace = entry.workspace || inferAgentWorkspace(entry.agent);
+    const pendingTask = readWorkspacePendingTask(workspace);
+    if (!pendingTask) continue;
+    const sourceRef = pendingTask.action_id || pendingTask.task_id || entry.agent;
+    candidates.push({
+      agent: entry.agent,
+      workspace,
+      source_type: 'pending_task',
+      source_ref: sourceRef,
+      source_path: path.join(workspace, 'pending-task.json'),
+      dedupe_key: `pending_task:${entry.agent}:${sourceRef}`,
+      summary: `${entry.agent} workspace has pending-task ${pendingTask.task_id || sourceRef}`,
+      guidance: `Wake ${entry.agent} to consume pending-task.json in ${workspace}.`,
+      payload: {
+        assigned_to: pendingTask.assigned_to || entry.agent,
+        action_id: pendingTask.action_id || null,
+        task_id: pendingTask.task_id || null,
+        kind: pendingTask.kind || null,
+        priority: pendingTask.priority || null,
+        summary: pendingTask.summary || null,
+        pending_task_path: path.join(workspace, 'pending-task.json'),
+        launch_cooldown_minutes: Number.isInteger(options.cooldown_minutes) && options.cooldown_minutes >= 0
+          ? options.cooldown_minutes
+          : 15,
+      },
+    });
+  }
+  return candidates.sort((a, b) => a.agent.localeCompare(b.agent) || (a.source_ref || '').localeCompare(b.source_ref || ''));
+}
+
+function getSignalLaunchRequests(agent, dedupeKey) {
+  if (!agent || !dedupeKey) return [];
+  return readLaunchRequests()
+    .filter(request => request.agent === agent && request.dedupe_key === dedupeKey)
+    .sort((a, b) => (b.lease_expires_at || b.dispatched_at || b.updated_at || b.created_at || '').localeCompare(a.lease_expires_at || a.dispatched_at || a.updated_at || a.created_at || ''));
+}
+
+function buildLaunchRequestState(candidate, referenceTime = null) {
+  const signalRequests = getSignalLaunchRequests(candidate?.agent, candidate?.dedupe_key);
+  const latestRequest = signalRequests[0] || null;
+  const reference = parseIsoTimestamp(referenceTime) || new Date();
+  const cooldownMinutes = deriveLaunchCooldownMinutes(candidate);
+  const attempt = latestRequest ? Math.max(Number(latestRequest.attempt) || 1, signalRequests.length) + 1 : 1;
+  if (!latestRequest) {
+    return {
+      blocked: false,
+      attempt,
+      latest_request: null,
+      cooldown_minutes: cooldownMinutes,
+      blocker: null,
+    };
+  }
+  if (latestRequest.status === 'pending') {
+    return {
+      blocked: true,
+      attempt,
+      latest_request: latestRequest,
+      cooldown_minutes: cooldownMinutes,
+      blocker: 'pending_exists',
+    };
+  }
+    if (latestRequest.status === 'leased') {
+      const leaseExpiresAt = parseIsoTimestamp(latestRequest.lease_expires_at);
+      if (leaseExpiresAt && leaseExpiresAt.getTime() > reference.getTime()) {
+        return {
+          blocked: true,
+        attempt,
+          latest_request: latestRequest,
+          cooldown_minutes: cooldownMinutes,
+          blocker: 'lease_active',
+          available_in_minutes: Math.max(0, Math.ceil((leaseExpiresAt.getTime() - reference.getTime()) / (60 * 1000))),
+        };
+      }
+    }
+  const latestAt = latestRequest.dispatched_at || latestRequest.updated_at || latestRequest.created_at || null;
+  const ageMinutes = latestAt ? computeAgeMinutes(latestAt, reference) : null;
+  if (Number.isInteger(cooldownMinutes) && Number.isInteger(ageMinutes) && ageMinutes < cooldownMinutes) {
+    return {
+      blocked: true,
+      attempt,
+      latest_request: latestRequest,
+      cooldown_minutes: cooldownMinutes,
+      blocker: 'cooldown_active',
+      age_minutes: ageMinutes,
+      available_in_minutes: Math.max(0, cooldownMinutes - ageMinutes),
+    };
+  }
+  return {
+    blocked: false,
+    attempt,
+    latest_request: latestRequest,
+    cooldown_minutes: cooldownMinutes,
+    blocker: null,
+  };
+}
+
+function archiveLaunchRequest(request, actor = 'launch-scan', note = 'source cleared') {
+  if (!request || request.status === 'archived') return request;
+  const now = new Date().toISOString();
+  request.status = 'archived';
+  request.archived_at = now;
+  request.lease_expires_at = null;
+  request.history = appendHistoryEvent(request.history, {
+    event: 'archived',
+    by: actor,
+    at: now,
+    note,
+  });
+  saveLaunchRequest(request);
+  return request;
+}
+
+function createLaunchRequestRecord(candidate, planner = 'launch-scan') {
+  const now = new Date().toISOString();
+  const request = {
+    schema: 'atf.launch-request.v1',
+    launch_id: generateId('LCH'),
+    agent: candidate.agent,
+    workspace: candidate.workspace,
+    source_type: candidate.source_type,
+    source_ref: candidate.source_ref || null,
+    source_path: candidate.source_path || null,
+    dedupe_key: candidate.dedupe_key,
+    signal_key: candidate.dedupe_key,
+    attempt: Number.isInteger(candidate.attempt) && candidate.attempt > 0 ? candidate.attempt : 1,
+    reissue_of: candidate.reissue_of || null,
+    cooldown_minutes: Number.isInteger(candidate.cooldown_minutes) ? candidate.cooldown_minutes : deriveLaunchCooldownMinutes(candidate),
+    lease_minutes: deriveLaunchLeaseMinutes(candidate, candidate.lease_minutes),
+    summary: candidate.summary,
+    guidance: candidate.guidance,
+    payload: candidate.payload || {},
+    status: 'pending',
+    dispatch_mode: null,
+    dispatched_at: null,
+    archived_at: null,
+    lease_expires_at: null,
+    dispatch: null,
+    created_at: now,
+    updated_at: now,
+    history: [
+      {
+        event: 'planned',
+        by: planner,
+        at: now,
+        note: `${candidate.summary}${Number.isInteger(candidate.attempt) && candidate.attempt > 1 ? ` | attempt=${candidate.attempt}` : ''}`,
+      },
+    ],
+  };
+  saveLaunchRequest(request);
+  return request;
+}
+
+function scanLaunchRequests(options = {}) {
+  const planner = options.planner || 'launch-scan';
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const candidates = buildLaunchCandidates(options);
+  const created = [];
+  let duplicates = 0;
+  let cooldownBlocked = 0;
+  let activeBlocked = 0;
+  let archived = 0;
+  const scanNow = new Date().toISOString();
+  const observedKeys = new Set(candidates.map(candidate => `${candidate.agent}::${candidate.dedupe_key}`));
+
+  for (const request of readLaunchRequests()) {
+    if (!['pending', 'leased'].includes(request.status)) continue;
+    const key = `${request.agent}::${request.dedupe_key}`;
+    if (observedKeys.has(key)) continue;
+    archiveLaunchRequest(request, planner, 'source cleared');
+    archived += 1;
+  }
+
+  for (const candidate of candidates) {
+    if (limit && created.length >= limit) break;
+    const state = buildLaunchRequestState(candidate, scanNow);
+    if (state.blocked) {
+      duplicates += 1;
+      if (state.blocker === 'cooldown_active') cooldownBlocked += 1;
+      if (state.blocker === 'pending_exists' || state.blocker === 'lease_active') activeBlocked += 1;
+      continue;
+    }
+    if (state.latest_request && state.latest_request.status === 'leased') {
+      archiveLaunchRequest(state.latest_request, planner, 'lease expired; reissue launch request');
+      archived += 1;
+    }
+    candidate.attempt = state.attempt;
+    candidate.reissue_of = state.latest_request?.launch_id || null;
+    candidate.cooldown_minutes = state.cooldown_minutes;
+    created.push(createLaunchRequestRecord(candidate, planner));
+  }
+
+  refreshLaunchIndexes();
+  return {
+    scanned: candidates.length,
+    created,
+    duplicates,
+    archived,
+    cooldown_blocked: cooldownBlocked,
+    active_blocked: activeBlocked,
+  };
+}
+
+function dispatchLaunchRequest(request, options = {}) {
+  const mode = normalizeLaunchDispatchMode(options.mode) || 'manual';
+  const dispatcher = options.dispatcher || 'launch-dispatcher';
+  const now = new Date().toISOString();
+  const leaseMinutes = deriveLaunchLeaseMinutes(request, options.lease_minutes);
+  const result = request;
+
+  if (result.status !== 'pending') {
+    result.dispatch = {
+      dispatcher,
+      mode,
+      note: options.note || null,
+      dispatched_at: now,
+      status: 'skipped',
+      error: { message: `launch request ${result.launch_id} is not pending` },
+    };
+    result.history = appendHistoryEvent(result.history, {
+      event: 'dispatch_skipped',
+      by: dispatcher,
+      at: now,
+      note: result.dispatch.error.message,
+    });
+    saveLaunchRequest(result);
+    refreshLaunchIndexes();
+    return result;
+  }
+
+  const pendingTaskExists = result.source_path ? fs.existsSync(result.source_path) : false;
+  if (!pendingTaskExists) {
+    archiveLaunchRequest(result, dispatcher, 'source cleared before dispatch');
+    refreshLaunchIndexes();
+    return readLaunchRequest(result.launch_id);
+  }
+
+  const leaseExpiresAt = new Date(new Date(now).getTime() + (leaseMinutes * 60 * 1000)).toISOString();
+  result.status = 'leased';
+  result.dispatch_mode = mode;
+  result.dispatched_at = now;
+  result.lease_expires_at = leaseExpiresAt;
+  result.dispatch = {
+    dispatcher,
+    mode,
+    note: options.note || null,
+    dispatched_at: now,
+    lease_expires_at: leaseExpiresAt,
+    status: 'leased',
+    artifacts: {
+      source_path: result.source_path || null,
+      workspace: result.workspace || null,
+    },
+  };
+  result.history = appendHistoryEvent(result.history, {
+    event: 'dispatched',
+    by: dispatcher,
+    at: now,
+    note: `${mode}${options.note ? ` | ${options.note}` : ''}`,
+  });
+  saveLaunchRequest(result);
+  refreshLaunchIndexes();
+  return result;
+}
+
+function buildLaunchStatus(options = {}) {
+  const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const requests = collectLaunchRequests({ agent });
+  const latestDispatch = requests
+    .filter(request => request.dispatched_at)
+    .sort((a, b) => (b.dispatched_at || '').localeCompare(a.dispatched_at || ''))[0] || null;
+  const pendingCount = requests.filter(request => request.status === 'pending').length;
+  const leasedCount = requests.filter(request => request.status === 'leased').length;
+  const failedCount = requests.filter(request => request.status === 'failed').length;
+  const latestAgeMinutes = latestDispatch?.dispatched_at ? computeAgeMinutes(latestDispatch.dispatched_at) : null;
+
+  let status = 'idle';
+  let code = 'no_pending_launches';
+  if (!requests.length) {
+    status = 'idle';
+    code = 'no_launch_requests';
+  } else if (failedCount > 0) {
+    status = 'attention';
+    code = 'launch_failures_present';
+  } else if (leasedCount > 0 && Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
+    status = 'stale';
+    code = 'lease_stale';
+  } else if (pendingCount > 0) {
+    status = 'pending';
+    code = 'pending_launch_requests';
+  } else if (leasedCount > 0) {
+    status = 'leased';
+    code = 'active_launch_lease';
+  }
+
+  return {
+    schema: 'atf.launch-status.v1',
+    status,
+    code,
+    scope: {
+      agent,
+      warn_after_minutes: warnAfterMinutes,
+    },
+    generated_at: new Date().toISOString(),
+    latest_dispatch: latestDispatch ? {
+      launch_id: latestDispatch.launch_id,
+      agent: latestDispatch.agent,
+      mode: latestDispatch.dispatch_mode || latestDispatch.dispatch?.mode || null,
+      dispatched_at: latestDispatch.dispatched_at,
+      age_minutes: latestAgeMinutes,
+      lease_expires_at: latestDispatch.lease_expires_at || null,
+      source_ref: latestDispatch.source_ref || null,
+    } : null,
+    counts: {
+      total: requests.length,
+      pending: pendingCount,
+      leased: leasedCount,
+      failed: failedCount,
+      archived: requests.filter(request => request.status === 'archived').length,
+    },
+    by_agent: requests.reduce((rows, request) => {
+      if (request.status !== 'pending') return rows;
+      rows[request.agent] = (rows[request.agent] || 0) + 1;
+      return rows;
+    }, {}),
   };
 }
 
@@ -4854,6 +5395,16 @@ ATF CLI v2
   atf action show <taskId> <actionId>               查看动作
   atf action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]
   atf action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop]
+  atf launch scan [agent] [cooldown_minutes=N] [limit=N]          扫描 agent workspace 的 launch request
+  atf launch list [agent] [status=x] [limit=N]                    查看 launch request 队列
+  atf launch inbox <agent> [limit=N]                              查看 agent 待 dispatch 的 launch request
+  atf launch show <launchId>                                      查看单条 launch request
+  atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]
+  atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]
+  atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch queue / lease 状态
+  atf launch runs [agent] [status=completed|failed] [limit=N]     查看 launcher 运行审计
+  atf launch run-show <runId|latest>                              查看单次 launcher 运行明细
+  atf launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json]  查看 launcher 健康状态
   atf agent list                                     查看注册 agent 列表
   atf agent audit [top=N]                            审计未知/脏 agent 引用
   atf agent remap <from> <to> [apply=true]          重映射错误 agent 名（默认 dry-run）
@@ -6738,6 +7289,528 @@ switch (cmd) {
     }
 
     console.error('用法: atf action scan|list|inbox|rebuild-index|runs|run-show|watcher-status|show|execute|execute-pending ...');
+    break;
+  }
+
+  // =============================================================
+  // launch 命令 - 控制平面统一 launcher queue
+  // =============================================================
+  case 'launch': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'scan') {
+      let agent = null;
+      let cooldownMinutes = 15;
+      let limit = null;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('cooldown_minutes=')) {
+          const value = Number(part.substring('cooldown_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          cooldownMinutes = value;
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch scan [agent] [cooldown_minutes=N] [limit=N]');
+        break;
+      }
+      const result = scanLaunchRequests({
+        agent,
+        cooldown_minutes: cooldownMinutes,
+        limit,
+        planner: 'cli',
+      });
+      if (!result.created.length) {
+        console.log(`launch scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.active_blocked ? `  active=${result.active_blocked}` : ''}${result.archived ? `  archived=${result.archived}` : ''}`);
+        break;
+      }
+      console.log(`launch scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.active_blocked ? `  active=${result.active_blocked}` : ''}${result.archived ? `  archived=${result.archived}` : ''}`);
+      for (const request of result.created) {
+        console.log(`- ${request.launch_id}  agent=${request.agent}  try=${request.attempt || 1}  source=${request.source_type}  cooldown=${request.cooldown_minutes}m`);
+        console.log(`  ${request.summary}`);
+      }
+      break;
+    }
+
+    if (sub === 'list') {
+      let agent = null;
+      let statusFilter = null;
+      let limit = null;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch list [agent] [status=x] [limit=N]');
+        break;
+      }
+      if (statusFilter && !LAUNCH_REQUEST_STATUSES.has(statusFilter)) {
+        console.error(`launch status: ${[...LAUNCH_REQUEST_STATUSES].join('|')}`);
+        break;
+      }
+      const requests = collectLaunchRequests({
+        agent,
+        status: statusFilter,
+        limit,
+      });
+      const filterLabel = [
+        agent ? `agent=${agent}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!requests.length) {
+        console.log(filterLabel ? `launch list (${filterLabel}) 暂无记录` : '当前暂无 launch request');
+        break;
+      }
+      console.log(`\nLaunch Queue${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      for (const request of requests) {
+        console.log(`${request.launch_id}  ${request.status}  agent=${request.agent}  source=${request.source_type}`);
+        console.log(`  try=${request.attempt || 1}  cooldown=${request.cooldown_minutes ?? '-'}m${request.lease_expires_at ? `  lease_until=${request.lease_expires_at}` : ''}${request.dispatch_mode ? `  mode=${request.dispatch_mode}` : ''}`);
+        console.log(`  ${request.summary}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'inbox') {
+      const [agent, ...optionParts] = restArgs;
+      if (!agent) {
+        console.error('用法: atf launch inbox <agent> [limit=N]');
+        break;
+      }
+      let limit = null;
+      let invalid = false;
+      for (const part of optionParts.filter(Boolean)) {
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch inbox <agent> [limit=N]');
+        break;
+      }
+      refreshLaunchIndexes();
+      const inbox = loadJson(launchInboxPath(agent));
+      const items = (inbox?.items || []).slice(0, limit || (inbox?.items || []).length);
+      if (!items.length) {
+        console.log(`agent ${agent} 当前没有待 dispatch 的 launch request`);
+        break;
+      }
+      console.log(`\n${agent} Launch Inbox (${items.length} 条)\n`);
+      for (const request of items) {
+        console.log(`${request.launch_id}  source=${request.source_type}  try=${request.attempt || 1}  cooldown=${request.cooldown_minutes ?? '-'}m`);
+        console.log(`  ${request.summary}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'show') {
+      const [launchId] = restArgs;
+      if (!launchId) {
+        console.error('用法: atf launch show <launchId>');
+        break;
+      }
+      const request = readLaunchRequest(launchId);
+      if (!request) {
+        console.error(`未找到 launch request: ${launchId}`);
+        break;
+      }
+      console.log(JSON.stringify(request, null, 2));
+      break;
+    }
+
+    if (sub === 'dispatch') {
+      const [launchId, ...optionParts] = restArgs;
+      if (!launchId) {
+        console.error('用法: atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]');
+        break;
+      }
+      const request = readLaunchRequest(launchId);
+      if (!request) {
+        console.error(`未找到 launch request: ${launchId}`);
+        break;
+      }
+      let dispatcher = 'launch-dispatcher';
+      let mode = null;
+      let leaseMinutes = null;
+      let note = null;
+      let invalid = false;
+      for (const part of optionParts.filter(Boolean)) {
+        if (part.startsWith('dispatcher=')) {
+          dispatcher = part.substring('dispatcher='.length) || dispatcher;
+          continue;
+        }
+        if (part.startsWith('mode=')) {
+          mode = normalizeLaunchDispatchMode(part.substring('mode='.length));
+          if (!mode) {
+            invalid = true;
+            break;
+          }
+          continue;
+        }
+        if (part.startsWith('lease_minutes=')) {
+          const value = Number(part.substring('lease_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          leaseMinutes = value;
+          continue;
+        }
+        if (part.startsWith('note=')) {
+          note = part.substring('note='.length);
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]');
+        break;
+      }
+      const dispatched = dispatchLaunchRequest(request, {
+        dispatcher,
+        mode,
+        lease_minutes: leaseMinutes,
+        note,
+      });
+      console.log(`${dispatched.status === 'leased' ? 'Dispatched' : 'Updated'} launch ${dispatched.launch_id}`);
+      console.log(`   agent: ${dispatched.agent}  |  status: ${dispatched.status}  |  mode: ${dispatched.dispatch_mode || dispatched.dispatch?.mode || mode || 'manual'}`);
+      if (dispatched.lease_expires_at) console.log(`   lease_until: ${dispatched.lease_expires_at}`);
+      if (dispatched.source_path) console.log(`   source: ${dispatched.source_path}`);
+      break;
+    }
+
+    if (sub === 'dispatch-pending') {
+      let agent = null;
+      let limit = null;
+      let dispatcher = 'launch-dispatcher';
+      let mode = null;
+      let leaseMinutes = null;
+      let note = null;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (part.startsWith('dispatcher=')) {
+          dispatcher = part.substring('dispatcher='.length) || dispatcher;
+          continue;
+        }
+        if (part.startsWith('mode=')) {
+          mode = normalizeLaunchDispatchMode(part.substring('mode='.length));
+          if (!mode) {
+            invalid = true;
+            break;
+          }
+          continue;
+        }
+        if (part.startsWith('lease_minutes=')) {
+          const value = Number(part.substring('lease_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          leaseMinutes = value;
+          continue;
+        }
+        if (part.startsWith('note=')) {
+          note = part.substring('note='.length);
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]');
+        break;
+      }
+      refreshLaunchIndexes();
+      const requests = collectLaunchRequests({
+        agent,
+        status: 'pending',
+        limit,
+      });
+      if (!requests.length) {
+        console.log('当前没有可 dispatch 的 pending launch request');
+        break;
+      }
+      const results = [];
+      for (const request of requests) {
+        const latest = readLaunchRequest(request.launch_id);
+        if (!latest || latest.status !== 'pending') continue;
+        results.push(dispatchLaunchRequest(latest, {
+          dispatcher,
+          mode,
+          lease_minutes: leaseMinutes,
+          note,
+        }));
+      }
+      if (!results.length) {
+        console.log('没有成功处理任何 pending launch request');
+        break;
+      }
+      const leasedCount = results.filter(request => request.status === 'leased').length;
+      const archivedCount = results.filter(request => request.status === 'archived').length;
+      console.log(`Processed ${results.length} launch requests  |  leased:${leasedCount}  archived:${archivedCount}`);
+      for (const request of results) {
+        console.log(`   ${request.launch_id}  agent:${request.agent}  status:${request.status}  mode:${request.dispatch_mode || request.dispatch?.mode || mode || 'manual'}`);
+        if (request.lease_expires_at) console.log(`      lease_until: ${request.lease_expires_at}`);
+      }
+      break;
+    }
+
+    if (sub === 'runs') {
+      let agent = null;
+      let statusFilter = null;
+      let limit = null;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch runs [agent] [status=completed|failed] [limit=N]');
+        break;
+      }
+      if (statusFilter && !LAUNCHER_RUN_STATUSES.has(statusFilter)) {
+        console.error(`launcher run status: ${[...LAUNCHER_RUN_STATUSES].join('|')}`);
+        break;
+      }
+      const runs = readLauncherRuns({
+        agent,
+        status: statusFilter,
+        limit,
+      });
+      const filterLabel = [
+        agent ? `agent=${agent}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!runs.length) {
+        console.log(filterLabel ? `launcher runs (${filterLabel}) 暂无记录` : '当前暂无 launcher 运行记录');
+        break;
+      }
+      console.log(`\nLauncher Runs${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      for (const run of runs) {
+        console.log(`${run.run_id}  ${run.status}  ${run.completed_at || run.started_at || '-'}`);
+        console.log(`  agent=${run.agent || 'all'}  dry_run=${Boolean(run.dryRun)}  created=${run.created ?? 0}  leased=${run.leased ?? 0}  archived=${run.archived ?? 0}  duration_ms=${run.duration_ms ?? '-'}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'run-show') {
+      const [runId] = restArgs;
+      if (!runId) {
+        console.error('用法: atf launch run-show <runId|latest>');
+        break;
+      }
+      const run = readLauncherRun(runId);
+      if (!run) {
+        console.error(`未找到 launcher run: ${runId}`);
+        break;
+      }
+      console.log(JSON.stringify(run, null, 2));
+      break;
+    }
+
+    if (sub === 'launcher-status') {
+      let agent = null;
+      let warnAfterMinutes = 30;
+      let limit = 10;
+      let json = false;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part === 'json') {
+          json = true;
+          continue;
+        }
+        if (part.startsWith('warn_after_minutes=')) {
+          const value = Number(part.substring('warn_after_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          warnAfterMinutes = value;
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json]');
+        break;
+      }
+      const status = buildLauncherWatcherStatus({
+        agent,
+        warn_after_minutes: warnAfterMinutes,
+        limit,
+      });
+      if (json) {
+        console.log(JSON.stringify(status, null, 2));
+        break;
+      }
+      console.log('\nLauncher Status\n');
+      console.log(`status=${status.status}  code=${status.code}  scope=${status.scope.agent || 'all'}  warn_after=${status.scope.warn_after_minutes}m`);
+      if (!status.latest_run) {
+        console.log('latest_run=none');
+      } else {
+        console.log(`latest_run=${status.latest_run.run_id}  ${status.latest_run.status}  age=${status.latest_run.age_minutes ?? '-'}m  completed_at=${status.latest_run.completed_at || status.latest_run.started_at || '-'}`);
+        console.log(`latest_effect=created:${status.latest_run.created}  leased:${status.latest_run.leased}  archived:${status.latest_run.archived}  pending_after_scan:${status.latest_run.pending_after_scan}  pending_after_dispatch:${status.latest_run.pending_after_dispatch}  dry_run=${status.latest_run.dry_run}`);
+      }
+      console.log(`recent_runs=total:${status.recent_runs.total}  completed:${status.recent_runs.completed}  failed:${status.recent_runs.failed}`);
+      console.log(`launch_queue=status:${status.launch_queue.status}  code:${status.launch_queue.code}  total:${status.launch_queue.counts.total}  pending:${status.launch_queue.counts.pending}  leased:${status.launch_queue.counts.leased}`);
+      const pendingByAgent = Object.entries(status.launch_queue.by_agent).filter(([, count]) => count > 0);
+      if (pendingByAgent.length) {
+        console.log(`pending_by_agent=${pendingByAgent.map(([name, count]) => `${name}=${count}`).join('  ')}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'status') {
+      let agent = null;
+      let warnAfterMinutes = 30;
+      let json = false;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part === 'json') {
+          json = true;
+          continue;
+        }
+        if (part.startsWith('warn_after_minutes=')) {
+          const value = Number(part.substring('warn_after_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          warnAfterMinutes = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf launch status [agent] [warn_after_minutes=N] [json]');
+        break;
+      }
+      const status = buildLaunchStatus({
+        agent,
+        warn_after_minutes: warnAfterMinutes,
+      });
+      if (json) {
+        console.log(JSON.stringify(status, null, 2));
+        break;
+      }
+      console.log('\nLaunch Status\n');
+      console.log(`status=${status.status}  code=${status.code}  scope=${status.scope.agent || 'all'}  warn_after=${status.scope.warn_after_minutes}m`);
+      if (status.latest_dispatch) {
+        console.log(`latest_dispatch=${status.latest_dispatch.launch_id}  agent=${status.latest_dispatch.agent}  mode=${status.latest_dispatch.mode || '-'}  age=${status.latest_dispatch.age_minutes ?? '-'}m`);
+        if (status.latest_dispatch.lease_expires_at) console.log(`lease_until=${status.latest_dispatch.lease_expires_at}`);
+      } else {
+        console.log('latest_dispatch=none');
+      }
+      console.log(`counts=total:${status.counts.total}  pending:${status.counts.pending}  leased:${status.counts.leased}  failed:${status.counts.failed}  archived:${status.counts.archived}`);
+      const pendingByAgent = Object.entries(status.by_agent).filter(([, count]) => count > 0);
+      if (pendingByAgent.length) {
+        console.log(`pending_by_agent=${pendingByAgent.map(([name, count]) => `${name}=${count}`).join('  ')}`);
+      }
+      console.log('');
+      break;
+    }
+
+    console.error('用法: atf launch scan|list|inbox|show|dispatch|dispatch-pending|status|runs|run-show|launcher-status ...');
     break;
   }
 

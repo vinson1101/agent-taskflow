@@ -28,6 +28,7 @@
 | `atf-cli.js` | CLI 入口，所有命令 |
 | `workspace/bin/atf-watcher.cjs` | 仓库内可见的 watcher v1：`scan-all -> execute-pending` 批量执行脚本 |
 | `workspace/bin/atf-action-watcher.cjs` | 仓库内可见的 action watcher：`action scan -> action execute-pending` |
+| `workspace/bin/atf-launcher.cjs` | 仓库内可见的 launcher：`launch scan -> launch dispatch-pending` |
 | `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
 | `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
 
@@ -120,6 +121,16 @@ node atf-cli.js action list [taskId|owner] [status=x] [kind=x] [limit=N] # 查�
 node atf-cli.js action inbox <agent> [kind=x] [limit=N]       # 查看 agent 待执行动作
 node atf-cli.js action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x] # 执行单条动作
 node atf-cli.js action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop] # 批量执行动作
+node atf-cli.js launch scan [agent] [cooldown_minutes=N] [limit=N] # 扫描 agent workspace 的 launch request
+node atf-cli.js launch list [agent] [status=x] [limit=N]     # 查看 launch request 队列
+node atf-cli.js launch inbox <agent> [limit=N]               # 查看 agent 待 dispatch 的 launch request
+node atf-cli.js launch show <launchId>                       # 查看单条 launch request
+node atf-cli.js launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x] # dispatch 单条 launch request
+node atf-cli.js launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x] # 批量 dispatch launch request
+node atf-cli.js launch status [agent] [warn_after_minutes=N] [json] # 查看 launch queue / lease 状态
+node atf-cli.js launch runs [agent] [status=completed|failed] [limit=N] # 查看 launcher 运行审计
+node atf-cli.js launch run-show <runId|latest>             # 查看单次 launcher 运行明细
+node atf-cli.js launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json] # 查看 launcher 健康状态
 node atf-cli.js credits rebuild                               # 重建内部积分索引（完成度 + 反馈）
 node atf-cli.js credits list                                  # 查看 agent 积分概览
 node atf-cli.js credits show <agent>                          # 查看单个 agent 积分账本
@@ -159,6 +170,8 @@ npm run atf:watcher -- --agent f0x --executor watcher-v1
 npm run atf:watcher:dry -- --agent f0x
 npm run atf:action:watcher -- --agent pinchymeow --mode message
 npm run atf:action:watcher:dry -- --agent f0x --mode pending_task
+npm run atf:launcher -- --agent f0x --mode noop
+npm run atf:launcher:dry -- --agent f0x
 ```
 
 `workspace/bin/atf-watcher.cjs` 当前做两件事：
@@ -235,6 +248,28 @@ node atf-cli.js action run-show latest
 node atf-cli.js action watcher-status
 node atf-cli.js action watcher-status pinchymeow warn_after_minutes=20
 ```
+
+`workspace/bin/atf-launcher.cjs` 负责控制平面上的统一唤醒队列：
+
+1. 调用 `node atf-cli.js launch scan`
+2. 读取 `pending-launch-requests.json` / `launch-inboxes/<agent>.json`
+3. 调用 `node atf-cli.js launch dispatch-pending`
+
+当前只支持 `manual / noop` 两种 dispatch mode，目标是先把 “哪个 agent 有待消费的 `pending-task.json`” 建模成可审计、可去重、带 lease 的 launch request，而不是把 cron 直接绑死到外部 `sessions_spawn`。
+
+可以直接用这些命令看 launch queue：
+
+```bash
+node atf-cli.js launch scan
+node atf-cli.js launch list status=pending
+node atf-cli.js launch status
+node atf-cli.js launch status huntmind json
+node atf-cli.js launch runs limit=10
+node atf-cli.js launch run-show latest
+node atf-cli.js launch launcher-status
+```
+
+`launch status` 关注 queue 本身的 `pending / leased / archived` 分布；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
 
 ---
 
@@ -321,10 +356,14 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - 数据目录：`ATF_DATA_DIR`，默认 `/root/.openclaw/workspace/agent-taskflow/data/`
 - 全局 Trigger 索引：`ATF_DATA_DIR/pending-trigger-fires.json`
 - Agent Trigger inbox：`ATF_DATA_DIR/trigger-inboxes/*.json`
+- 全局 Action 索引：`ATF_DATA_DIR/pending-actions.json`
+- Agent Action inbox：`ATF_DATA_DIR/action-inboxes/*.json`
+- 全局 Launch 索引：`ATF_DATA_DIR/pending-launch-requests.json`
+- Agent Launch inbox：`ATF_DATA_DIR/launch-inboxes/*.json`
 - reputation 索引：`ATF_DATA_DIR/scores.json`
 - 工作区根目录：`ATF_WORKSPACE_DIR`，默认 `/root/.openclaw/workspace/`
 - learnings promote：`ATF_LEARNINGS_PROMOTE_SCRIPT`
 
 ---
 
-*最后更新：2026-04-19*
+*最后更新：2026-04-20*

@@ -9,6 +9,7 @@ const { createRequire } = require('module');
 const repoRoot = path.resolve(__dirname, '..', '..');
 const cliPath = path.join(repoRoot, 'atf-cli.js');
 const watcherPath = path.join(repoRoot, 'workspace', 'bin', 'atf-action-watcher.cjs');
+const launcherPath = path.join(repoRoot, 'workspace', 'bin', 'atf-launcher.cjs');
 const smokeRoot = path.join(repoRoot, '.tmp-atf-phased-smoke');
 
 function parseArgs(argv) {
@@ -100,6 +101,10 @@ function runCli(args, env, options = {}) {
 
 function runWatcher(args, env, options = {}) {
   return runScript(watcherPath, args, env, options);
+}
+
+function runLauncher(args, env, options = {}) {
+  return runScript(launcherPath, args, env, options);
 }
 
 function readJson(filePath) {
@@ -194,6 +199,24 @@ function setActionTimestamps(taskId, env, actionId, executedAt) {
   if (action.verification?.preflight) action.verification.preflight.checked_at = executedAt;
   if (action.verification?.postflight) action.verification.postflight.checked_at = executedAt;
   writeJson(actionFile, action);
+}
+
+function setLaunchRequestTimestamps(env, launchId, dispatchedAt, leaseExpiresAt = dispatchedAt) {
+  const launchFile = path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${launchId}.json`);
+  const request = readJson(launchFile);
+  request.created_at = dispatchedAt;
+  request.updated_at = dispatchedAt;
+  if (request.dispatched_at) request.dispatched_at = dispatchedAt;
+  if (request.lease_expires_at) request.lease_expires_at = leaseExpiresAt;
+  if (request.dispatch?.dispatched_at) request.dispatch.dispatched_at = dispatchedAt;
+  if (request.dispatch?.lease_expires_at) request.dispatch.lease_expires_at = leaseExpiresAt;
+  if (Array.isArray(request.history) && request.history.length) {
+    request.history = request.history.map((entry, index) => ({
+      ...entry,
+      at: index === request.history.length - 1 ? dispatchedAt : (entry.at || dispatchedAt),
+    }));
+  }
+  writeJson(launchFile, request);
 }
 
 function main() {
@@ -388,6 +411,53 @@ function main() {
   if (watcherStatusAfterCooldown.pending_actions.total !== 2) throw new Error(`expected watcher status pending total=2 after cooldown reissue, got ${watcherStatusAfterCooldown.pending_actions.total}`);
   if (pinchyWatcherStatusAfterCooldown.pending_actions.total !== 1) throw new Error(`expected pinchy watcher status pending total=1 after cooldown reissue, got ${pinchyWatcherStatusAfterCooldown.pending_actions.total}`);
   if (pinchyWatcherStatusAfterCooldown.recent_runs.total !== 2) throw new Error(`expected pinchy watcher recent runs total=2, got ${pinchyWatcherStatusAfterCooldown.recent_runs.total}`);
+
+  const launcherDryRun = JSON.parse(runLauncher(['--agent', 'f0x', '--cooldown-minutes', '5', '--dry-run', '--json'], env, options));
+  const pendingLaunchRequests = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json'));
+  const launchStatusPending = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  if (launcherDryRun.created !== 1) throw new Error(`expected launcher dry-run created=1, got ${launcherDryRun.created}`);
+  if (launcherDryRun.pendingAfterScan !== 1) throw new Error(`expected launcher pendingAfterScan=1, got ${launcherDryRun.pendingAfterScan}`);
+  if (launcherDryRun.status !== 'completed') throw new Error(`expected launcher dry-run status completed, got ${launcherDryRun.status}`);
+  if (pendingLaunchRequests.total !== 1) throw new Error(`expected 1 pending launch request, got ${pendingLaunchRequests.total}`);
+  if (launchStatusPending.status !== 'pending') throw new Error(`expected launch status pending, got ${launchStatusPending.status}`);
+  const firstLaunchRequest = pendingLaunchRequests.items[0];
+  if (firstLaunchRequest.agent !== 'f0x') throw new Error(`expected first launch request agent=f0x, got ${firstLaunchRequest.agent}`);
+
+  const launcherRun = JSON.parse(runLauncher(['--agent', 'f0x', '--cooldown-minutes', '5', '--mode', 'noop', '--dispatcher', 'phase-d-smoke', '--lease-minutes', '5', '--json'], env, options));
+  const leasedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${firstLaunchRequest.launch_id}.json`));
+  const launcherRuns = runCli(['launch', 'runs', 'limit=4'], env, options);
+  const latestLauncherRun = JSON.parse(runCli(['launch', 'run-show', 'latest'], env, options));
+  const launcherWatcherStatus = JSON.parse(runCli(['launch', 'launcher-status', 'limit=4', 'json'], env, options));
+  const launchStatusLeased = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  if (launcherRun.leased !== 1) throw new Error(`expected launcher leased=1, got ${launcherRun.leased}`);
+  if (launcherRun.status !== 'completed') throw new Error(`expected launcher run status completed, got ${launcherRun.status}`);
+  if (leasedLaunchRequest.status !== 'leased') throw new Error(`expected launch request leased, got ${leasedLaunchRequest.status}`);
+  if (launchStatusLeased.status !== 'leased') throw new Error(`expected launch status leased, got ${launchStatusLeased.status}`);
+  assertIncludes(launcherRuns, launcherDryRun.run_id, 'launcher runs');
+  assertIncludes(launcherRuns, launcherRun.run_id, 'launcher runs');
+  if (latestLauncherRun.run_id !== launcherRun.run_id) throw new Error(`expected latest launcher run to be ${launcherRun.run_id}, got ${latestLauncherRun.run_id}`);
+  if (latestLauncherRun.schema !== 'atf.launcher-run.v1') throw new Error(`expected latest launcher run schema, got ${latestLauncherRun.schema}`);
+  if (launcherWatcherStatus.status !== 'ok') throw new Error(`expected launcher watcher status ok, got ${launcherWatcherStatus.status}`);
+  if (launcherWatcherStatus.latest_run?.run_id !== launcherRun.run_id) throw new Error(`expected launcher watcher latest run ${launcherRun.run_id}, got ${launcherWatcherStatus.latest_run?.run_id}`);
+  if (launcherWatcherStatus.recent_runs.total !== 2) throw new Error(`expected launcher watcher recent run total=2, got ${launcherWatcherStatus.recent_runs.total}`);
+  if (launcherWatcherStatus.launch_queue.counts.leased !== 1) throw new Error(`expected launcher watcher leased count=1, got ${launcherWatcherStatus.launch_queue.counts.leased}`);
+
+  setLaunchRequestTimestamps(env, firstLaunchRequest.launch_id, new Date(Date.now() - (10 * 60 * 1000)).toISOString(), new Date(Date.now() - (4 * 60 * 1000)).toISOString());
+  const launchScanAfterLeaseExpiry = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
+  const launchRequestsAfterLeaseExpiry = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json'));
+  const reissuedLaunch = launchRequestsAfterLeaseExpiry.items.find(item => item.launch_id !== firstLaunchRequest.launch_id);
+  if (!reissuedLaunch) throw new Error('expected reissued launch request after lease expiry');
+  assertIncludes(launchScanAfterLeaseExpiry, 'created=1', 'launch scan after lease expiry');
+  assertIncludes(launchScanAfterLeaseExpiry, 'archived=1', 'launch scan after lease expiry');
+  if (reissuedLaunch.attempt !== 2) throw new Error(`expected reissued launch attempt=2, got ${reissuedLaunch.attempt}`);
+  if (reissuedLaunch.reissue_of !== firstLaunchRequest.launch_id) throw new Error(`expected reissued launch to point to ${firstLaunchRequest.launch_id}, got ${reissuedLaunch.reissue_of}`);
+
+  fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
+  const launchScanAfterSourceClear = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
+  const launchStatusAfterClear = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  assertIncludes(launchScanAfterSourceClear, 'created=0', 'launch scan after source clear');
+  assertIncludes(launchScanAfterSourceClear, 'archived=1', 'launch scan after source clear');
+  if (launchStatusAfterClear.counts.pending !== 0) throw new Error(`expected no pending launch requests after source clear, got ${launchStatusAfterClear.counts.pending}`);
 
   if (options.cleanup) {
     fs.rmSync(smokeRoot, { recursive: true, force: true });

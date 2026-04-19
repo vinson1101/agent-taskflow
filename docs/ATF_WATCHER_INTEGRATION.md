@@ -13,6 +13,8 @@
 - `trigger scan / scan-all`
 - watcher 可直接消费的全局索引
 - 仓库内可见的 `workspace/bin/atf-watcher.cjs`
+- 仓库内可见的 `workspace/bin/atf-action-watcher.cjs`
+- 仓库内可见的 `workspace/bin/atf-launcher.cjs`
 - 最小 `Trigger Action Executor`
 - `pending_task / message / room / noop` adapter
 - 显式 `handoff` payload
@@ -34,6 +36,21 @@
 5. `reflect from-fire`
 
 默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`，同时把 execution 记录写进 `trigger-executions/`。如果显式使用 `mode=message` 或 `mode=room`，则会生成 `handoff` 消息，而不是任务文件信号。
+
+如果你已经把 Phase D 主动动作层接上，那么控制平面的完整链路推荐变成：
+
+1. `trigger scan-all`
+2. `trigger execute-pending`
+3. `action scan`
+4. `action execute-pending`
+5. `launch scan`
+6. `launch dispatch-pending`
+
+也就是：
+
+- `atf-watcher.cjs` 负责 Trigger 层
+- `atf-action-watcher.cjs` 负责主动 follow-up
+- `atf-launcher.cjs` 负责把目标 agent workspace 里的 `pending-task.json` 升格成统一 launch queue
 
 ## 2. 仓库内可见的 watcher v1
 
@@ -212,6 +229,24 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 ```bash
 node atf-cli.js action runs limit=10
 node atf-cli.js action watcher-status
+```
+
+### 6.5 Unified launcher
+
+如果要继续把 “哪个 agent 该被唤醒来消费自己的 pending-task” 做成统一控制平面：
+
+```cron
+*/10 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode noop >> /tmp/atf-launcher.log 2>&1
+```
+
+这里推荐先用 `mode=noop` 或 `mode=manual`，先把 queue / cooldown / lease / audit 打通，再决定是否要接外部 session adapter。
+
+上线后直接看：
+
+```bash
+node atf-cli.js launch runs limit=10
+node atf-cli.js launch launcher-status
+node atf-cli.js launch status
 ```
 
 ## 7. 本地 smoke 建议

@@ -68,7 +68,9 @@ node atf-cli.js focus add <taskId> <owner> <title>            # 创建 Focus Ite
 node atf-cli.js focus list <taskId> [owner]                   # 列出 Focus Items
 node atf-cli.js focus show <taskId> <focusId>                 # 查看 Focus Item
 node atf-cli.js focus update <taskId> <focusId> <status> [nextAction] # 更新 Focus
-node atf-cli.js trigger add <taskId> <owner> <type> <spec> [focus=FOC-...] # 创建 Trigger
+node atf-cli.js trigger add <taskId> <owner> <type> <spec> [focus=FOC-...] [thread=...] [intent=x] [note=x] # 创建 Trigger
+node atf-cli.js trigger follow-up <taskId> <owner> <spec> [focus=FOC-...] [thread=...] [note=x] # 创建 follow-up Trigger
+node atf-cli.js trigger review <taskId> <owner> <spec> [focus=FOC-...] [thread=...] [note=x] # 创建 review Trigger
 node atf-cli.js trigger list <taskId> [owner]                 # 列出 Triggers
 node atf-cli.js trigger inbox <agent> [taskId]                # 查看 agent 待处理 Trigger fires
 node atf-cli.js trigger rebuild-index                         # 重建全局 Trigger fire 索引
@@ -79,17 +81,22 @@ node atf-cli.js trigger show <taskId> <triggerId>             # 查看 Trigger
 node atf-cli.js trigger update <taskId> <triggerId> <status>  # 更新 Trigger
 node atf-cli.js trigger fire <taskId> <triggerId> <sourceType> [ref=...] [note] # 手动记录 Trigger firing
 node atf-cli.js trigger fires <taskId> [triggerId] [status]   # 查看 Trigger firing 记录
+node atf-cli.js trigger execute <taskId> <fireId> [executor] [mode=pending_task|message|noop] [note=x] # 执行单条 pending fire
+node atf-cli.js trigger execute-pending [agent] [executor=x] [mode=x] [limit=N] [note=x] # 批量执行 pending fires
+node atf-cli.js trigger executions <taskId> [fireId]          # 查看 Trigger execution 记录
 node atf-cli.js trigger consume <taskId> <fireId> <consumer> [result] # 标记 Trigger firing 已消费
 node atf-cli.js trigger ignore <taskId> <fireId> <consumer> [reason] # 标记 Trigger firing 已忽略
 node atf-cli.js reflect add <taskId> <author> <field> <内容> [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...] # 添加 Reflection
 node atf-cli.js reflect from-fire <taskId> <fireId> <author> <field> <内容> # 从 Trigger fire 创建 Reflection
-node atf-cli.js reflect list <taskId> [field] [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...] # 查看 Reflections
+node atf-cli.js reflect list <taskId> [field] [focus=FOC-...] [trigger=TRG-...] [fire=TGF-...] [author=x] # 查看 Reflections
+node atf-cli.js reflect summary <taskId> [focus=FOC-...] [author=x] # 查看 Reflection 摘要
 node atf-cli.js reflect show <taskId> <reflectionId>          # 查看 Reflection
-node atf-cli.js shared add <taskId> <author> <type> <内容>    # 添加共享上下文
-node atf-cli.js shared list <taskId> [type]                   # 查看共享上下文
+node atf-cli.js shared add <taskId> <author> <type> <内容> [focus=FOC-...] [thread=...] [tag=x] [tags=a,b] # 添加共享上下文
+node atf-cli.js shared list <taskId> [type] [focus=FOC-...] [thread=...] [author=x] [tag=x] # 查看共享上下文
 node atf-cli.js msg send <taskId> <from> <to> <type> <内容> [focus=FOC-...] [thread=...] [reply=MSG-...] # 发送任务内异步消息
 node atf-cli.js msg inbox <agent> [taskId]                    # 查看 agent 收件箱
 node atf-cli.js msg thread <taskId> [threadId|focus=FOC-...]  # 查看任务消息线程
+node atf-cli.js msg threads <taskId> [focus=FOC-...] [agent=x] # 查看任务线程总览
 node atf-cli.js msg ack <taskId> <messageId> <agent> [type] [note] # 写消息回执
 node atf-cli.js msg receipts <taskId> <messageId>             # 查看消息回执
 node atf-cli.js dlq list                  # 列出 DLQ
@@ -142,16 +149,22 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ Reflection source binding 最小版
 - ✅ 外部 watcher v1.6 已接入 Trigger fire 消费链并通过服务器侧 smoke
 - ✅ shared context 最小版
+- ✅ Trigger intent / thread_id / note 元数据
+- ✅ trigger follow-up / review 快捷入口
+- ✅ msg threads 任务线程总览
+- ✅ shared context 的 focus/thread/tag 绑定与过滤
+- ✅ reflect summary 任务级摘要
+- ✅ Trigger Action Executor 最小版（`execute / execute-pending / executions`）
 - ✅ learnings-promote.cjs（→ MEMORY）
 - ✅ 岚遥机制（learnings/ 即时记录 + promote）
 
 ## 未完成 / 待优化
 
-- [ ] **Trigger Action Executor** — 当前外部 watcher v1.6 已能消费 Trigger fires，但还没有在仓库内沉淀出“直接触达 agent session / bot / pending-task”的通用执行器
+- [ ] **Trigger Action Adapter 扩展** — 已有最小执行器并可落成 `pending-task.json`，但还没有直接触达 agent session / bot / room 的更多 adapter
 - [ ] **learnings → lessons 合并** — 已存在 `memory/lessons/`，learnings 机制是重复的，应迁移到 lessons
 - [ ] **简化 watcher** — 投递确认、delivery-history、pending-decisions 复杂度过高，简化回基本超时 DLQ 即可
 - [ ] **block/decide/revise 命令移除** — 设计过重，用 `update <status>` 代替即可
-- [ ] **shared-context/ 结构化** — intel/ 情报积累、decision/ 决策记录尚未日常化
+- [ ] **shared-context/ 日常化沉淀** — 已有 `focus/thread/tag` 结构，但 intel/decision 的日常使用还不稳定
 - [ ] **每日复盘 cron** — 岚遥建议的 23:00 复盘尚未建立
 - [ ] **Zoe 每周巡检** — 岚遥建议的 10:00/14:00/22:00 巡检 cron 尚未建立
 

@@ -25,6 +25,12 @@
 3. agent 执行后调用 `trigger consume` / `trigger ignore`
 4. 需要沉淀时调用 `reflect from-fire`
 
+补充：
+
+- 当前仓库内已经有最小 `Trigger Action Executor`
+- 可以直接用 `trigger execute` / `trigger execute-pending`
+- 默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`
+
 ## 1.1 当前状态（2026-04-19）
 
 服务器侧外部 `atf-watcher.cjs` 已完成一版最小接入，可视为 watcher v1.6。
@@ -193,13 +199,14 @@ for (const fire of pending.items) {
 ```js
 const inbox = readJson(`${ATF_DATA_DIR}/trigger-inboxes/f0x.json`);
 for (const fire of inbox.items) {
-  const ok = handleFire(fire);
-  if (ok) {
-    run(`node atf-cli.js trigger consume ${fire.task_id} ${fire.fire_id} f0x handled`);
-  } else {
-    run(`node atf-cli.js trigger ignore ${fire.task_id} ${fire.fire_id} f0x skipped`);
-  }
+  run(`node atf-cli.js trigger execute ${fire.task_id} ${fire.fire_id} executor=watcher-v1`);
 }
+```
+
+更简化的批量写法：
+
+```js
+run("node atf-cli.js trigger execute-pending f0x executor=watcher-v1 limit=20");
 ```
 
 ## 7. 推荐触发器写法
@@ -259,7 +266,7 @@ node atf-cli.js trigger add T-001 pinchymeow on_status_change watch
 1. 先接 `trigger scan-all`
 2. 再接 `pending-trigger-fires.json`
 3. 再接 `trigger-inboxes/<agent>.json`
-4. 再接 `trigger consume / ignore`
+4. 再接 `trigger execute-pending`
 5. 最后接 `reflect from-fire`
 
 不要一开始就做：
@@ -310,7 +317,7 @@ $env:ATF_DATA_DIR = "D:\\tmp\\atf\\data"
 
 - 仓库内可见的 `atf-watcher.cjs` 源码快照
 - 更完整的 cron parser
-- 真正的 trigger action executor（直接触达 agent session / bot / pending-task）
+- 更丰富的 trigger action adapter（直接触达 agent session / bot / room，而不只是 `pending-task`）
 - 多节点 / 多 gateway 分布式路由
 
 但对你现在的目标来说，这已经足够把外部 cron / heartbeat 接起来。

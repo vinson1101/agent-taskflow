@@ -38,6 +38,7 @@ const FOCUS_STATUSES = new Set(['open', 'in_progress', 'blocked', 'done', 'dropp
 const TRIGGER_TYPES = new Set(['cron', 'interval', 'on_message', 'on_status_change', 'on_blocked']);
 const TRIGGER_STATUSES = new Set(['active', 'paused', 'fired', 'archived']);
 const TRIGGER_FIRE_STATUSES = new Set(['pending', 'consumed', 'ignored']);
+const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'noop']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
 
 if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
@@ -296,6 +297,161 @@ function parseTriggerScanArgs(parts) {
   };
 }
 
+function inferTriggerTypeFromSpec(spec) {
+  if (!spec) return null;
+  if (parseDurationSeconds(spec)) return 'interval';
+  if (normalizeCronExpression(spec)) return 'cron';
+  return null;
+}
+
+function defaultThreadId(taskId, focusId = null, threadId = null) {
+  if (threadId) return threadId;
+  if (focusId) return `focus:${focusId}`;
+  return `task:${taskId}`;
+}
+
+function parseTriggerCreateParts(parts) {
+  let focusId = null;
+  let threadId = null;
+  let intent = 'generic';
+  let note = null;
+  const specTokens = [];
+
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+    else if (part.startsWith('thread=')) threadId = part.substring('thread='.length);
+    else if (part.startsWith('intent=')) intent = part.substring('intent='.length) || 'generic';
+    else if (part.startsWith('note=')) note = part.substring('note='.length) || null;
+    else specTokens.push(part);
+  }
+
+  return { focusId, threadId, intent, note, specTokens };
+}
+
+function createTriggerRecord(taskId, ctx, ownerAgent, triggerType, triggerSpec, options = {}) {
+  const now = new Date().toISOString();
+  const normalizedThreadId = options.thread_id || (options.focus_id ? `focus:${options.focus_id}` : null);
+  const trigger = {
+    schema: 'atf.trigger.v1',
+    trigger_id: generateId('TRG'),
+    task_id: ctx.short_id || ctx.task_id,
+    focus_id: options.focus_id || null,
+    thread_id: normalizedThreadId,
+    owner_agent: ownerAgent,
+    trigger_type: triggerType,
+    trigger_spec: triggerSpec,
+    intent: options.intent || 'generic',
+    note: options.note || null,
+    status: 'active',
+    created_at: now,
+    updated_at: now,
+    runtime: {
+      fire_count: 0,
+      last_fired_at: null,
+      last_source_type: null,
+      last_source_ref: null,
+      last_note: null,
+      pending_fire_id: null,
+      last_consumed_at: null,
+      last_settled_at: null,
+      last_settled_status: null,
+      last_result: null,
+      next_due_at: inferNextDueAt(triggerType, triggerSpec, now),
+    },
+    history: [
+      {
+        event: 'created',
+        by: ownerAgent,
+        at: now,
+        note: `${options.intent || 'generic'} ${triggerType}:${triggerSpec}`.trim(),
+      },
+    ],
+  };
+  saveTrigger(taskId, trigger);
+  return trigger;
+}
+
+function parseSharedEntryParts(parts) {
+  let focusId = null;
+  let threadId = null;
+  const tags = new Set();
+  const contentTokens = [];
+
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+    else if (part.startsWith('thread=')) threadId = part.substring('thread='.length);
+    else if (part.startsWith('tags=')) {
+      for (const tag of part.substring('tags='.length).split(',')) {
+        const normalized = tag.trim();
+        if (normalized) tags.add(normalized);
+      }
+    } else if (part.startsWith('tag=')) {
+      const normalized = part.substring('tag='.length).trim();
+      if (normalized) tags.add(normalized);
+    } else {
+      contentTokens.push(part);
+    }
+  }
+
+  return {
+    focusId,
+    threadId,
+    tags: [...tags],
+    contentTokens,
+  };
+}
+
+function parseSharedListFilters(parts) {
+  let entryType = null;
+  let focusId = null;
+  let threadId = null;
+  let author = null;
+  let tag = null;
+
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+    else if (part.startsWith('thread=')) threadId = part.substring('thread='.length);
+    else if (part.startsWith('author=')) author = part.substring('author='.length);
+    else if (part.startsWith('tag=')) tag = part.substring('tag='.length);
+    else entryType = part;
+  }
+
+  return { entryType, focusId, threadId, author, tag };
+}
+
+function normalizeTriggerExecutionMode(mode) {
+  if (!mode) return null;
+  const normalized = mode.trim().toLowerCase().replace(/-/g, '_');
+  return TRIGGER_EXECUTION_MODES.has(normalized) ? normalized : null;
+}
+
+function inferTriggerExecutionMode(trigger, fire = null) {
+  const intent = fire?.intent || trigger?.intent || 'generic';
+  if (intent === 'follow_up' || intent === 'review') return 'pending_task';
+  const triggerType = fire?.trigger_type || trigger?.trigger_type;
+  if (['interval', 'cron', 'on_message', 'on_status_change', 'on_blocked'].includes(triggerType)) return 'pending_task';
+  return 'pending_task';
+}
+
+function parseTriggerExecuteArgs(parts) {
+  let target = null;
+  let executor = 'trigger-executor';
+  let mode = null;
+  let limit = null;
+  let note = null;
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('mode=')) mode = normalizeTriggerExecutionMode(part.substring('mode='.length));
+    else if (part.startsWith('limit=')) {
+      const value = Number(part.substring('limit='.length));
+      if (Number.isFinite(value) && value > 0) limit = Math.floor(value);
+    } else if (part.startsWith('note=')) note = part.substring('note='.length) || null;
+    else if (part.startsWith('executor=')) executor = part.substring('executor='.length) || executor;
+    else if (!target) target = part;
+    else executor = part;
+  }
+  return { target, executor, mode, limit, note };
+}
+
 function readTaskMessages(taskId) {
   ensureMessageDirs(taskId);
   return readJsonCollection(messagesDir(taskId))
@@ -339,6 +495,34 @@ function effectiveMessageStatus(message) {
 function receiptSummary(receipts) {
   if (!receipts.length) return '-';
   return receipts.map(r => `${r.receipt_type}:${r.from_agent}`).join(', ');
+}
+
+function summarizeThreads(messages) {
+  const threads = new Map();
+  for (const message of messages) {
+    if (!threads.has(message.thread_id)) threads.set(message.thread_id, []);
+    threads.get(message.thread_id).push(message);
+  }
+
+  return [...threads.entries()]
+    .map(([threadId, items]) => {
+      const sorted = [...items].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      const latest = sorted[sorted.length - 1];
+      const participants = [...new Set(sorted.flatMap(item => [item.from_agent, item.to_agent]).filter(Boolean))].sort();
+      const blockerCount = sorted.filter(item => item.message_type === 'blocker').length;
+      const decisionCount = sorted.filter(item => item.message_type === 'decision_request').length;
+      const pendingCount = sorted.filter(item => effectiveMessageStatus(item) === 'sent').length;
+      return {
+        thread_id: threadId,
+        total: sorted.length,
+        participants,
+        latest,
+        blocker_count: blockerCount,
+        decision_count: decisionCount,
+        pending_count: pendingCount,
+      };
+    })
+    .sort((a, b) => (b.latest?.created_at || '').localeCompare(a.latest?.created_at || ''));
 }
 
 function focusDir(taskId) {
@@ -424,6 +608,20 @@ function triggerFirePath(taskId, fireId) {
   return `${triggerFiresDir(taskId)}/${fireId}.json`;
 }
 
+function triggerExecutionsDir(taskId) {
+  return `${taskDirPath(taskId)}/trigger-executions`;
+}
+
+function ensureTriggerExecutionsDir(taskId) {
+  const dir = triggerExecutionsDir(taskId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function triggerExecutionPath(taskId, executionId) {
+  ensureTriggerExecutionsDir(taskId);
+  return `${triggerExecutionsDir(taskId)}/${executionId}.json`;
+}
+
 function readTaskTriggers(taskId) {
   ensureTriggersDir(taskId);
   return readJsonCollection(triggersDir(taskId))
@@ -442,6 +640,16 @@ function readTaskTriggerFires(taskId) {
 
 function readTriggerFire(taskId, fireId) {
   return loadJson(triggerFirePath(taskId, fireId));
+}
+
+function readTaskTriggerExecutions(taskId) {
+  ensureTriggerExecutionsDir(taskId);
+  return readJsonCollection(triggerExecutionsDir(taskId))
+    .sort((a, b) => (a.dispatched_at || a.created_at || '').localeCompare(b.dispatched_at || b.created_at || ''));
+}
+
+function readTriggerExecution(taskId, executionId) {
+  return loadJson(triggerExecutionPath(taskId, executionId));
 }
 
 function triggerInboxPath(agent) {
@@ -499,6 +707,11 @@ function saveTriggerFire(taskId, fire) {
   saveJson(triggerFirePath(taskId, fire.fire_id), fire);
 }
 
+function saveTriggerExecution(taskId, execution) {
+  execution.updated_at = new Date().toISOString();
+  saveJson(triggerExecutionPath(taskId, execution.execution_id), execution);
+}
+
 function normalizeTriggerRuntime(trigger, baseIso = new Date().toISOString()) {
   const runtime = trigger.runtime || {};
   return {
@@ -525,8 +738,10 @@ function recordTriggerFire(taskId, trigger, options = {}) {
     trigger_id: trigger.trigger_id,
     task_id: trigger.task_id,
     focus_id: trigger.focus_id || null,
+    thread_id: options.thread_id || trigger.thread_id || (trigger.focus_id ? `focus:${trigger.focus_id}` : null),
     owner_agent: trigger.owner_agent,
     trigger_type: trigger.trigger_type,
+    intent: trigger.intent || 'generic',
     source_type: options.source_type || 'manual',
     source_ref: options.source_ref || null,
     note: options.note || null,
@@ -624,6 +839,122 @@ function settleTriggerFire(taskId, fire, trigger, status, consumer, result = nul
   });
   refreshTriggerIndexes();
   return fire;
+}
+
+function buildPendingTaskFromTrigger(ctx, trigger, fire, executor, note = null, dispatchedAt = new Date().toISOString()) {
+  return {
+    task_id: ctx.short_id || ctx.task_id,
+    assigned_to: fire.owner_agent || trigger.owner_agent || ctx.assigned_to || null,
+    description: ctx.description,
+    instructions: ctx.instructions || null,
+    created_by: executor,
+    created_at: dispatchedAt,
+    source: 'trigger_fire',
+    trigger_fire_id: fire.fire_id,
+    trigger_id: fire.trigger_id,
+    trigger_type: fire.trigger_type || trigger.trigger_type,
+    trigger_intent: fire.intent || trigger.intent || 'generic',
+    source_type: fire.source_type || null,
+    source_ref: fire.source_ref || null,
+    focus_id: fire.focus_id || trigger.focus_id || null,
+    thread_id: fire.thread_id || trigger.thread_id || null,
+    note: note || fire.note || trigger.note || null,
+  };
+}
+
+function executeTriggerFire(taskId, fire, trigger, ctx, options = {}) {
+  const now = new Date().toISOString();
+  const mode = normalizeTriggerExecutionMode(options.mode) || inferTriggerExecutionMode(trigger, fire);
+  if (!TRIGGER_EXECUTION_MODES.has(mode)) {
+    throw new Error(`unsupported execution mode: ${options.mode || mode}`);
+  }
+  if (fire.status !== 'pending') {
+    throw new Error(`trigger fire is not pending: ${fire.fire_id}`);
+  }
+
+  const execution = {
+    schema: 'atf.trigger-execution.v1',
+    execution_id: generateId('TEX'),
+    fire_id: fire.fire_id,
+    trigger_id: fire.trigger_id,
+    task_id: ctx.short_id || ctx.task_id,
+    focus_id: fire.focus_id || trigger.focus_id || null,
+    thread_id: fire.thread_id || trigger.thread_id || null,
+    owner_agent: fire.owner_agent || trigger.owner_agent || null,
+    execution_mode: mode,
+    executor: options.executor || 'trigger-executor',
+    status: 'dispatched',
+    created_at: now,
+    dispatched_at: now,
+    note: options.note || null,
+    artifacts: {},
+    payload: null,
+  };
+
+  if (mode === 'pending_task') {
+    const pendingTaskPath = `${taskDirPath(taskId)}/pending-task.json`;
+    const pendingTask = buildPendingTaskFromTrigger(ctx, trigger, fire, execution.executor, execution.note, now);
+    fs.writeFileSync(pendingTaskPath, JSON.stringify(pendingTask, null, 2));
+    execution.payload = pendingTask;
+    execution.artifacts.pending_task_path = pendingTaskPath;
+  } else if (mode === 'message') {
+    const message = {
+      schema: 'atf.message.v1',
+      message_id: generateId('MSG'),
+      task_id: ctx.short_id || ctx.task_id,
+      thread_id: fire.thread_id || trigger.thread_id || defaultThreadId(ctx.short_id || ctx.task_id, fire.focus_id || trigger.focus_id || null, null),
+      focus_id: fire.focus_id || trigger.focus_id || null,
+      reply_to_message_id: null,
+      from_agent: execution.executor,
+      to_agent: fire.owner_agent || trigger.owner_agent,
+      message_type: 'info',
+      body: options.note || fire.note || trigger.note || `trigger fire ${fire.fire_id} dispatched`,
+      created_at: now,
+      ttl_seconds: 24 * 60 * 60,
+      expires_at: new Date(new Date(now).getTime() + 24 * 60 * 60 * 1000).toISOString(),
+      status: 'sent',
+      receipt_ids: [],
+      last_receipt_type: null,
+      last_receipt_at: null,
+    };
+    saveMessage(taskId, message);
+    execution.payload = message;
+    execution.artifacts.message_id = message.message_id;
+  } else {
+    execution.payload = {
+      task_id: ctx.short_id || ctx.task_id,
+      trigger_fire_id: fire.fire_id,
+      action: 'noop',
+    };
+  }
+
+  fire.execution_id = execution.execution_id;
+  fire.execution_mode = mode;
+  fire.executed_at = now;
+  fire.executed_by = execution.executor;
+  if (execution.note) fire.execution_note = execution.note;
+  saveTriggerExecution(taskId, execution);
+
+  trigger.history = appendHistoryEvent(trigger.history, {
+    event: 'executed',
+    by: execution.executor,
+    at: now,
+    note: `${execution.execution_id} ${mode}${execution.note ? ` ${execution.note}` : ''}`.trim(),
+    fire_id: fire.fire_id,
+  });
+  saveTrigger(taskId, trigger);
+  appendNotificationHistory(taskId, {
+    event: 'trigger_fire_executed',
+    trigger_id: trigger.trigger_id,
+    fire_id: fire.fire_id,
+    execution_id: execution.execution_id,
+    execution_mode: mode,
+    executor: execution.executor,
+    at: now,
+  });
+
+  settleTriggerFire(taskId, fire, trigger, 'consumed', execution.executor, `executed:${mode}`);
+  return execution;
 }
 
 function archiveTriggersForFocus(taskId, focusId, reason) {
@@ -743,7 +1074,7 @@ function createTaskDir(taskNum, description) {
   const taskPath = `${TASKS_DIR}/${dirName}`;
   if (fs.existsSync(taskPath)) return { dirName, taskPath };
   fs.mkdirSync(taskPath, { recursive: true });
-  const subdirs = ['research', 'implementation', 'notes', 'notifications', 'messages', 'receipts', 'focus-items', 'triggers', 'trigger-fires', 'reflections'];
+  const subdirs = ['research', 'implementation', 'notes', 'notifications', 'messages', 'receipts', 'focus-items', 'triggers', 'trigger-fires', 'trigger-executions', 'reflections'];
   for (const s of subdirs) fs.mkdirSync(`${taskPath}/${s}`, { recursive: true });
   fs.writeFileSync(`${taskPath}/README.md`, `# ${taskNum} - ${description}\n\n**状态**: created\n`);
   fs.writeFileSync(`${taskPath}/progress.md`, `## 进度记录\n\n### ${new Date().toISOString()}\n- 任务创建\n`);
@@ -1046,6 +1377,70 @@ switch (cmd) {
       break;
     }
 
+    if (false && sub === 'summary') {
+      const [taskId, ...filterParts] = restArgs;
+      if (!taskId) { console.error('鐢ㄦ硶: atf reflect summary <taskId> [focus=FOC-...] [author=x]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`鉂?浠诲姟涓嶅瓨鍦? ${taskId}`); break; }
+      let focusId = null;
+      let author = null;
+      for (const part of filterParts.filter(Boolean)) {
+        if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+        else if (part.startsWith('author=')) author = part.substring('author='.length);
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`鉂?Focus 涓嶅瓨鍦? ${focusId}`); break;
+      }
+      let reflections = readTaskReflections(taskId);
+      if (focusId) reflections = reflections.filter(r => r.focus_id === focusId);
+      if (author) reflections = reflections.filter(r => r.author === author);
+      if (!reflections.length) { console.log(`浠诲姟 ${ctx.short_id || ctx.task_id} 鏆傛棤 Reflections`); break; }
+      console.log(`\n${ctx.short_id || ctx.task_id} Reflection Summary\n`);
+      for (const field of REFLECTION_FIELDS) {
+        const items = reflections.filter(reflection => reflection.field === field);
+        if (!items.length) continue;
+        console.log(`${field}: ${items.length}`);
+        for (const reflection of items.slice(-3)) {
+          console.log(`  ${reflection.created_at}  ${reflection.author}${reflection.focus_id ? `  focus=${reflection.focus_id}` : ''}`);
+          console.log(`  ${reflection.content}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    if (false && sub === 'summary') {
+      const [taskId, ...filterParts] = restArgs;
+      if (!taskId) { console.error('用法: atf reflect summary <taskId> [focus=FOC-...] [author=x]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      let focusId = null;
+      let author = null;
+      for (const part of filterParts.filter(Boolean)) {
+        if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+        else if (part.startsWith('author=')) author = part.substring('author='.length);
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`❌ Focus 不存在: ${focusId}`); break;
+      }
+      let reflections = readTaskReflections(taskId);
+      if (focusId) reflections = reflections.filter(r => r.focus_id === focusId);
+      if (author) reflections = reflections.filter(r => r.author === author);
+      if (!reflections.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Reflections`); break; }
+      console.log(`\n${ctx.short_id || ctx.task_id} Reflection Summary\n`);
+      for (const field of REFLECTION_FIELDS) {
+        const items = reflections.filter(reflection => reflection.field === field);
+        if (!items.length) continue;
+        console.log(`${field}: ${items.length}`);
+        for (const reflection of items.slice(-3)) {
+          console.log(`  ${reflection.created_at}  ${reflection.author}${reflection.focus_id ? `  focus=${reflection.focus_id}` : ''}`);
+          console.log(`  ${reflection.content}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
     if (sub === 'show') {
       const [taskId, focusId] = restArgs;
       if (!taskId || !focusId) { console.error('用法: atf focus show <taskId> <focusId>'); break; }
@@ -1118,23 +1513,36 @@ switch (cmd) {
     if (sub === 'add') {
       const [taskId, author, entryType, ...contentParts] = restArgs;
       if (!taskId || !author || !entryType || !contentParts.length) {
-        console.error('用法: atf shared add <taskId> <author> <type> <内容>'); break;
+        console.error('用法: atf shared add <taskId> <author> <type> <内容> [focus=FOC-...] [thread=...] [tag=x] [tags=a,b]'); break;
       }
       if (!SHARED_ENTRY_TYPES.has(entryType)) {
         console.error(`shared 类型: ${[...SHARED_ENTRY_TYPES].join('|')}`); break;
       }
       const ctx = readCtx(taskId);
       if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      const { focusId, threadId, tags, contentTokens } = parseSharedEntryParts(contentParts);
+      if (!contentTokens.length) {
+        console.error('❌ shared content 不能为空'); break;
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`鉂?Focus 涓嶅瓨鍦? ${focusId}`); break;
+      }
       const sharedContext = readSharedContext(taskId, ctx.short_id || ctx.task_id);
       const entry = {
         entry_id: generateId('CTX'),
         task_id: ctx.short_id || ctx.task_id,
         author,
         entry_type: entryType,
-        content: contentParts.join(' '),
+        focus_id: focusId,
+        thread_id: defaultThreadId(ctx.short_id || ctx.task_id, focusId, threadId),
+        tags,
+        content: contentTokens.join(' '),
         created_at: new Date().toISOString(),
       };
       sharedContext.entries = [...(sharedContext.entries || []), entry];
+      if (entry.focus_id) console.log(`   focus: ${entry.focus_id}`);
+      if (entry.thread_id) console.log(`   thread: ${entry.thread_id}`);
+      if (entry.tags.length) console.log(`   tags: ${entry.tags.join(', ')}`);
       writeSharedContext(taskId, sharedContext);
       console.log(`✅ 已写入 shared context ${entry.entry_id}`);
       console.log(`   任务: ${entry.task_id}  |  ${author} [${entry.entry_type}]`);
@@ -1142,17 +1550,28 @@ switch (cmd) {
     }
 
     if (sub === 'list') {
-      const [taskId, entryType] = restArgs;
-      if (!taskId) { console.error('用法: atf shared list <taskId> [type]'); break; }
+      const [taskId, ...filterParts] = restArgs;
+      if (!taskId) { console.error('用法: atf shared list <taskId> [type] [focus=FOC-...] [thread=...] [author=x] [tag=x]'); break; }
       const ctx = readCtx(taskId);
       if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
-      let sharedContext = readSharedContext(taskId, ctx.short_id || ctx.task_id);
+      const { entryType, focusId, threadId, author, tag } = parseSharedListFilters(filterParts);
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`鉂?Focus 涓嶅瓨鍦? ${focusId}`); break;
+      }
+      const sharedContext = readSharedContext(taskId, ctx.short_id || ctx.task_id);
       let entries = sharedContext.entries || [];
       if (entryType) entries = entries.filter(e => e.entry_type === entryType);
+      if (focusId) entries = entries.filter(e => e.focus_id === focusId);
+      if (threadId) entries = entries.filter(e => e.thread_id === threadId);
+      if (author) entries = entries.filter(e => e.author === author);
+      if (tag) entries = entries.filter(e => (e.tags || []).includes(tag));
       if (!entries.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 shared context`); break; }
       console.log(`\n${ctx.short_id || ctx.task_id} shared context (${entries.length} 条)\n`);
       for (const entry of entries.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))) {
         console.log(`${entry.created_at}  ${entry.author}  [${entry.entry_type}]  ${entry.entry_id}`);
+        if (entry.focus_id || entry.thread_id || (entry.tags || []).length) {
+          console.log(`  meta: ${entry.focus_id ? `focus=${entry.focus_id}` : ''}${entry.focus_id && entry.thread_id ? '  ' : ''}${entry.thread_id ? `thread=${entry.thread_id}` : ''}${(entry.focus_id || entry.thread_id) && (entry.tags || []).length ? '  ' : ''}${(entry.tags || []).length ? `tags=${entry.tags.join(',')}` : ''}`);
+        }
         console.log(`  ${entry.content}`);
       }
       console.log('');
@@ -1172,59 +1591,67 @@ switch (cmd) {
     if (sub === 'add') {
       const [taskId, ownerAgent, triggerType, ...specParts] = restArgs;
       if (!taskId || !ownerAgent || !triggerType || !specParts.length) {
-        console.error('用法: atf trigger add <taskId> <owner> <type> <spec> [focus=FOC-...]'); break;
+        console.error('用法: atf trigger add <taskId> <owner> <type> <spec> [focus=FOC-...] [thread=...] [intent=x] [note=x]'); break;
       }
       if (!TRIGGER_TYPES.has(triggerType)) {
         console.error(`Trigger 类型: ${[...TRIGGER_TYPES].join('|')}`); break;
       }
       const ctx = readCtx(taskId);
       if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
-      let focusId = null;
-      const specTokens = [];
-      for (const part of specParts) {
-        if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
-        else specTokens.push(part);
-      }
+      const { focusId, threadId, intent, note, specTokens } = parseTriggerCreateParts(specParts);
       if (!specTokens.length) {
         console.error('❌ trigger spec 不能为空'); break;
       }
       if (focusId && !readFocus(taskId, focusId)) {
         console.error(`❌ Focus 不存在: ${focusId}`); break;
       }
-      const now = new Date().toISOString();
-      const trigger = {
-        schema: 'atf.trigger.v1',
-        trigger_id: generateId('TRG'),
-        task_id: ctx.short_id || ctx.task_id,
+      const trigger = createTriggerRecord(taskId, ctx, ownerAgent, triggerType, specTokens.join(' '), {
         focus_id: focusId,
-        owner_agent: ownerAgent,
-        trigger_type: triggerType,
-        trigger_spec: specTokens.join(' '),
-        status: 'active',
-        created_at: now,
-        updated_at: now,
-        runtime: {
-          fire_count: 0,
-          last_fired_at: null,
-          last_source_type: null,
-          last_source_ref: null,
-          last_note: null,
-          pending_fire_id: null,
-          last_consumed_at: null,
-          last_settled_at: null,
-          last_settled_status: null,
-          last_result: null,
-          next_due_at: inferNextDueAt(triggerType, specTokens.join(' '), now),
-        },
-        history: [
-          { event: 'created', by: ownerAgent, at: now, note: `${triggerType}:${specTokens.join(' ')}` }
-        ],
-      };
-      saveTrigger(taskId, trigger);
+        thread_id: threadId,
+        intent,
+        note,
+      });
       console.log(`✅ 已创建 Trigger ${trigger.trigger_id}`);
       console.log(`   任务: ${trigger.task_id}  |  owner: ${trigger.owner_agent}`);
       console.log(`   类型: ${trigger.trigger_type}  |  spec: ${trigger.trigger_spec}`);
+      if (trigger.intent && trigger.intent !== 'generic') console.log(`   intent: ${trigger.intent}`);
       if (trigger.focus_id) console.log(`   focus: ${trigger.focus_id}`);
+      if (trigger.thread_id) console.log(`   thread: ${trigger.thread_id}`);
+      if (trigger.note) console.log(`   note: ${trigger.note}`);
+      break;
+    }
+
+    if (sub === 'follow-up' || sub === 'review') {
+      const [taskId, ownerAgent, ...specParts] = restArgs;
+      if (!taskId || !ownerAgent || !specParts.length) {
+        console.error(`鐢ㄦ硶: atf trigger ${sub} <taskId> <owner> <spec> [focus=FOC-...] [thread=...] [note=x]`); break;
+      }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`鉂?浠诲姟涓嶅瓨鍦? ${taskId}`); break; }
+      const { focusId, threadId, note, specTokens } = parseTriggerCreateParts(specParts);
+      if (!specTokens.length) {
+        console.error('鉂?trigger spec 涓嶈兘涓虹┖'); break;
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`鉂?Focus 涓嶅瓨鍦? ${focusId}`); break;
+      }
+      const triggerType = inferTriggerTypeFromSpec(specTokens.join(' '));
+      if (!triggerType) {
+        console.error('❌ follow-up/review 只支持 interval 或 cron 格式 spec'); break;
+      }
+      const intent = sub === 'follow-up' ? 'follow_up' : 'review';
+      const trigger = createTriggerRecord(taskId, ctx, ownerAgent, triggerType, specTokens.join(' '), {
+        focus_id: focusId,
+        thread_id: defaultThreadId(ctx.short_id || ctx.task_id, focusId, threadId),
+        intent,
+        note,
+      });
+      console.log(`Created ${intent} trigger ${trigger.trigger_id}`);
+      console.log(`   task: ${trigger.task_id}  |  owner: ${trigger.owner_agent}`);
+      console.log(`   type: ${trigger.trigger_type}  |  spec: ${trigger.trigger_spec}`);
+      if (trigger.focus_id) console.log(`   focus: ${trigger.focus_id}`);
+      if (trigger.thread_id) console.log(`   thread: ${trigger.thread_id}`);
+      if (trigger.note) console.log(`   note: ${trigger.note}`);
       break;
     }
 
@@ -1238,9 +1665,12 @@ switch (cmd) {
       if (!triggers.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Triggers`); break; }
       console.log(`\n${ctx.short_id || ctx.task_id} Triggers (${triggers.length} 条)\n`);
       for (const trigger of triggers) {
-        console.log(`${trigger.trigger_id}  ${trigger.status}  owner:${trigger.owner_agent}  [${trigger.trigger_type}]`);
+        const triggerIntent = trigger.intent && trigger.intent !== 'generic' ? `/${trigger.intent}` : '';
+        console.log(`${trigger.trigger_id}  ${trigger.status}  owner:${trigger.owner_agent}  [${trigger.trigger_type}${triggerIntent}]`);
         console.log(`  ${trigger.trigger_spec}`);
         if (trigger.focus_id) console.log(`  focus: ${trigger.focus_id}`);
+        if (trigger.thread_id) console.log(`  thread: ${trigger.thread_id}`);
+        if (trigger.note) console.log(`  note: ${trigger.note}`);
       }
       console.log('');
       break;
@@ -1268,9 +1698,11 @@ switch (cmd) {
       if (!fires.length) { console.log(`agent ${agent} 当前没有待处理 Trigger fires`); break; }
       console.log(`\n${agent} Trigger Inbox (${fires.length} 条)\n`);
       for (const fire of fires) {
-        console.log(`[${fire.task_id}] ${fire.fire_id}  trigger:${fire.trigger_id}  [${fire.trigger_type}]`);
+        const fireIntent = fire.intent && fire.intent !== 'generic' ? `/${fire.intent}` : '';
+        console.log(`[${fire.task_id}] ${fire.fire_id}  trigger:${fire.trigger_id}  [${fire.trigger_type}${fireIntent}]`);
         console.log(`  ${fire.fired_at}  ${fire.source_type}${fire.source_ref ? `:${fire.source_ref}` : ''}`);
         if (fire.focus_id) console.log(`  focus: ${fire.focus_id}`);
+        if (fire.thread_id) console.log(`  thread: ${fire.thread_id}`);
         if (fire.note) console.log(`  note: ${fire.note}`);
       }
       console.log('');
@@ -1471,10 +1903,95 @@ switch (cmd) {
       if (!fires.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Trigger firing 记录`); break; }
       console.log(`\n${ctx.short_id || ctx.task_id} Trigger Fires (${fires.length} 条)\n`);
       for (const fire of fires) {
-        console.log(`${fire.fire_id}  ${fire.status}  trigger:${fire.trigger_id}  owner:${fire.owner_agent}`);
+        const fireIntent = fire.intent && fire.intent !== 'generic' ? `/${fire.intent}` : '';
+        console.log(`${fire.fire_id}  ${fire.status}  trigger:${fire.trigger_id}  owner:${fire.owner_agent}  [${fire.trigger_type}${fireIntent}]`);
         console.log(`  ${fire.fired_at}  ${fire.source_type}${fire.source_ref ? `:${fire.source_ref}` : ''}`);
+        if (fire.thread_id) console.log(`  thread: ${fire.thread_id}`);
         if (fire.note) console.log(`  note: ${fire.note}`);
+        if (fire.execution_id) console.log(`  execution: ${fire.execution_id}${fire.execution_mode ? `  |  ${fire.execution_mode}` : ''}`);
         if (fire.consumed_at) console.log(`  consumed: ${fire.consumed_at} by ${fire.consumed_by || 'unknown'}${fire.result ? `  |  ${fire.result}` : ''}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'execute') {
+      const [taskId, fireId, ...optionParts] = restArgs;
+      if (!taskId || !fireId) {
+        console.error('用法: atf trigger execute <taskId> <fireId> [executor] [mode=pending_task|message|noop] [note=x]'); break;
+      }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      const fire = readTriggerFire(taskId, fireId);
+      if (!fire) { console.error(`❌ Trigger firing 不存在: ${fireId}`); break; }
+      const trigger = readTrigger(taskId, fire.trigger_id);
+      if (!trigger) { console.error(`❌ 对应 Trigger 不存在: ${fire.trigger_id}`); break; }
+      const { target, executor, mode, note } = parseTriggerExecuteArgs(optionParts);
+      const execution = executeTriggerFire(taskId, fire, trigger, ctx, {
+        executor: target || executor,
+        mode,
+        note,
+      });
+      console.log(`Executed trigger fire ${fire.fire_id} -> ${execution.execution_id}`);
+      console.log(`   mode: ${execution.execution_mode}  |  executor: ${execution.executor}`);
+      if (execution.artifacts.pending_task_path) console.log(`   pending-task: ${execution.artifacts.pending_task_path}`);
+      if (execution.artifacts.message_id) console.log(`   message: ${execution.artifacts.message_id}`);
+      break;
+    }
+
+    if (sub === 'execute-pending') {
+      const { target: agent, executor, mode, limit, note } = parseTriggerExecuteArgs(restArgs);
+      refreshTriggerIndexes();
+      let fires = [];
+      if (agent) {
+        const inbox = loadJson(triggerInboxPath(agent));
+        fires = (inbox?.items || []).filter(fire => fire.status === 'pending');
+      } else {
+        const pending = loadJson(PENDING_TRIGGER_FIRES_FILE);
+        fires = (pending?.items || []).filter(fire => fire.status === 'pending');
+      }
+      fires = fires
+        .sort((a, b) => (a.fired_at || '').localeCompare(b.fired_at || ''))
+        .slice(0, limit || fires.length);
+      if (!fires.length) { console.log('当前没有可执行的 pending trigger fires'); break; }
+      const executions = [];
+      for (const fire of fires) {
+        const ctx = readCtx(fire.task_id);
+        if (!ctx) continue;
+        const trigger = readTrigger(fire.task_id, fire.trigger_id);
+        if (!trigger) continue;
+        const latestFire = readTriggerFire(fire.task_id, fire.fire_id);
+        if (!latestFire || latestFire.status !== 'pending') continue;
+        executions.push(executeTriggerFire(fire.task_id, latestFire, trigger, ctx, {
+          executor,
+          mode,
+          note,
+        }));
+      }
+      if (!executions.length) { console.log('没有成功执行的 trigger fires'); break; }
+      console.log(`Executed ${executions.length} pending trigger fires`);
+      for (const execution of executions) {
+        console.log(`   [${execution.task_id}] ${execution.execution_id}  fire:${execution.fire_id}  mode:${execution.execution_mode}`);
+      }
+      break;
+    }
+
+    if (sub === 'executions') {
+      const [taskId, maybeFireId] = restArgs;
+      if (!taskId) { console.error('用法: atf trigger executions <taskId> [fireId]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      let executions = readTaskTriggerExecutions(taskId);
+      if (maybeFireId) executions = executions.filter(execution => execution.fire_id === maybeFireId);
+      if (!executions.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Trigger executions`); break; }
+      console.log(`\n${ctx.short_id || ctx.task_id} Trigger Executions (${executions.length} 条)\n`);
+      for (const execution of executions) {
+        console.log(`${execution.execution_id}  ${execution.status}  fire:${execution.fire_id}  mode:${execution.execution_mode}`);
+        console.log(`  ${execution.dispatched_at}  executor:${execution.executor}  owner:${execution.owner_agent || '-'}`);
+        if (execution.thread_id) console.log(`  thread: ${execution.thread_id}`);
+        if (execution.note) console.log(`  note: ${execution.note}`);
+        if (execution.artifacts?.pending_task_path) console.log(`  pending-task: ${execution.artifacts.pending_task_path}`);
+        if (execution.artifacts?.message_id) console.log(`  message: ${execution.artifacts.message_id}`);
       }
       console.log('');
       break;
@@ -1516,7 +2033,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf trigger add|list|inbox|rebuild-index|due|scan|scan-all|show|update|fire|fires|consume|ignore ...');
+    console.error('用法: atf trigger add|follow-up|review|list|inbox|rebuild-index|due|scan|scan-all|show|update|fire|fires|execute|execute-pending|executions|consume|ignore ...');
     break;
   }
 
@@ -1612,10 +2129,12 @@ switch (cmd) {
       let focusId = null;
       let triggerId = null;
       let fireId = null;
+      let author = null;
       for (const part of filterParts.filter(Boolean)) {
         if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
         else if (part.startsWith('trigger=')) triggerId = part.substring('trigger='.length);
         else if (part.startsWith('fire=')) fireId = part.substring('fire='.length);
+        else if (part.startsWith('author=')) author = part.substring('author='.length);
         else field = part;
       }
       if (field && !REFLECTION_FIELDS.has(field)) {
@@ -1635,6 +2154,7 @@ switch (cmd) {
       if (focusId) reflections = reflections.filter(r => r.focus_id === focusId);
       if (triggerId) reflections = reflections.filter(r => r.trigger_id === triggerId);
       if (fireId) reflections = reflections.filter(r => r.fire_id === fireId);
+      if (author) reflections = reflections.filter(r => r.author === author);
       if (!reflections.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Reflections`); break; }
       console.log(`\n${ctx.short_id || ctx.task_id} Reflections (${reflections.length} 条)\n`);
       for (const reflection of reflections) {
@@ -1642,6 +2162,38 @@ switch (cmd) {
         if (reflection.focus_id) console.log(`  focus: ${reflection.focus_id}`);
         if (reflection.trigger_id || reflection.fire_id) console.log(`  source: ${reflection.trigger_id ? `trigger=${reflection.trigger_id}` : ''}${reflection.trigger_id && reflection.fire_id ? '  ' : ''}${reflection.fire_id ? `fire=${reflection.fire_id}` : ''}`);
         console.log(`  ${reflection.content}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'summary') {
+      const [taskId, ...filterParts] = restArgs;
+      if (!taskId) { console.error('用法: atf reflect summary <taskId> [focus=FOC-...] [author=x]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+      let focusId = null;
+      let author = null;
+      for (const part of filterParts.filter(Boolean)) {
+        if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+        else if (part.startsWith('author=')) author = part.substring('author='.length);
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`❌ Focus 不存在: ${focusId}`); break;
+      }
+      let reflections = readTaskReflections(taskId);
+      if (focusId) reflections = reflections.filter(r => r.focus_id === focusId);
+      if (author) reflections = reflections.filter(r => r.author === author);
+      if (!reflections.length) { console.log(`任务 ${ctx.short_id || ctx.task_id} 暂无 Reflections`); break; }
+      console.log(`\n${ctx.short_id || ctx.task_id} Reflection Summary\n`);
+      for (const field of REFLECTION_FIELDS) {
+        const items = reflections.filter(reflection => reflection.field === field);
+        if (!items.length) continue;
+        console.log(`${field}: ${items.length}`);
+        for (const reflection of items.slice(-3)) {
+          console.log(`  ${reflection.created_at}  ${reflection.author}${reflection.focus_id ? `  focus=${reflection.focus_id}` : ''}`);
+          console.log(`  ${reflection.content}`);
+        }
       }
       console.log('');
       break;
@@ -1658,7 +2210,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf reflect add|from-fire|list|show ...');
+    console.error('用法: atf reflect add|from-fire|list|summary|show ...');
     break;
   }
 
@@ -1727,12 +2279,14 @@ switch (cmd) {
         trigger => {
           if (trigger.trigger_type !== 'on_message') return false;
           if (trigger.owner_agent !== toAgent) return false;
-          if (trigger.focus_id) return trigger.focus_id === message.focus_id;
+          if (trigger.focus_id && trigger.focus_id !== message.focus_id) return false;
+          if (trigger.thread_id && trigger.thread_id !== message.thread_id) return false;
           return true;
         },
         trigger => ({
           source_type: 'message',
           source_ref: message.message_id,
+          thread_id: message.thread_id,
           note: `${fromAgent} -> ${toAgent} [${messageType}]`,
           fired_by: 'message',
         })
@@ -1768,6 +2322,38 @@ switch (cmd) {
         console.log(`[${m.task_id}] ${m.message_id}  ${m.from_agent} → ${m.to_agent}  ${m.message_type}  ${status}`);
         console.log(`  ${m.body}`);
         console.log(`  thread: ${m.thread_id}${m.focus_id ? `  |  focus: ${m.focus_id}` : ''}${m.reply_to_message_id ? `  |  reply: ${m.reply_to_message_id}` : ''}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'threads') {
+      const [taskId, ...filterParts] = restArgs;
+      if (!taskId) { console.error('用法: atf msg threads <taskId> [focus=FOC-...] [agent=x]'); break; }
+      const ctx = readCtx(taskId);
+      if (!ctx) { console.error(`鉂?浠诲姟涓嶅瓨鍦? ${taskId}`); break; }
+      let focusId = null;
+      let agent = null;
+      for (const part of filterParts.filter(Boolean)) {
+        if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
+        else if (part.startsWith('agent=')) agent = part.substring('agent='.length);
+      }
+      if (focusId && !readFocus(taskId, focusId)) {
+        console.error(`鉂?Focus 涓嶅瓨鍦? ${focusId}`); break;
+      }
+      let messages = readTaskMessages(taskId);
+      if (focusId) messages = messages.filter(message => message.focus_id === focusId || message.thread_id === `focus:${focusId}`);
+      let threads = summarizeThreads(messages);
+      if (agent) threads = threads.filter(thread => thread.participants.includes(agent));
+      if (!threads.length) { console.log(`浠诲姟 ${ctx.short_id || ctx.task_id} 鏆傛棤娑堟伅绾跨▼姒傝`); break; }
+      console.log(`\n${ctx.short_id || ctx.task_id} Message Threads (${threads.length} items)\n`);
+      for (const thread of threads) {
+        console.log(`${thread.thread_id}  msgs:${thread.total}  agents:${thread.participants.join(',')}`);
+        console.log(`  latest: ${thread.latest.created_at}  ${thread.latest.from_agent}->${thread.latest.to_agent}  [${thread.latest.message_type}]`);
+        if (thread.blocker_count || thread.decision_count || thread.pending_count) {
+          console.log(`  stats: blocker=${thread.blocker_count}  decision=${thread.decision_count}  pending=${thread.pending_count}`);
+        }
+        console.log(`  ${thread.latest.body}`);
       }
       console.log('');
       break;
@@ -1854,7 +2440,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf msg send|inbox|thread|ack|receipts ...');
+    console.error('用法: atf msg send|inbox|thread|threads|ack|receipts ...');
     break;
   }
 

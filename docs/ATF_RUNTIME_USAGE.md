@@ -95,6 +95,9 @@ node atf-cli.js msg inbox f0x
 node atf-cli.js msg inbox f0x T-001
 node atf-cli.js msg thread T-001
 node atf-cli.js msg thread T-001 focus=FOC-xxx
+node atf-cli.js msg threads T-001
+node atf-cli.js msg threads T-001 focus=FOC-xxx
+node atf-cli.js msg threads T-001 agent=f0x
 ```
 
 回执：
@@ -130,6 +133,7 @@ node atf-cli.js focus update T-001 FOC-xxx done 完成最小扫描链路
 ```bash
 node atf-cli.js trigger add T-001 f0x interval 5m
 node atf-cli.js trigger add T-001 f0x interval every:30m focus=FOC-xxx
+node atf-cli.js trigger add T-001 f0x interval 30m thread=room:design intent=follow_up note=check-in
 ```
 
 `cron` 示例：
@@ -139,6 +143,7 @@ node atf-cli.js trigger add T-001 pinchymeow cron daily@23:30
 node atf-cli.js trigger add T-001 pinchymeow cron weekly@mon@23:30
 node atf-cli.js trigger add T-001 pinchymeow cron hourly@15
 node atf-cli.js trigger add T-001 pinchymeow cron "cron:*/10 * * * *"
+node atf-cli.js trigger add T-001 pinchymeow cron daily@23:00 thread=room:design intent=review note=nightly-review
 ```
 
 事件型 Trigger：
@@ -147,6 +152,13 @@ node atf-cli.js trigger add T-001 pinchymeow cron "cron:*/10 * * * *"
 node atf-cli.js trigger add T-001 f0x on_message watch focus=FOC-xxx
 node atf-cli.js trigger add T-001 pinchymeow on_status_change watch
 node atf-cli.js trigger add T-001 pinchymeow on_blocked watch
+```
+
+`follow-up / review` 快捷入口：
+
+```bash
+node atf-cli.js trigger follow-up T-001 f0x 30m focus=FOC-xxx note=follow-up-check
+node atf-cli.js trigger review T-001 pinchymeow daily@23:00 thread=room:design note=nightly-review
 ```
 
 ### 5.2 查看 Trigger
@@ -200,6 +212,18 @@ node atf-cli.js trigger inbox f0x
 node atf-cli.js trigger inbox f0x T-001
 ```
 
+执行 pending fire：
+
+```bash
+node atf-cli.js trigger execute T-001 TGF-xxx
+node atf-cli.js trigger execute T-001 TGF-xxx executor=watcher-v1 mode=pending_task
+node atf-cli.js trigger execute-pending
+node atf-cli.js trigger execute-pending f0x
+node atf-cli.js trigger execute-pending f0x executor=watcher-v1 limit=10
+node atf-cli.js trigger executions T-001
+node atf-cli.js trigger executions T-001 TGF-xxx
+```
+
 消费或忽略：
 
 ```bash
@@ -237,7 +261,31 @@ node atf-cli.js reflect list T-001 what_failed
 node atf-cli.js reflect list T-001 focus=FOC-xxx
 node atf-cli.js reflect list T-001 trigger=TRG-xxx
 node atf-cli.js reflect list T-001 fire=TGF-xxx
+node atf-cli.js reflect list T-001 author=pinchymeow
+node atf-cli.js reflect summary T-001
+node atf-cli.js reflect summary T-001 focus=FOC-xxx
 node atf-cli.js reflect show T-001 RFL-xxx
+```
+
+## 6.1 shared-context 结构化绑定
+
+追加 shared context：
+
+```bash
+node atf-cli.js shared add T-001 pinchymeow context 补充设计背景 focus=FOC-xxx
+node atf-cli.js shared add T-001 pinchymeow decision 同意 nightly review thread=room:design tag=decision
+node atf-cli.js shared add T-001 f0x intel 观察到消息触发频率偏高 tags=trigger,review
+```
+
+按维度过滤：
+
+```bash
+node atf-cli.js shared list T-001
+node atf-cli.js shared list T-001 decision
+node atf-cli.js shared list T-001 focus=FOC-xxx
+node atf-cli.js shared list T-001 thread=room:design
+node atf-cli.js shared list T-001 author=pinchymeow
+node atf-cli.js shared list T-001 tag=review
 ```
 
 ## 7. 全局索引

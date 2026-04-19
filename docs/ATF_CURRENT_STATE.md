@@ -37,8 +37,9 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - 本地 Message Envelope
 - 消息级 Receipt
 - 面向同一 gateway 内 Agent 的异步定向消息
-- 支持 `send / inbox / thread / ack / receipts` 最小 CLI
+- 支持 `send / inbox / thread / threads / ack / receipts` 最小 CLI
 - 消息可绑定 `thread_id`、`focus_id` 和 `reply_to_message_id`
+- 已可列出任务内现有讨论线程概览（参与者 / 最新消息 / blocker / decision / pending）
 
 ### 最小自治对象层
 
@@ -46,8 +47,13 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - Focus Item 的创建、列出、查看、更新
 - `triggers/` 目录
 - Trigger Binding 的创建、列出、查看、更新
+- Trigger 已支持 `intent`、`thread_id` 和 `note` 元数据
+- 已支持 `trigger follow-up` / `trigger review` 快捷入口
 - `trigger-fires/` 目录
 - Trigger firing 的创建、列出、消费、忽略
+- `trigger-executions/` 目录
+- 已支持 `trigger execute` / `trigger execute-pending` / `trigger executions`
+- 最小执行模式已可把 pending fire 落成 `pending-task.json`
 - Agent 维度的 Trigger inbox
 - `ATF_DATA_DIR/pending-trigger-fires.json`
 - `ATF_DATA_DIR/trigger-inboxes/*.json`
@@ -57,9 +63,11 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - Reflection 可绑定 `trigger_id` / `fire_id`
 - `shared-context.json`
 - 任务级共享上下文追加与查看
+- shared-context 已支持 `focus/thread/tag` 级别绑定与过滤
 - Focus 完成或丢弃时，关联的 active triggers 会自动归档
 - `update` / `focus update` / `msg send` 已会自动产生日志和 trigger firing 记录
 - `reflect from-fire` 已可把 firing 结果直接沉淀成 Reflection
+- `reflect summary` 已可生成任务级 / Focus 级 reflection 摘要
 
 ### 多 Agent 异步场景
 
@@ -89,8 +97,9 @@ ATF 当前还不是：
 - 依赖 OpenClaw heartbeat 和 cron 扫描
 - 不是实时事件驱动
 - 扫描间隔较长，不适合即时任务
-- 没有任务内消息线程
-- 没有显式 Agent-to-Agent 通信模型
+- 已有最小任务线程对象和线程总览，但还没有完整讨论房间 / 广播模型
+- 已有最小 Agent-to-Agent 消息模型，但还没有跨节点通信层
+- Trigger 执行器目前只有 `pending_task / message / noop` 最小模式，还没有更丰富的 adapter
 - 评价、信誉、激励尚未闭环
 
 注：
@@ -119,3 +128,14 @@ ATF 的价值已经不只是“记录任务”，而是：
 4. Reflections
 
 在这之后，再做评价、信誉和激励才是合理顺序。
+
+## Phase B 当前进展
+
+`Phase B / 协作自治层` 已启动，当前第一批已落地：
+
+- Agent 可直接创建 `follow-up / review` 语义 Trigger
+- Trigger 可显式绑定 `thread_id`
+- 任务内讨论线程已可总览，而不只是单线程查看
+- shared-context 已支持 `focus/thread/tag` 级结构化沉淀
+- reflection 已可直接产出任务级摘要
+- pending fire 已可直接执行并沉淀 execution record

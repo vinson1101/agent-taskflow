@@ -30,6 +30,8 @@ const TRIGGER_INBOX_DIR = `${DATA_DIR}/trigger-inboxes`;
 const PENDING_TRIGGER_FIRES_FILE = `${DATA_DIR}/pending-trigger-fires.json`;
 const ACTION_INBOX_DIR = `${DATA_DIR}/action-inboxes`;
 const PENDING_ACTIONS_FILE = `${DATA_DIR}/pending-actions.json`;
+const ACTION_WATCHER_RUNS_DIR = `${DATA_DIR}/action-watcher-runs`;
+const ACTION_WATCHER_LATEST_FILE = `${ACTION_WATCHER_RUNS_DIR}/latest.json`;
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
 const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORKSPACE_DIR}/pending-decisions.json`;
 const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
@@ -58,6 +60,7 @@ const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'room', 'noo
 const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up', 'decision_follow_up']);
 const ACTION_STATUSES = new Set(['pending', 'executed', 'skipped', 'archived']);
 const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
+const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
 const REVIEW_TYPES = new Set(['task', 'delivery', 'collaboration']);
 const REVIEW_OUTCOMES = new Set(['approved', 'needs_revision', 'rejected']);
@@ -2918,6 +2921,35 @@ function buildOpsDigest(options = {}) {
   };
 }
 
+function ensureActionWatcherRunsDir() {
+  if (!fs.existsSync(ACTION_WATCHER_RUNS_DIR)) fs.mkdirSync(ACTION_WATCHER_RUNS_DIR, { recursive: true });
+}
+
+function actionWatcherRunPath(runId) {
+  return `${ACTION_WATCHER_RUNS_DIR}/${runId}.json`;
+}
+
+function readActionWatcherRuns(options = {}) {
+  if (!fs.existsSync(ACTION_WATCHER_RUNS_DIR)) return [];
+  const status = options.status || null;
+  const agent = options.agent || null;
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const runs = fs.readdirSync(ACTION_WATCHER_RUNS_DIR)
+    .filter(file => file.endsWith('.json') && file !== 'latest.json')
+    .map(file => loadJson(path.join(ACTION_WATCHER_RUNS_DIR, file)))
+    .filter(Boolean)
+    .filter(run => !status || run.status === status)
+    .filter(run => !agent || run.agent === agent)
+    .sort((a, b) => (b.completed_at || b.started_at || b.created_at || '').localeCompare(a.completed_at || a.started_at || a.created_at || ''));
+  return limit ? runs.slice(0, limit) : runs;
+}
+
+function readActionWatcherRun(runId) {
+  if (!runId) return null;
+  if (runId === 'latest') return loadJson(ACTION_WATCHER_LATEST_FILE);
+  return loadJson(actionWatcherRunPath(runId));
+}
+
 function actionsDir(taskId) {
   return `${taskDirPath(taskId)}/actions`;
 }
@@ -3027,6 +3059,75 @@ function hasActionForDedupeKey(taskId, dedupeKey) {
   return readTaskActions(taskId).some(action => action.dedupe_key === dedupeKey && action.status !== 'archived');
 }
 
+function getSignalActions(taskId, dedupeKey) {
+  if (!dedupeKey) return [];
+  return readTaskActions(taskId)
+    .filter(action => action.dedupe_key === dedupeKey && action.status !== 'archived')
+    .sort((a, b) => (b.executed_at || b.updated_at || b.created_at || '').localeCompare(a.executed_at || a.updated_at || a.created_at || ''));
+}
+
+function deriveActionCooldownHours(entity) {
+  if (!entity?.kind) return null;
+  if (entity.kind === 'stale_review_follow_up') return 24;
+  if (entity.kind === 'pending_reply_follow_up') {
+    const messageHours = Number.isInteger(entity.payload?.message_hours) ? entity.payload.message_hours : null;
+    return Math.max(6, Math.min(24, messageHours || 12));
+  }
+  if (entity.kind === 'decision_follow_up') {
+    const decisionHours = Number.isInteger(entity.payload?.decision_hours) ? entity.payload.decision_hours : null;
+    return Math.max(4, Math.min(12, decisionHours || 6));
+  }
+  return null;
+}
+
+function buildActionReissueState(taskId, candidate, referenceTime = null) {
+  const signalActions = getSignalActions(taskId, candidate?.dedupe_key);
+  const latestAction = signalActions[0] || null;
+  const cooldownHours = deriveActionCooldownHours(candidate);
+  const attempt = latestAction ? Math.max(Number(latestAction.attempt) || 1, signalActions.length) + 1 : 1;
+  if (!latestAction) {
+    return {
+      blocked: false,
+      attempt,
+      latest_action: null,
+      cooldown_hours: cooldownHours,
+      blocker: null,
+    };
+  }
+  if (latestAction.status === 'pending') {
+    return {
+      blocked: true,
+      attempt,
+      latest_action: latestAction,
+      cooldown_hours: cooldownHours,
+      blocker: 'pending_exists',
+    };
+  }
+
+  const latestAt = latestAction.executed_at || latestAction.updated_at || latestAction.created_at || null;
+  const ageHours = latestAt ? computeAgeHours(latestAt, parseIsoTimestamp(referenceTime) || new Date()) : null;
+  if (Number.isInteger(cooldownHours) && Number.isInteger(ageHours) && ageHours < cooldownHours) {
+    return {
+      blocked: true,
+      attempt,
+      latest_action: latestAction,
+      cooldown_hours: cooldownHours,
+      age_hours: ageHours,
+      available_in_hours: Math.max(0, cooldownHours - ageHours),
+      blocker: 'cooldown_active',
+    };
+  }
+
+  return {
+    blocked: false,
+    attempt,
+    latest_action: latestAction,
+    cooldown_hours: cooldownHours,
+    age_hours: ageHours,
+    blocker: null,
+  };
+}
+
 function deriveFollowUpPriority(ageDays = null, ageHours = null) {
   if (Number.isInteger(ageDays) && ageDays >= 7) return 'high';
   if (Number.isInteger(ageHours) && ageHours >= 24) return 'high';
@@ -3052,6 +3153,10 @@ function deriveActionConfidence(candidate) {
   } else if (candidate.kind === 'decision_follow_up') {
     confidence = 0.86;
     if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 12) confidence += 0.03;
+  }
+
+  if (Number.isInteger(candidate.attempt) && candidate.attempt > 1) {
+    confidence += Math.min(0.04, (candidate.attempt - 1) * 0.02);
   }
 
   return roundActionConfidence(confidence);
@@ -3357,6 +3462,10 @@ function createActionRecord(taskId, ctx, candidate, planner = 'action-scan') {
     source_type: candidate.source_type,
     source_ref: candidate.source_ref || null,
     dedupe_key: candidate.dedupe_key,
+    signal_key: candidate.dedupe_key,
+    attempt: Number.isInteger(candidate.attempt) && candidate.attempt > 0 ? candidate.attempt : 1,
+    reissue_of: candidate.reissue_of || null,
+    cooldown_hours: Number.isInteger(candidate.cooldown_hours) ? candidate.cooldown_hours : null,
     summary: candidate.summary,
     guidance: candidate.guidance,
     suggested_message_type: candidate.suggested_message_type || 'request',
@@ -3380,7 +3489,7 @@ function createActionRecord(taskId, ctx, candidate, planner = 'action-scan') {
         event: 'planned',
         by: planner,
         at: now,
-        note: candidate.summary,
+        note: `${candidate.summary}${Number.isInteger(candidate.attempt) && candidate.attempt > 1 ? ` | attempt=${candidate.attempt}` : ''}`,
       },
     ],
   };
@@ -3430,6 +3539,7 @@ function buildStaleReviewActionCandidates(options = {}) {
           updated_at: task.updated_at || null,
           self_review_count: task.self_review_count || 0,
           stale_days: staleDays,
+          reissue_cooldown_hours: 24,
         },
       };
     })
@@ -3481,6 +3591,7 @@ function buildPendingReplyActionCandidates(options = {}) {
           original_excerpt: compactText(message.body, 180),
           created_at: message.created_at || null,
           thread_id: message.thread_id || null,
+          message_hours: messageHours,
         },
       });
     }
@@ -3530,6 +3641,7 @@ function buildDecisionFollowUpCandidates(options = {}) {
           reflection_author: reflection.author,
           reflection_excerpt: compactText(reflection.content, 180),
           created_at: reflection.created_at || null,
+          decision_hours: decisionHours,
         },
       });
     }
@@ -3559,15 +3671,24 @@ function scanActions(options = {}) {
   const candidates = buildActionCandidates(options);
   const created = [];
   let duplicates = 0;
+  let cooldownBlocked = 0;
+  let pendingBlocked = 0;
+  const scanNow = new Date().toISOString();
 
   for (const candidate of candidates) {
     if (limit && created.length >= limit) break;
-    if (hasActionForDedupeKey(candidate.task_id, candidate.dedupe_key)) {
+    const reissue = buildActionReissueState(candidate.task_id, candidate, scanNow);
+    if (reissue.blocked) {
+      if (reissue.blocker === 'cooldown_active') cooldownBlocked += 1;
+      if (reissue.blocker === 'pending_exists') pendingBlocked += 1;
       duplicates += 1;
       continue;
     }
     const ctx = readCtx(candidate.task_id);
     if (!ctx) continue;
+    candidate.attempt = reissue.attempt;
+    candidate.reissue_of = reissue.latest_action?.action_id || null;
+    candidate.cooldown_hours = reissue.cooldown_hours;
     created.push(createActionRecord(candidate.task_id, ctx, candidate, planner));
   }
 
@@ -3576,6 +3697,8 @@ function scanActions(options = {}) {
     scanned: candidates.length,
     created,
     duplicates,
+    cooldown_blocked: cooldownBlocked,
+    pending_blocked: pendingBlocked,
   };
 }
 
@@ -3585,6 +3708,7 @@ function buildActionMessageBody(action) {
     action.summary,
     `Action: ${action.guidance}`,
   ];
+  if (Number.isInteger(action.attempt) && action.attempt > 1) parts.push(`Attempt: ${action.attempt}`);
   if (Number.isFinite(action.confidence)) parts.push(`Confidence: ${action.confidence}`);
   if (action.policy?.verification_mode) parts.push(`Verify: ${action.policy.verification_mode}`);
   if (action.payload?.description) parts.push(`Task: ${action.payload.description}`);
@@ -3678,6 +3802,8 @@ function executeAction(taskId, action, ctx, options = {}) {
       task_id: ctx.short_id || ctx.task_id,
       assigned_to: toAgent,
       kind: action.kind,
+      attempt: action.attempt || 1,
+      reissue_of: action.reissue_of || null,
       priority: action.priority,
       summary: action.summary,
       guidance: action.guidance,
@@ -4623,6 +4749,8 @@ ATF CLI v2
   atf action list [taskId|owner] [status=x] [kind=x] [limit=N]      查看动作队列
   atf action inbox <agent> [kind=x]                 查看 agent 待执行动作
   atf action rebuild-index                          重建全局动作索引
+  atf action runs [agent] [status=completed|failed] [limit=N]       查看 watcher 运行审计
+  atf action run-show <runId|latest>               查看单次 watcher 运行明细
   atf action show <taskId> <actionId>               查看动作
   atf action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]
   atf action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop]
@@ -6108,12 +6236,12 @@ switch (cmd) {
         planner: 'cli',
       });
       if (!result.created.length) {
-        console.log(`action scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}`);
+        console.log(`action scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.pending_blocked ? `  pending=${result.pending_blocked}` : ''}`);
         break;
       }
-      console.log(`action scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}`);
+      console.log(`action scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.pending_blocked ? `  pending=${result.pending_blocked}` : ''}`);
       for (const action of result.created) {
-        console.log(`- [${action.task_id}] ${action.action_id}  ${action.kind}  owner=${action.owner_agent || '-'}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
+        console.log(`- [${action.task_id}] ${action.action_id}  ${action.kind}  owner=${action.owner_agent || '-'}  try=${action.attempt || 1}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
         console.log(`  ${action.summary}`);
       }
       break;
@@ -6191,7 +6319,7 @@ switch (cmd) {
       console.log(`\nAction Queue${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
       for (const action of actions) {
         console.log(`[${action.task_id}] ${action.action_id}  ${action.status}  ${action.kind}`);
-        console.log(`  owner=${action.owner_agent || '-'}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}${action.execution_mode ? `  mode=${action.execution_mode}` : ''}`);
+        console.log(`  owner=${action.owner_agent || '-'}  try=${action.attempt || 1}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}${action.execution_mode ? `  mode=${action.execution_mode}` : ''}`);
         console.log(`  ${action.summary}`);
       }
       console.log('');
@@ -6243,7 +6371,7 @@ switch (cmd) {
       }
       console.log(`\n${agent} Action Inbox (${items.length} 条)\n`);
       for (const action of items) {
-        console.log(`[${action.task_id}] ${action.action_id}  ${action.kind}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
+        console.log(`[${action.task_id}] ${action.action_id}  ${action.kind}  try=${action.attempt || 1}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
         console.log(`  ${action.summary}`);
       }
       console.log('');
@@ -6256,6 +6384,81 @@ switch (cmd) {
       console.log(`Action 索引已重建`);
       console.log(`   pending actions: ${pending.total || 0}`);
       console.log(`   global index: ${PENDING_ACTIONS_FILE}`);
+      break;
+    }
+
+    if (sub === 'runs') {
+      let agent = null;
+      let statusFilter = null;
+      let limit = 10;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf action runs [agent] [status=completed|failed] [limit=N]');
+        break;
+      }
+      if (statusFilter && !ACTION_WATCHER_RUN_STATUSES.has(statusFilter)) {
+        console.error(`watcher run status: ${[...ACTION_WATCHER_RUN_STATUSES].join('|')}`);
+        break;
+      }
+      const runs = readActionWatcherRuns({
+        agent,
+        status: statusFilter,
+        limit,
+      });
+      const filterLabel = [
+        agent ? `agent=${agent}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!runs.length) {
+        console.log(filterLabel ? `action watcher runs (${filterLabel}) 暂无记录` : '当前暂无 action watcher 运行记录');
+        break;
+      }
+      console.log(`\nAction Watcher Runs${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      for (const run of runs) {
+        console.log(`${run.run_id}  ${run.status}  ${run.completed_at || run.started_at || '-'}`);
+        console.log(`  agent=${run.agent || 'all'}  dry_run=${Boolean(run.dryRun)}  eligible=${run.eligibleActions ?? 0}  filtered=${run.filteredActions ?? 0}  executed=${run.executed ?? 0}  skipped=${run.skipped ?? 0}  failed=${run.failed ?? 0}  duration_ms=${run.duration_ms ?? '-'}`);
+        if (Array.isArray(run.resultCodes) && run.resultCodes.length) {
+          console.log(`  result_codes=${run.resultCodes.map(item => `${item.code}=${item.count}`).join('  ')}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'run-show') {
+      const [runId] = restArgs;
+      if (!runId) {
+        console.error('用法: atf action run-show <runId|latest>');
+        break;
+      }
+      const run = readActionWatcherRun(runId);
+      if (!run) {
+        console.error(`未找到 watcher run: ${runId}`);
+        break;
+      }
+      console.log(JSON.stringify(run, null, 2));
       break;
     }
 
@@ -6365,7 +6568,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf action scan|list|inbox|rebuild-index|show|execute|execute-pending ...');
+    console.error('用法: atf action scan|list|inbox|rebuild-index|runs|run-show|show|execute|execute-pending ...');
     break;
   }
 

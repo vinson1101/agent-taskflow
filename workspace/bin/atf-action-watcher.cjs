@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const util = require('util');
 const vm = require('vm');
+const { randomBytes } = require('crypto');
 const { createRequire } = require('module');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -42,6 +43,22 @@ function agentsFilePath() {
   return path.join(defaultDataDir(), 'agents.json');
 }
 
+function actionWatcherRunsDir() {
+  return path.join(defaultDataDir(), 'action-watcher-runs');
+}
+
+function actionWatcherRunPath(runId) {
+  return path.join(actionWatcherRunsDir(), `${runId}.json`);
+}
+
+function actionWatcherLatestPath() {
+  return path.join(actionWatcherRunsDir(), 'latest.json');
+}
+
+function ensureDir(target) {
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+}
+
 function readJson(filePath) {
   if (!fs.existsSync(filePath)) return null;
   try {
@@ -49,6 +66,26 @@ function readJson(filePath) {
   } catch {
     return null;
   }
+}
+
+function writeJson(filePath, data) {
+  ensureDir(path.dirname(filePath));
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function generateRunId() {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  return `AWR-${stamp}-${randomBytes(3).toString('hex')}`;
+}
+
+function persistSummary(summary) {
+  const payload = {
+    schema: 'atf.action-watcher-run.v1',
+    ...summary,
+  };
+  writeJson(actionWatcherRunPath(summary.run_id), payload);
+  writeJson(actionWatcherLatestPath(), payload);
+  return actionWatcherRunPath(summary.run_id);
 }
 
 function parseArgs(argv) {
@@ -400,6 +437,7 @@ function actionPreview(action) {
     action_id: action.action_id,
     owner_agent: action.owner_agent || null,
     kind: action.kind,
+    attempt: Number.isInteger(action.attempt) ? action.attempt : 1,
     priority: action.priority || null,
     confidence: Number.isFinite(action.confidence) ? action.confidence : null,
     risk_level: action.policy?.risk_level || 'low',
@@ -447,10 +485,15 @@ function buildExecuteArgs(action, options) {
 
 function printTextSummary(summary) {
   console.log('ATF Action Watcher Summary');
+  console.log(`  run id: ${summary.run_id}`);
+  console.log(`  status: ${summary.status}`);
   console.log(`  agent: ${summary.agent || 'all'}`);
   console.log(`  scan: ${summary.scan}`);
   console.log(`  execute: ${summary.execute}`);
   console.log(`  dry-run: ${summary.dryRun}`);
+  console.log(`  started: ${summary.started_at}`);
+  console.log(`  completed: ${summary.completed_at}`);
+  console.log(`  duration_ms: ${summary.duration_ms}`);
   console.log(`  thresholds: stale=${summary.staleDays}d message=${summary.messageHours}h decision=${summary.decisionHours}h`);
   console.log(`  filters: min_conf=${summary.filters.minConfidence} max_risk=${summary.filters.maxRisk} registered_only=${summary.filters.registeredOnly} allow_confirmation=${summary.filters.allowConfirmationRequired}`);
   console.log(`  pending before scan: ${summary.pendingBeforeScan}`);
@@ -465,7 +508,7 @@ function printTextSummary(summary) {
   if (summary.samplePlanned.length) {
     console.log('  sample planned:');
     for (const item of summary.samplePlanned) {
-      console.log(`    - [${item.task_id}] ${item.action_id} ${item.kind} owner=${item.owner_agent || '-'} conf=${item.confidence ?? '-'} risk=${item.risk_level}`);
+      console.log(`    - [${item.task_id}] ${item.action_id} ${item.kind} try=${item.attempt || 1} owner=${item.owner_agent || '-'} conf=${item.confidence ?? '-'} risk=${item.risk_level}`);
     }
   }
   if (summary.sampleFiltered.length) {
@@ -479,16 +522,32 @@ function printTextSummary(summary) {
   }
   if (summary.scanCommand) console.log(`  scan command: ${summary.scanCommand}`);
   if (summary.executeCommands.length) console.log(`  execute commands: ${summary.executeCommands.length}`);
+  if (summary.audit_path) console.log(`  audit path: ${summary.audit_path}`);
+  if (summary.audit_write_error) console.log(`  audit write error: ${summary.audit_write_error}`);
+  if (summary.error?.message) console.log(`  error: ${summary.error.message}`);
 }
 
 function main() {
-  const options = parseArgs(process.argv.slice(2));
+  let options;
+  try {
+    options = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error(error.message);
+    return 1;
+  }
   if (options.help) {
     printHelp();
-    return;
+    return 0;
   }
 
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
   const summary = {
+    run_id: generateRunId(),
+    status: 'completed',
+    started_at: startedAt,
+    completed_at: null,
+    duration_ms: null,
     agent: options.agent,
     scan: options.scan,
     execute: options.execute && !options.dryRun,
@@ -518,77 +577,92 @@ function main() {
     executeCommands: [],
   };
 
-  if (options.scan) {
-    const scanArgs = buildScanArgs(options);
-    summary.scanCommand = `node atf-cli.js ${scanArgs.join(' ')}`;
-    runAtfCli(scanArgs);
-  }
-
-  summary.pendingAfterScan = countPending(options.agent);
-  const pendingActions = loadPendingActions(options.agent);
-  const registeredAgents = getRegisteredAgentSet();
-  const allowed = [];
-  const filtered = [];
-
-  for (const action of pendingActions) {
-    const reasons = getActionFilterReasons(action, options, registeredAgents);
-    if (reasons.length) {
-      filtered.push({ action, reasons });
-      for (const reason of reasons) {
-        summary.filteredBy[reason] = (summary.filteredBy[reason] || 0) + 1;
-      }
-    } else {
-      allowed.push(action);
+  try {
+    if (options.scan) {
+      const scanArgs = buildScanArgs(options);
+      summary.scanCommand = `node atf-cli.js ${scanArgs.join(' ')}`;
+      runAtfCli(scanArgs);
     }
-  }
 
-  const limitedAllowed = options.limit ? allowed.slice(0, options.limit) : allowed;
-  if (options.limit && allowed.length > limitedAllowed.length) {
-    summary.filteredBy.limit = Math.max(0, allowed.length - limitedAllowed.length);
-  }
+    summary.pendingAfterScan = countPending(options.agent);
+    const pendingActions = loadPendingActions(options.agent);
+    const registeredAgents = getRegisteredAgentSet();
+    const allowed = [];
+    const filtered = [];
 
-  summary.eligibleActions = limitedAllowed.length;
-  summary.filteredActions = filtered.length + Math.max(0, allowed.length - limitedAllowed.length);
-  summary.samplePlanned = limitedAllowed.slice(0, options.sample).map(actionPreview);
-  summary.sampleFiltered = filtered.slice(0, options.sample).map(item => ({
-    ...actionPreview(item.action),
-    reasons: item.reasons,
-  }));
-
-  if (options.execute && !options.dryRun) {
-    const resultCodeCounts = new Map();
-    for (const action of limitedAllowed) {
-      const executeArgs = buildExecuteArgs(action, options);
-      summary.executeCommands.push(`node atf-cli.js ${executeArgs.join(' ')}`);
-      try {
-        runAtfCli(executeArgs);
-        const latest = readActionFile(action.task_id, action.action_id);
-        if (latest?.status === 'executed') summary.executed += 1;
-        else summary.skipped += 1;
-        const code = latest?.verification?.preflight?.ok === false
-          ? latest.verification.preflight.code
-          : (latest?.verification?.postflight?.code || latest?.verification?.preflight?.code || latest?.status || 'unknown');
-        resultCodeCounts.set(code, (resultCodeCounts.get(code) || 0) + 1);
-      } catch {
-        summary.failed += 1;
-        resultCodeCounts.set('execution_error', (resultCodeCounts.get('execution_error') || 0) + 1);
+    for (const action of pendingActions) {
+      const reasons = getActionFilterReasons(action, options, registeredAgents);
+      if (reasons.length) {
+        filtered.push({ action, reasons });
+        for (const reason of reasons) {
+          summary.filteredBy[reason] = (summary.filteredBy[reason] || 0) + 1;
+        }
+      } else {
+        allowed.push(action);
       }
     }
 
-    summary.resultCodes = [...resultCodeCounts.entries()]
-      .map(([code, count]) => ({ code, count }))
-      .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
+    const limitedAllowed = options.limit ? allowed.slice(0, options.limit) : allowed;
+    if (options.limit && allowed.length > limitedAllowed.length) {
+      summary.filteredBy.limit = Math.max(0, allowed.length - limitedAllowed.length);
+    }
+
+    summary.eligibleActions = limitedAllowed.length;
+    summary.filteredActions = filtered.length + Math.max(0, allowed.length - limitedAllowed.length);
+    summary.samplePlanned = limitedAllowed.slice(0, options.sample).map(actionPreview);
+    summary.sampleFiltered = filtered.slice(0, options.sample).map(item => ({
+      ...actionPreview(item.action),
+      reasons: item.reasons,
+    }));
+
+    if (options.execute && !options.dryRun) {
+      const resultCodeCounts = new Map();
+      for (const action of limitedAllowed) {
+        const executeArgs = buildExecuteArgs(action, options);
+        summary.executeCommands.push(`node atf-cli.js ${executeArgs.join(' ')}`);
+        try {
+          runAtfCli(executeArgs);
+          const latest = readActionFile(action.task_id, action.action_id);
+          if (latest?.status === 'executed') summary.executed += 1;
+          else summary.skipped += 1;
+          const code = latest?.verification?.preflight?.ok === false
+            ? latest.verification.preflight.code
+            : (latest?.verification?.postflight?.code || latest?.verification?.preflight?.code || latest?.status || 'unknown');
+          resultCodeCounts.set(code, (resultCodeCounts.get(code) || 0) + 1);
+        } catch {
+          summary.failed += 1;
+          resultCodeCounts.set('execution_error', (resultCodeCounts.get('execution_error') || 0) + 1);
+        }
+      }
+
+      summary.resultCodes = [...resultCodeCounts.entries()]
+        .map(([code, count]) => ({ code, count }))
+        .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
+    }
+  } catch (error) {
+    summary.status = 'failed';
+    summary.error = { message: error.message };
   }
 
   summary.pendingAfterExecute = countPending(options.agent);
+  summary.completed_at = new Date().toISOString();
+  summary.duration_ms = Date.now() - startedMs;
+
+  try {
+    summary.audit_path = persistSummary(summary);
+  } catch (error) {
+    summary.audit_write_error = error.message;
+  }
 
   if (options.json) console.log(JSON.stringify(summary, null, 2));
   else printTextSummary(summary);
+
+  return summary.status === 'failed' ? 1 : 0;
 }
 
 try {
-  main();
+  process.exitCode = main();
 } catch (error) {
   console.error(error.message);
-  process.exit(1);
+  process.exitCode = 1;
 }

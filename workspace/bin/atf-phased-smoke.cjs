@@ -171,6 +171,31 @@ function setReflectionCreatedAt(taskId, env, reflectionId, createdAt) {
   writeJson(reflectionFile, reflection);
 }
 
+function setActionTimestamps(taskId, env, actionId, executedAt) {
+  const actionFile = path.join(resolveTaskDir(taskId, env), 'actions', `${actionId}.json`);
+  const action = readJson(actionFile);
+  action.created_at = executedAt;
+  action.updated_at = executedAt;
+  if (action.executed_at) action.executed_at = executedAt;
+  if (Array.isArray(action.history) && action.history.length) {
+    action.history = action.history.map(entry => ({
+      ...entry,
+      at: entry.event === 'planned' ? executedAt : (entry.at || executedAt),
+    }));
+    const lastIndex = action.history.length - 1;
+    action.history[lastIndex] = {
+      ...action.history[lastIndex],
+      at: executedAt,
+    };
+  }
+  if (action.execution?.executed_at) action.execution.executed_at = executedAt;
+  if (action.execution?.verification?.preflight) action.execution.verification.preflight.checked_at = executedAt;
+  if (action.execution?.verification?.postflight) action.execution.verification.postflight.checked_at = executedAt;
+  if (action.verification?.preflight) action.verification.preflight.checked_at = executedAt;
+  if (action.verification?.postflight) action.verification.postflight.checked_at = executedAt;
+  writeJson(actionFile, action);
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   safeResetDir(smokeRoot);
@@ -260,6 +285,11 @@ function main() {
   if (watcherDryRun.eligibleActions !== 3) throw new Error(`expected 3 eligible actions in watcher dry-run, got ${watcherDryRun.eligibleActions}`);
   if (watcherDryRun.filteredBy.below_confidence !== 1) throw new Error(`expected below_confidence=1, got ${watcherDryRun.filteredBy.below_confidence}`);
   if (watcherDryRun.filteredBy.unregistered_owner !== 1) throw new Error(`expected unregistered_owner=1, got ${watcherDryRun.filteredBy.unregistered_owner}`);
+  if (!watcherDryRun.run_id) throw new Error('expected watcher dry-run to include run_id');
+  if (!watcherDryRun.audit_path || !fs.existsSync(watcherDryRun.audit_path)) throw new Error('expected watcher dry-run audit file to exist');
+  const watcherDryRunAudit = readJson(watcherDryRun.audit_path);
+  if (watcherDryRunAudit.run_id !== watcherDryRun.run_id) throw new Error('expected watcher dry-run audit to match run_id');
+  if (watcherDryRunAudit.schema !== 'atf.action-watcher-run.v1') throw new Error(`expected watcher audit schema, got ${watcherDryRunAudit.schema}`);
 
   const executePinchy = JSON.parse(runWatcher(['--agent', 'pinchymeow', '--mode', 'message', '--executor', 'phase-d-smoke', '--min-confidence', '0.9', '--no-scan', '--json'], env, options));
   const pinchyMessageInbox = runCli(['msg', 'inbox', 'pinchymeow'], env, options);
@@ -307,6 +337,9 @@ function main() {
   const actionListExecuted = runCli(['action', 'list', 'status=executed'], env, options);
   const actionListSkipped = runCli(['action', 'list', 'status=skipped'], env, options);
   const actionScanAfterExecute = runCli(['action', 'scan'], env, options);
+  const watcherRuns = runCli(['action', 'runs', 'limit=4'], env, options);
+  const pinchyWatcherRuns = runCli(['action', 'runs', 'pinchymeow', 'status=completed', 'limit=4'], env, options);
+  const latestWatcherRun = JSON.parse(runCli(['action', 'run-show', 'latest'], env, options));
 
   assertIncludes(actionListExecuted, 'stale_review_follow_up', 'action list executed');
   assertIncludes(actionListExecuted, 'pending_reply_follow_up', 'action list executed');
@@ -314,6 +347,37 @@ function main() {
   assertIncludes(actionListSkipped, closedTaskId, 'action list skipped');
   assertIncludes(actionScanAfterExecute, 'created=0', 'post execute dedupe');
   assertIncludes(actionScanAfterExecute, 'duplicates=4', 'post execute dedupe');
+  assertIncludes(actionScanAfterExecute, 'cooldown=3', 'post execute cooldown block');
+  assertIncludes(actionScanAfterExecute, 'pending=1', 'post execute pending block');
+  assertIncludes(watcherRuns, watcherDryRun.run_id, 'action watcher runs');
+  assertIncludes(watcherRuns, executeF0x.run_id, 'action watcher runs');
+  assertIncludes(pinchyWatcherRuns, executePinchy.run_id, 'pinchy watcher runs');
+  assertIncludes(pinchyWatcherRuns, executeDecision.run_id, 'pinchy watcher runs');
+  if (pinchyWatcherRuns.includes(executeF0x.run_id)) throw new Error('pinchy watcher runs should not include f0x run');
+  if (latestWatcherRun.run_id !== executeF0x.run_id) throw new Error(`expected latest watcher run to be ${executeF0x.run_id}, got ${latestWatcherRun.run_id}`);
+  if (latestWatcherRun.schema !== 'atf.action-watcher-run.v1') throw new Error(`expected latest watcher run schema, got ${latestWatcherRun.schema}`);
+
+  setActionTimestamps(blockerTaskId, env, blockerPendingAction.action_id, new Date(Date.now() - (13 * 60 * 60 * 1000)).toISOString());
+  const actionScanAfterCooldown = runCli(['action', 'scan', 'pinchymeow'], env, options);
+  const pendingAfterCooldown = readJson(path.join(env.ATF_DATA_DIR, 'pending-actions.json'));
+  const blockerReissuedAction = pendingAfterCooldown.items.find(item =>
+    item.task_id === blockerTaskId
+    && item.kind === 'pending_reply_follow_up'
+    && item.action_id !== blockerPendingAction.action_id
+  );
+  const pinchyPendingAfterCooldown = runCli(['action', 'list', 'pinchymeow', 'status=pending'], env, options);
+
+  assertIncludes(actionScanAfterCooldown, 'created=1', 'action scan after cooldown');
+  assertIncludes(actionScanAfterCooldown, 'duplicates=1', 'action scan after cooldown');
+  assertIncludes(actionScanAfterCooldown, 'cooldown=1', 'action scan after cooldown');
+  assertIncludes(actionScanAfterCooldown, 'try=2', 'action scan reissue attempt');
+  if (!blockerReissuedAction) throw new Error('expected blocker follow-up to be reissued after cooldown');
+  if (blockerReissuedAction.attempt !== 2) throw new Error(`expected reissued blocker action attempt=2, got ${blockerReissuedAction.attempt}`);
+  if (blockerReissuedAction.reissue_of !== blockerPendingAction.action_id) throw new Error(`expected reissued blocker action to point to ${blockerPendingAction.action_id}, got ${blockerReissuedAction.reissue_of}`);
+  if (blockerReissuedAction.cooldown_hours !== 12) throw new Error(`expected reissued blocker action cooldown_hours=12, got ${blockerReissuedAction.cooldown_hours}`);
+  if ((blockerReissuedAction.confidence || 0) <= (blockerPendingActionFile.confidence || 0)) throw new Error('expected reissued blocker action confidence to increase');
+  assertIncludes(pinchyPendingAfterCooldown, blockerReissuedAction.action_id, 'pinchy pending list after cooldown');
+  assertIncludes(pinchyPendingAfterCooldown, 'try=2', 'pinchy pending list after cooldown');
 
   if (options.cleanup) {
     fs.rmSync(smokeRoot, { recursive: true, force: true });

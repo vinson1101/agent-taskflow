@@ -480,6 +480,19 @@ node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message --mi
 node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-confidence 0.9 --limit 5
 ```
 
+每次 watcher 运行会写一份审计摘要到：
+
+- `data/action-watcher-runs/<runId>.json`
+- `data/action-watcher-runs/latest.json`
+
+回看入口：
+
+```bash
+node atf-cli.js action runs limit=10
+node atf-cli.js action runs f0x status=completed limit=5
+node atf-cli.js action run-show latest
+```
+
 这轮 action watcher 默认带的护栏是：
 
 - 只执行已注册 agent 的动作 owner
@@ -531,6 +544,7 @@ node atf-cli.js assign recommend T-001 top=5
 - `review backlog` 会把 pending reviews 直接按 agent / type / age 汇总，并列出最该清的 backlog 任务
 - `action scan` 会把 `stale review / 未响应消息 / what_needs_decision reflection` 推进成去重后的 `atf.action.v1`
 - `atf.action.v1` 现在会带 `confidence / policy / evidence / verification`，便于 watcher / cron 做更稳的执行控制
+- `atf.action.v1` 还会带 `attempt / reissue_of / cooldown_hours`，便于同一信号在冷却后继续 follow-up，而不是第一次催完就永久静默
 - `action execute-pending` 当前支持 `message / pending_task / noop` 三种执行模式
 - `action execute / execute-pending` 会先做 `preflight`，确认源信号仍成立，再做 `postflight` 检查产物是否真的写入
 - 如果消息或决策信号在执行前已经被人闭环，对应 action 会被安全标记为 `skipped`，不会继续误发 follow-up

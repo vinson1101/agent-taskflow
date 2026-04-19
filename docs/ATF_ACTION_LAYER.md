@@ -149,6 +149,19 @@ node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message --mi
 node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-confidence 0.9 --limit 5
 ```
 
+每次 watcher 运行还会把 summary 落到：
+
+- `data/action-watcher-runs/<runId>.json`
+- `data/action-watcher-runs/latest.json`
+
+对应的只读查询入口：
+
+```bash
+node atf-cli.js action runs limit=10
+node atf-cli.js action runs pinchymeow status=completed limit=5
+node atf-cli.js action run-show latest
+```
+
 如果 dry-run 里出现：
 
 - `below_confidence`
@@ -157,6 +170,12 @@ node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-
 - `requires_confirmation`
 
 说明 watcher 正在用护栏过滤动作，而不是盲目 dispatch。
+
+此外，Phase D 现在不再把同一信号“催一次就永久静默”：
+
+- 每条 action 会记录 `attempt / reissue_of / cooldown_hours`
+- 如果同一条 `message / reflection / review backlog` 信号仍未闭环，且上一条动作已过冷却窗口
+- 下一次 `action scan` 会重新生成 follow-up，形成 `attempt=2/3/...`
 
 ## 7. 当前边界
 

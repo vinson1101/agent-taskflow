@@ -195,6 +195,7 @@ npm run atf:action:watcher:dry -- --agent f0x --mode pending_task
 - `policy`（`risk_level / reversible / requires_confirmation / verification_mode / recovery_plan`）
 - `evidence`（扫描时收集到的触发证据）
 - `verification`（执行前 `preflight` 与执行后 `postflight` 结果）
+- `attempt / reissue_of / cooldown_hours`（同一信号在冷却窗口后可再次生成 follow-up，而不是第一次催完就永久静默）
 
 这意味着 `action execute / execute-pending` 不再是“看见 pending 就发”，而是：
 
@@ -218,6 +219,19 @@ node atf-cli.js agent audit
 node workspace/bin/atf-action-watcher.cjs --dry-run --json --min-confidence 0.9
 node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message --min-confidence 0.9 --limit 5
 node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-confidence 0.9 --limit 5
+```
+
+每次 watcher 运行现在还会把摘要落到：
+
+- `data/action-watcher-runs/<runId>.json`
+- `data/action-watcher-runs/latest.json`
+
+可以直接用 CLI 回看最近试跑：
+
+```bash
+node atf-cli.js action runs limit=10
+node atf-cli.js action runs pinchymeow status=completed limit=5
+node atf-cli.js action run-show latest
 ```
 
 ---

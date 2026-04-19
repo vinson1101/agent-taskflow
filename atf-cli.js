@@ -2243,6 +2243,15 @@ function computeAgeHours(value, referenceTime = null) {
   return Math.floor(diffMs / (60 * 60 * 1000));
 }
 
+function computeAgeMinutes(value, referenceTime = null) {
+  const date = value instanceof Date ? value : parseIsoTimestamp(value);
+  const reference = referenceTime instanceof Date ? referenceTime : new Date();
+  if (!date) return null;
+  const diffMs = reference.getTime() - date.getTime();
+  if (!Number.isFinite(diffMs) || diffMs < 0) return 0;
+  return Math.floor(diffMs / (60 * 1000));
+}
+
 function getAgeBucketLabel(ageDays) {
   if (!Number.isInteger(ageDays) || ageDays < 0) return 'unknown';
   if (ageDays <= 1) return '0-1d';
@@ -2948,6 +2957,96 @@ function readActionWatcherRun(runId) {
   if (!runId) return null;
   if (runId === 'latest') return loadJson(ACTION_WATCHER_LATEST_FILE);
   return loadJson(actionWatcherRunPath(runId));
+}
+
+function summarizePendingActions(actions = []) {
+  const byAgent = new Map();
+  const byKind = new Map();
+  let oldestAgeHours = null;
+
+  for (const action of actions) {
+    const owner = action.owner_agent || 'unassigned';
+    byAgent.set(owner, (byAgent.get(owner) || 0) + 1);
+    byKind.set(action.kind || 'unknown', (byKind.get(action.kind || 'unknown') || 0) + 1);
+    const ageHours = computeAgeHours(action.created_at || action.updated_at || null);
+    if (Number.isInteger(ageHours) && (oldestAgeHours === null || ageHours > oldestAgeHours)) {
+      oldestAgeHours = ageHours;
+    }
+  }
+
+  return {
+    total: actions.length,
+    oldest_age_hours: oldestAgeHours,
+    by_agent: [...byAgent.entries()]
+      .map(([agent, count]) => ({ agent, count }))
+      .sort((a, b) => b.count - a.count || a.agent.localeCompare(b.agent)),
+    by_kind: [...byKind.entries()]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind)),
+  };
+}
+
+function buildActionWatcherStatus(options = {}) {
+  const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const recentLimit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 10;
+  const recentRuns = readActionWatcherRuns({ agent, limit: recentLimit });
+  const latestRun = recentRuns[0] || (!agent ? readActionWatcherRun('latest') : null);
+  const latestAt = latestRun?.completed_at || latestRun?.started_at || latestRun?.created_at || null;
+  const latestAgeMinutes = latestAt ? computeAgeMinutes(latestAt) : null;
+  const pendingActions = collectActions({
+    owner_agent: agent,
+    status: 'pending',
+  });
+  const pending = summarizePendingActions(pendingActions);
+  const completedRuns = recentRuns.filter(run => run.status === 'completed').length;
+  const failedRuns = recentRuns.filter(run => run.status === 'failed').length;
+
+  let status = 'ok';
+  let code = 'healthy';
+  if (!latestRun) {
+    status = 'never_run';
+    code = 'no_runs_recorded';
+  } else if (latestRun.status === 'failed') {
+    status = 'failed';
+    code = 'latest_run_failed';
+  } else if (Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
+    status = 'stale';
+    code = 'latest_run_stale';
+  }
+
+  return {
+    schema: 'atf.action-watcher-status.v1',
+    status,
+    code,
+    scope: {
+      agent,
+      warn_after_minutes: warnAfterMinutes,
+      recent_runs_limit: recentLimit,
+    },
+    generated_at: new Date().toISOString(),
+    latest_run: latestRun ? {
+      run_id: latestRun.run_id || null,
+      status: latestRun.status || null,
+      started_at: latestRun.started_at || null,
+      completed_at: latestRun.completed_at || null,
+      age_minutes: latestAgeMinutes,
+      dry_run: Boolean(latestRun.dryRun),
+      executed: latestRun.executed ?? 0,
+      skipped: latestRun.skipped ?? 0,
+      failed: latestRun.failed ?? 0,
+      eligible_actions: latestRun.eligibleActions ?? 0,
+      filtered_actions: latestRun.filteredActions ?? 0,
+    } : null,
+    recent_runs: {
+      total: recentRuns.length,
+      completed: completedRuns,
+      failed: failedRuns,
+    },
+    pending_actions: pending,
+  };
 }
 
 function actionsDir(taskId) {
@@ -4751,6 +4850,7 @@ ATF CLI v2
   atf action rebuild-index                          重建全局动作索引
   atf action runs [agent] [status=completed|failed] [limit=N]       查看 watcher 运行审计
   atf action run-show <runId|latest>               查看单次 watcher 运行明细
+  atf action watcher-status [agent] [warn_after_minutes=N] [limit=N] [json]  查看 action watcher 健康状态
   atf action show <taskId> <actionId>               查看动作
   atf action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]
   atf action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop]
@@ -6462,6 +6562,75 @@ switch (cmd) {
       break;
     }
 
+    if (sub === 'watcher-status') {
+      let agent = null;
+      let warnAfterMinutes = 30;
+      let limit = 10;
+      let json = false;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part === 'json') {
+          json = true;
+          continue;
+        }
+        if (part.startsWith('warn_after_minutes=')) {
+          const value = Number(part.substring('warn_after_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          warnAfterMinutes = value;
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf action watcher-status [agent] [warn_after_minutes=N] [limit=N] [json]');
+        break;
+      }
+      const status = buildActionWatcherStatus({
+        agent,
+        warn_after_minutes: warnAfterMinutes,
+        limit,
+      });
+      if (json) {
+        console.log(JSON.stringify(status, null, 2));
+        break;
+      }
+      console.log('\nAction Watcher Status\n');
+      console.log(`status=${status.status}  code=${status.code}  scope=${status.scope.agent || 'all'}  warn_after=${status.scope.warn_after_minutes}m`);
+      if (!status.latest_run) {
+        console.log('latest_run=none');
+      } else {
+        console.log(`latest_run=${status.latest_run.run_id}  ${status.latest_run.status}  age=${status.latest_run.age_minutes ?? '-'}m  completed_at=${status.latest_run.completed_at || status.latest_run.started_at || '-'}`);
+        console.log(`latest_effect=eligible:${status.latest_run.eligible_actions}  filtered:${status.latest_run.filtered_actions}  executed:${status.latest_run.executed}  skipped:${status.latest_run.skipped}  failed:${status.latest_run.failed}  dry_run=${status.latest_run.dry_run}`);
+      }
+      console.log(`recent_runs=total:${status.recent_runs.total}  completed:${status.recent_runs.completed}  failed:${status.recent_runs.failed}`);
+      console.log(`pending_actions=total:${status.pending_actions.total}${status.pending_actions.oldest_age_hours !== null ? `  oldest=${status.pending_actions.oldest_age_hours}h` : ''}`);
+      if (status.pending_actions.by_agent.length) {
+        console.log(`pending_by_agent=${status.pending_actions.by_agent.map(item => `${item.agent}=${item.count}`).join('  ')}`);
+      }
+      if (status.pending_actions.by_kind.length) {
+        console.log(`pending_by_kind=${status.pending_actions.by_kind.map(item => `${item.kind}=${item.count}`).join('  ')}`);
+      }
+      console.log('');
+      break;
+    }
+
     if (sub === 'show') {
       const [taskId, actionId] = restArgs;
       if (!taskId || !actionId) {
@@ -6568,7 +6737,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf action scan|list|inbox|rebuild-index|runs|run-show|show|execute|execute-pending ...');
+    console.error('用法: atf action scan|list|inbox|rebuild-index|runs|run-show|watcher-status|show|execute|execute-pending ...');
     break;
   }
 

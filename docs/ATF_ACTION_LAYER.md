@@ -160,7 +160,15 @@ node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-
 node atf-cli.js action runs limit=10
 node atf-cli.js action runs pinchymeow status=completed limit=5
 node atf-cli.js action run-show latest
+node atf-cli.js action watcher-status
+node atf-cli.js action watcher-status pinchymeow warn_after_minutes=20
 ```
+
+`watcher-status` 会把三类信息压成一个小摘要：
+
+- 最近一次 watcher run 是否存在、是否失败、距离现在多久
+- 最近 N 次 run 的 completed / failed 数
+- 当前 pending action backlog 总量，以及按 agent / kind 的分布
 
 如果 dry-run 里出现：
 

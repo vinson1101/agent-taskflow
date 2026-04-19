@@ -232,6 +232,8 @@ node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-
 node atf-cli.js action runs limit=10
 node atf-cli.js action runs pinchymeow status=completed limit=5
 node atf-cli.js action run-show latest
+node atf-cli.js action watcher-status
+node atf-cli.js action watcher-status pinchymeow warn_after_minutes=20
 ```
 
 ---

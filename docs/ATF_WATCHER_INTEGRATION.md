@@ -199,6 +199,21 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 */5 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-watcher.cjs --no-execute >> /tmp/atf-scan.log 2>&1
 ```
 
+### 6.4 Phase D action watcher
+
+如果要把主动 follow-up 也接到 cron：
+
+```cron
+*/10 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-action-watcher.cjs --executor action-watcher --min-confidence 0.9 >> /tmp/atf-action-watcher.log 2>&1
+```
+
+上线后可以直接用下面两条看它有没有活着：
+
+```bash
+node atf-cli.js action runs limit=10
+node atf-cli.js action watcher-status
+```
+
 ## 7. 本地 smoke 建议
 
 不要直接写死系统目录，优先用隔离环境：

@@ -340,6 +340,7 @@ function main() {
   const watcherRuns = runCli(['action', 'runs', 'limit=4'], env, options);
   const pinchyWatcherRuns = runCli(['action', 'runs', 'pinchymeow', 'status=completed', 'limit=4'], env, options);
   const latestWatcherRun = JSON.parse(runCli(['action', 'run-show', 'latest'], env, options));
+  const watcherStatusBeforeCooldown = JSON.parse(runCli(['action', 'watcher-status', 'limit=4', 'json'], env, options));
 
   assertIncludes(actionListExecuted, 'stale_review_follow_up', 'action list executed');
   assertIncludes(actionListExecuted, 'pending_reply_follow_up', 'action list executed');
@@ -356,6 +357,10 @@ function main() {
   if (pinchyWatcherRuns.includes(executeF0x.run_id)) throw new Error('pinchy watcher runs should not include f0x run');
   if (latestWatcherRun.run_id !== executeF0x.run_id) throw new Error(`expected latest watcher run to be ${executeF0x.run_id}, got ${latestWatcherRun.run_id}`);
   if (latestWatcherRun.schema !== 'atf.action-watcher-run.v1') throw new Error(`expected latest watcher run schema, got ${latestWatcherRun.schema}`);
+  if (watcherStatusBeforeCooldown.status !== 'ok') throw new Error(`expected watcher status ok, got ${watcherStatusBeforeCooldown.status}`);
+  if (watcherStatusBeforeCooldown.latest_run?.run_id !== executeF0x.run_id) throw new Error(`expected watcher status latest run ${executeF0x.run_id}, got ${watcherStatusBeforeCooldown.latest_run?.run_id}`);
+  if (watcherStatusBeforeCooldown.recent_runs.total !== 4) throw new Error(`expected watcher status recent run total=4, got ${watcherStatusBeforeCooldown.recent_runs.total}`);
+  if (watcherStatusBeforeCooldown.pending_actions.total !== 1) throw new Error(`expected watcher status pending total=1 before cooldown reissue, got ${watcherStatusBeforeCooldown.pending_actions.total}`);
 
   setActionTimestamps(blockerTaskId, env, blockerPendingAction.action_id, new Date(Date.now() - (13 * 60 * 60 * 1000)).toISOString());
   const actionScanAfterCooldown = runCli(['action', 'scan', 'pinchymeow'], env, options);
@@ -366,6 +371,8 @@ function main() {
     && item.action_id !== blockerPendingAction.action_id
   );
   const pinchyPendingAfterCooldown = runCli(['action', 'list', 'pinchymeow', 'status=pending'], env, options);
+  const watcherStatusAfterCooldown = JSON.parse(runCli(['action', 'watcher-status', 'limit=4', 'json'], env, options));
+  const pinchyWatcherStatusAfterCooldown = JSON.parse(runCli(['action', 'watcher-status', 'pinchymeow', 'limit=4', 'json'], env, options));
 
   assertIncludes(actionScanAfterCooldown, 'created=1', 'action scan after cooldown');
   assertIncludes(actionScanAfterCooldown, 'duplicates=1', 'action scan after cooldown');
@@ -378,6 +385,9 @@ function main() {
   if ((blockerReissuedAction.confidence || 0) <= (blockerPendingActionFile.confidence || 0)) throw new Error('expected reissued blocker action confidence to increase');
   assertIncludes(pinchyPendingAfterCooldown, blockerReissuedAction.action_id, 'pinchy pending list after cooldown');
   assertIncludes(pinchyPendingAfterCooldown, 'try=2', 'pinchy pending list after cooldown');
+  if (watcherStatusAfterCooldown.pending_actions.total !== 2) throw new Error(`expected watcher status pending total=2 after cooldown reissue, got ${watcherStatusAfterCooldown.pending_actions.total}`);
+  if (pinchyWatcherStatusAfterCooldown.pending_actions.total !== 1) throw new Error(`expected pinchy watcher status pending total=1 after cooldown reissue, got ${pinchyWatcherStatusAfterCooldown.pending_actions.total}`);
+  if (pinchyWatcherStatusAfterCooldown.recent_runs.total !== 2) throw new Error(`expected pinchy watcher recent runs total=2, got ${pinchyWatcherStatusAfterCooldown.recent_runs.total}`);
 
   if (options.cleanup) {
     fs.rmSync(smokeRoot, { recursive: true, force: true });

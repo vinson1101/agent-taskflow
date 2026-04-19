@@ -491,7 +491,15 @@ node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-
 node atf-cli.js action runs limit=10
 node atf-cli.js action runs f0x status=completed limit=5
 node atf-cli.js action run-show latest
+node atf-cli.js action watcher-status
+node atf-cli.js action watcher-status f0x warn_after_minutes=20
 ```
+
+其中 `watcher-status` 适合直接接生产巡检：
+
+- `status=ok|stale|failed|never_run`
+- `latest_run` 会给出最近一次 run 的 age
+- `pending_actions` 会显示当前 backlog 总量和按 agent / kind 的分布
 
 这轮 action watcher 默认带的护栏是：
 

@@ -17,6 +17,7 @@
 - [docs/ATF_RUNTIME_USAGE.md](./docs/ATF_RUNTIME_USAGE.md) - 当前 CLI 的实际调用说明
 - [docs/ATF_REPUTATION_LAYER.md](./docs/ATF_REPUTATION_LAYER.md) - Phase C Lite / 内部调度信誉层设计
 - [docs/ATF_WATCHER_INTEGRATION.md](./docs/ATF_WATCHER_INTEGRATION.md) - cron / watcher / heartbeat 集成说明
+- [docs/ATF_ACTION_LAYER.md](./docs/ATF_ACTION_LAYER.md) - Phase D / 主动运营动作层设计
 
 ---
 
@@ -26,6 +27,7 @@
 |------|------|
 | `atf-cli.js` | CLI 入口，所有命令 |
 | `workspace/bin/atf-watcher.cjs` | 仓库内可见的 watcher v1：`scan-all -> execute-pending` 批量执行脚本 |
+| `workspace/bin/atf-action-watcher.cjs` | 仓库内可见的 action watcher：`action scan -> action execute-pending` |
 | `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
 | `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
 
@@ -113,6 +115,11 @@ node atf-cli.js review add <taskId> <reviewer> <reviewee> <outcome> <总结> [ty
 node atf-cli.js review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...] # 查看任务 Reviews
 node atf-cli.js review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N] # 查看待评价任务（含 age_days）
 node atf-cli.js review show <taskId> <reviewId>               # 查看 Review
+node atf-cli.js action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [limit=N] # 扫描 Phase D 动作
+node atf-cli.js action list [taskId|owner] [status=x] [kind=x] [limit=N] # 查看动作队列
+node atf-cli.js action inbox <agent> [kind=x] [limit=N]       # 查看 agent 待执行动作
+node atf-cli.js action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x] # 执行单条动作
+node atf-cli.js action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop] # 批量执行动作
 node atf-cli.js credits rebuild                               # 重建内部积分索引（完成度 + 反馈）
 node atf-cli.js credits list                                  # 查看 agent 积分概览
 node atf-cli.js credits show <agent>                          # 查看单个 agent 积分账本
@@ -138,6 +145,8 @@ node atf-cli.js dlq cancel <taskId>     # DLQ 取消
 ```bash
 npm run atf:phasec:smoke
 node workspace/bin/atf-phasec-smoke.cjs --cleanup
+npm run atf:phased:smoke
+node workspace/bin/atf-phased-smoke.cjs --cleanup
 ```
 
 ---
@@ -148,6 +157,8 @@ node workspace/bin/atf-phasec-smoke.cjs --cleanup
 npm run atf:watcher -- --help
 npm run atf:watcher -- --agent f0x --executor watcher-v1
 npm run atf:watcher:dry -- --agent f0x
+npm run atf:action:watcher -- --agent pinchymeow --mode message
+npm run atf:action:watcher:dry -- --agent f0x --mode pending_task
 ```
 
 `workspace/bin/atf-watcher.cjs` 当前做两件事：
@@ -165,6 +176,49 @@ npm run atf:watcher:dry -- --agent f0x
 - `noop`
 
 执行器现在会显式生成 `handoff` payload，把任务、focus、shared-context、最近消息、reflection 摘要一起传给下游 adapter。`room` 模式要求 `room=<name>` 或 `thread=room:<name>`；缺参时会记成 `skipped`，fire 保持 `pending`，不会误消费。
+
+`workspace/bin/atf-action-watcher.cjs` 则负责 Phase D 的动作闭环：
+
+1. 调用 `node atf-cli.js action scan`
+2. 读取 `pending-actions.json` / `action-inboxes/<agent>.json`
+3. 调用 `node atf-cli.js action execute-pending`
+
+当前默认支持 3 类动作：
+
+- `stale_review_follow_up`
+- `pending_reply_follow_up`
+- `decision_follow_up`
+
+现在每条 `atf.action.v1` 还会附带一层轻量 harness 控制元数据：
+
+- `confidence`
+- `policy`（`risk_level / reversible / requires_confirmation / verification_mode / recovery_plan`）
+- `evidence`（扫描时收集到的触发证据）
+- `verification`（执行前 `preflight` 与执行后 `postflight` 结果）
+
+这意味着 `action execute / execute-pending` 不再是“看见 pending 就发”，而是：
+
+1. 先验证源信号是否仍成立
+2. 再执行 `message / pending_task / noop`
+3. 最后验证产物是否真的落下
+
+如果信号在执行前已经闭环，例如消息线程已经有人回复，动作会被标记为 `skipped`，不会继续误发 follow-up。
+
+现在 watcher 还带了生产测试需要的执行护栏：
+
+- 默认只放行已注册 agent 的动作 owner
+- 默认只放行 `max_risk=medium` 以内的动作
+- 支持 `--min-confidence`
+- 支持 `--dry-run --json` 先看执行计划，再决定是否真正 dispatch
+
+推荐先这样做生产环境试跑：
+
+```bash
+node atf-cli.js agent audit
+node workspace/bin/atf-action-watcher.cjs --dry-run --json --min-confidence 0.9
+node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message --min-confidence 0.9 --limit 5
+node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-confidence 0.9 --limit 5
+```
 
 ---
 
@@ -219,6 +273,12 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ reputation / scores 索引（任务、消息、回执、反思、review 聚合）
 - ✅ `status / assign` 直接显示 review / reputation 摘要
 - ✅ `review pending` 半自动评价闭环入口
+- ✅ Phase D action 对象（`atf.action.v1`）
+- ✅ 全局 `pending-actions / action-inboxes` 索引
+- ✅ `action scan / execute / execute-pending` 主动运营动作闭环
+- ✅ Action harness control 最小版（`confidence / policy / evidence / verification`）
+- ✅ `action execute` preflight / postflight 双验证
+- ✅ 仓库内可见 action watcher（`workspace/bin/atf-action-watcher.cjs`）
 - ✅ Trigger Action Executor 最小版（`execute / execute-pending / executions`）
 - ✅ 仓库内可见 watcher v1（`workspace/bin/atf-watcher.cjs`）
 - ✅ Trigger Action Adapter 第一批（`pending_task / message / room / noop`）

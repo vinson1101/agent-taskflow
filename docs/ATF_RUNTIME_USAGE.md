@@ -451,6 +451,48 @@ node workspace/bin/atf-phasec-smoke.cjs --cleanup
 
 默认会把测试数据留在仓库下的 `.tmp-atf-phasec-smoke/`，方便直接检查 `tasks/` 和 `data/` 产物。
 
+跑一轮 Phase D 主动运营动作层自测：
+
+```bash
+npm run atf:phased:smoke
+node workspace/bin/atf-phased-smoke.cjs --cleanup
+```
+
+当前 Phase D 最小入口：
+
+```bash
+node atf-cli.js action scan
+node atf-cli.js action scan pinchymeow
+node atf-cli.js action list status=pending
+node atf-cli.js action inbox pinchymeow
+node atf-cli.js action execute-pending pinchymeow mode=message
+node atf-cli.js action execute-pending f0x mode=pending_task
+node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message
+node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task
+```
+
+推荐的生产环境测试入口：
+
+```bash
+node atf-cli.js agent audit
+node workspace/bin/atf-action-watcher.cjs --dry-run --json --min-confidence 0.9
+node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message --min-confidence 0.9 --limit 5
+node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task --min-confidence 0.9 --limit 5
+```
+
+这轮 action watcher 默认带的护栏是：
+
+- 只执行已注册 agent 的动作 owner
+- 默认 `max_risk=medium`
+- 支持 `--min-confidence`
+- 默认不执行 `requires_confirmation=true` 的动作
+- `--dry-run --json` 会明确列出 `below_confidence / risk_exceeds_max / unregistered_owner / requires_confirmation`
+
+默认根目录现在按平台走：
+
+- Linux / WSL：`/root/.openclaw`
+- Windows：`%USERPROFILE%\\.openclaw`
+
 用内部画像做辅助参考：
 
 ```bash
@@ -487,6 +529,12 @@ node atf-cli.js assign recommend T-001 top=5
 - `review pending` 支持 `type=` / `status=` / `limit=` 过滤，并直接显示 `age=Xd`
 - `review pending` 支持 `min_age=` / `max_age=`，便于只看 4 天以上或最近 1 天内的 backlog
 - `review backlog` 会把 pending reviews 直接按 agent / type / age 汇总，并列出最该清的 backlog 任务
+- `action scan` 会把 `stale review / 未响应消息 / what_needs_decision reflection` 推进成去重后的 `atf.action.v1`
+- `atf.action.v1` 现在会带 `confidence / policy / evidence / verification`，便于 watcher / cron 做更稳的执行控制
+- `action execute-pending` 当前支持 `message / pending_task / noop` 三种执行模式
+- `action execute / execute-pending` 会先做 `preflight`，确认源信号仍成立，再做 `postflight` 检查产物是否真的写入
+- 如果消息或决策信号在执行前已经被人闭环，对应 action 会被安全标记为 `skipped`，不会继续误发 follow-up
+- `pending-actions.json` 和 `action-inboxes/<agent>.json` 是 Phase D 对 watcher / cron 最友好的消费入口
 - `agent audit` 会列出未知 agent / 脏 agent 的来源，帮助定位历史数据污染
 - `agent register` 用于在服务器上补齐注册来源，不需要手改 `data/agents.json`
 - `agent remap` 默认是 dry-run，只有加 `apply=true` 才会真正写回并重建索引
@@ -499,6 +547,8 @@ node atf-cli.js assign recommend T-001 top=5
 
 - `ATF_DATA_DIR/pending-trigger-fires.json`
 - `ATF_DATA_DIR/trigger-inboxes/<agent>.json`
+- `ATF_DATA_DIR/pending-actions.json`
+- `ATF_DATA_DIR/action-inboxes/<agent>.json`
 - `ATF_DATA_DIR/scores.json`
 
 其中：
@@ -507,6 +557,10 @@ node atf-cli.js assign recommend T-001 top=5
   全局 pending fires 汇总
 - `trigger-inboxes/<agent>.json`
   单 agent 待处理 fires 汇总
+- `pending-actions.json`
+  全局 pending actions 汇总
+- `action-inboxes/<agent>.json`
+  单 agent 待执行动作 inbox
 - `scores.json`
   当前可重建的 agent reputation 索引
 

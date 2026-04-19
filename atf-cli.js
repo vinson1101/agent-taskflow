@@ -7,13 +7,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { randomBytes } = require('crypto');
 const { execSync } = require('child_process');
 
 // ============================================================
 // 统一配置
 // ============================================================
-const OPENCLAW_ROOT = process.env.ATF_ROOT || '/root/.openclaw';
+const DEFAULT_OPENCLAW_ROOT = process.platform === 'win32'
+  ? path.join(os.homedir(), '.openclaw')
+  : '/root/.openclaw';
+const OPENCLAW_ROOT = process.env.ATF_ROOT || DEFAULT_OPENCLAW_ROOT;
 const WORKSPACE_DIR = process.env.ATF_WORKSPACE_DIR || `${OPENCLAW_ROOT}/workspace`;
 const TASKS_DIR = process.env.ATF_TASKS_DIR || `${OPENCLAW_ROOT}/atf-tasks`;
 const DLQ_DIR = `${TASKS_DIR}/dlq`;
@@ -24,6 +28,8 @@ const SCORES_FILE = `${DATA_DIR}/scores.json`;
 const CREDITS_FILE = `${DATA_DIR}/credits.json`;
 const TRIGGER_INBOX_DIR = `${DATA_DIR}/trigger-inboxes`;
 const PENDING_TRIGGER_FIRES_FILE = `${DATA_DIR}/pending-trigger-fires.json`;
+const ACTION_INBOX_DIR = `${DATA_DIR}/action-inboxes`;
+const PENDING_ACTIONS_FILE = `${DATA_DIR}/pending-actions.json`;
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
 const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORKSPACE_DIR}/pending-decisions.json`;
 const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
@@ -49,6 +55,9 @@ const TRIGGER_TYPES = new Set(['cron', 'interval', 'on_message', 'on_status_chan
 const TRIGGER_STATUSES = new Set(['active', 'paused', 'fired', 'archived']);
 const TRIGGER_FIRE_STATUSES = new Set(['pending', 'consumed', 'ignored']);
 const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'room', 'noop']);
+const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up', 'decision_follow_up']);
+const ACTION_STATUSES = new Set(['pending', 'executed', 'skipped', 'archived']);
+const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
 const REVIEW_TYPES = new Set(['task', 'delivery', 'collaboration']);
 const REVIEW_OUTCOMES = new Set(['approved', 'needs_revision', 'rejected']);
@@ -60,6 +69,7 @@ const HANDOFF_REFLECTION_LIMIT = 2;
 if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR))  fs.mkdirSync(DATA_DIR,   { recursive: true });
 if (!fs.existsSync(TRIGGER_INBOX_DIR)) fs.mkdirSync(TRIGGER_INBOX_DIR, { recursive: true });
+if (!fs.existsSync(ACTION_INBOX_DIR)) fs.mkdirSync(ACTION_INBOX_DIR, { recursive: true });
 
 // ============================================================
 // 工具函数
@@ -2221,6 +2231,15 @@ function computeAgeDays(value, referenceTime = null) {
   return Math.floor(diffMs / (24 * 60 * 60 * 1000));
 }
 
+function computeAgeHours(value, referenceTime = null) {
+  const date = value instanceof Date ? value : parseIsoTimestamp(value);
+  const reference = referenceTime instanceof Date ? referenceTime : new Date();
+  if (!date) return null;
+  const diffMs = reference.getTime() - date.getTime();
+  if (!Number.isFinite(diffMs) || diffMs < 0) return 0;
+  return Math.floor(diffMs / (60 * 60 * 1000));
+}
+
 function getAgeBucketLabel(ageDays) {
   if (!Number.isInteger(ageDays) || ageDays < 0) return 'unknown';
   if (ageDays <= 1) return '0-1d';
@@ -2896,6 +2915,978 @@ function buildOpsDigest(options = {}) {
     backlog,
     active_agents: activeAgents,
     backlog_agents: backlogAgents,
+  };
+}
+
+function actionsDir(taskId) {
+  return `${taskDirPath(taskId)}/actions`;
+}
+
+function ensureActionsDir(taskId) {
+  const dir = actionsDir(taskId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function actionPath(taskId, actionId) {
+  ensureActionsDir(taskId);
+  return `${actionsDir(taskId)}/${actionId}.json`;
+}
+
+function readTaskActions(taskId) {
+  ensureActionsDir(taskId);
+  return readJsonCollection(actionsDir(taskId))
+    .sort((a, b) => (a.updated_at || a.created_at || '').localeCompare(b.updated_at || b.created_at || ''));
+}
+
+function readAction(taskId, actionId) {
+  return loadJson(actionPath(taskId, actionId));
+}
+
+function saveAction(taskId, action) {
+  action.updated_at = new Date().toISOString();
+  saveJson(actionPath(taskId, action.action_id), action);
+}
+
+function actionInboxPath(agent) {
+  return `${ACTION_INBOX_DIR}/${agent}.json`;
+}
+
+function refreshActionIndexes() {
+  const now = new Date().toISOString();
+  const pendingActions = [];
+  const inboxes = {};
+
+  for (const task of getAllTasks()) {
+    const taskId = task.short_id || task.task_id;
+    for (const action of readTaskActions(taskId)) {
+      if (action.status !== 'pending') continue;
+      pendingActions.push(action);
+      if (!action.owner_agent) continue;
+      if (!inboxes[action.owner_agent]) inboxes[action.owner_agent] = [];
+      inboxes[action.owner_agent].push(action);
+    }
+  }
+
+  pendingActions.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  saveJson(PENDING_ACTIONS_FILE, {
+    schema: 'atf.pending-actions.v1',
+    updated_at: now,
+    total: pendingActions.length,
+    items: pendingActions,
+  });
+
+  if (!fs.existsSync(ACTION_INBOX_DIR)) fs.mkdirSync(ACTION_INBOX_DIR, { recursive: true });
+  for (const file of fs.readdirSync(ACTION_INBOX_DIR)) {
+    if (file.endsWith('.json')) fs.unlinkSync(path.join(ACTION_INBOX_DIR, file));
+  }
+  for (const [agent, items] of Object.entries(inboxes)) {
+    items.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+    saveJson(actionInboxPath(agent), {
+      schema: 'atf.action-inbox.v1',
+      updated_at: now,
+      agent,
+      total: items.length,
+      items,
+    });
+  }
+}
+
+function normalizeActionKind(value) {
+  if (isClearedValue(value)) return null;
+  const normalized = String(value).trim().toLowerCase();
+  return ACTION_KINDS.has(normalized) ? normalized : null;
+}
+
+function normalizeActionExecutionMode(mode) {
+  if (!mode) return null;
+  const normalized = String(mode).trim().toLowerCase();
+  return ACTION_EXECUTION_MODES.has(normalized) ? normalized : null;
+}
+
+function actionPriorityRank(priority) {
+  if (priority === 'urgent') return 4;
+  if (priority === 'high') return 3;
+  if (priority === 'normal') return 2;
+  if (priority === 'low') return 1;
+  return 0;
+}
+
+function compareActionCandidates(a, b) {
+  const priorityDiff = actionPriorityRank(b.priority) - actionPriorityRank(a.priority);
+  if (priorityDiff) return priorityDiff;
+  const ageA = Number.isInteger(a.age_days) ? (a.age_days * 24) : (Number.isInteger(a.age_hours) ? a.age_hours : -1);
+  const ageB = Number.isInteger(b.age_days) ? (b.age_days * 24) : (Number.isInteger(b.age_hours) ? b.age_hours : -1);
+  if (ageB !== ageA) return ageB - ageA;
+  const confidenceDiff = deriveActionConfidence(b) - deriveActionConfidence(a);
+  if (confidenceDiff) return confidenceDiff;
+  return (a.source_at || '').localeCompare(b.source_at || '');
+}
+
+function hasActionForDedupeKey(taskId, dedupeKey) {
+  if (!dedupeKey) return false;
+  return readTaskActions(taskId).some(action => action.dedupe_key === dedupeKey && action.status !== 'archived');
+}
+
+function deriveFollowUpPriority(ageDays = null, ageHours = null) {
+  if (Number.isInteger(ageDays) && ageDays >= 7) return 'high';
+  if (Number.isInteger(ageHours) && ageHours >= 24) return 'high';
+  return 'normal';
+}
+
+function roundActionConfidence(value) {
+  if (!Number.isFinite(value)) return null;
+  return roundNumber(Math.max(0, Math.min(0.99, value)), 2);
+}
+
+function deriveActionConfidence(candidate) {
+  if (Number.isFinite(candidate?.confidence)) return roundActionConfidence(candidate.confidence);
+  if (!candidate?.kind) return null;
+
+  let confidence = 0.82;
+  if (candidate.kind === 'stale_review_follow_up') {
+    confidence = 0.9;
+    if (Number.isInteger(candidate.age_days) && candidate.age_days >= 7) confidence += 0.04;
+  } else if (candidate.kind === 'pending_reply_follow_up') {
+    confidence = candidate.payload?.original_message_type === 'blocker' ? 0.95 : 0.9;
+    if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 24) confidence += 0.02;
+  } else if (candidate.kind === 'decision_follow_up') {
+    confidence = 0.86;
+    if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 12) confidence += 0.03;
+  }
+
+  return roundActionConfidence(confidence);
+}
+
+function buildActionPolicy(candidate) {
+  const defaults = {
+    risk_level: 'low',
+    reversible: true,
+    requires_confirmation: false,
+    verification_mode: 'generic',
+    recovery_plan: 'Skip the action if the source signal is already closed, then rely on the next scan to produce a fresher follow-up.',
+  };
+
+  if (candidate?.kind === 'stale_review_follow_up') {
+    defaults.verification_mode = 'review_pending';
+    defaults.recovery_plan = 'Skip if an external review already exists or the task is no longer review-eligible; rescan later if backlog persists.';
+  } else if (candidate?.kind === 'pending_reply_follow_up') {
+    defaults.verification_mode = 'reply_pending';
+    defaults.recovery_plan = 'Skip if the thread already received a reply or the source message is closed; rescan later for a stronger escalation if silence continues.';
+  } else if (candidate?.kind === 'decision_follow_up') {
+    defaults.risk_level = 'medium';
+    defaults.verification_mode = 'decision_pending';
+    defaults.recovery_plan = 'Skip if a decision reply or task-level decision state already closed the signal; otherwise let the next scan escalate with fresher context.';
+  }
+
+  return {
+    risk_level: candidate?.policy?.risk_level || defaults.risk_level,
+    reversible: candidate?.policy?.reversible === undefined ? defaults.reversible : Boolean(candidate.policy.reversible),
+    requires_confirmation: Boolean(candidate?.policy?.requires_confirmation ?? defaults.requires_confirmation),
+    verification_mode: candidate?.policy?.verification_mode || defaults.verification_mode,
+    recovery_plan: candidate?.policy?.recovery_plan || defaults.recovery_plan,
+  };
+}
+
+function buildActionEvidence(taskId, ctx, candidate, capturedAt) {
+  const items = [];
+  const sourceAt = candidate?.source_at || null;
+  const freshnessHours = sourceAt ? computeAgeHours(sourceAt, parseIsoTimestamp(capturedAt) || new Date()) : null;
+
+  if (candidate?.kind === 'stale_review_follow_up') {
+    items.push({
+      type: 'task_state',
+      ref: taskId,
+      at: ctx?.updated_at || ctx?.created_at || null,
+      summary: `review_status=${getEffectiveTaskReviewStatus(ctx)} reviewee=${candidate.owner_agent || '-'}`,
+    });
+    items.push({
+      type: 'review_backlog',
+      ref: candidate.source_ref || taskId,
+      at: sourceAt,
+      summary: `age_days=${candidate.age_days ?? '-'} external_review_missing=true self_review_count=${candidate.payload?.self_review_count ?? 0}`,
+    });
+  } else if (candidate?.kind === 'pending_reply_follow_up') {
+    items.push({
+      type: 'message',
+      ref: candidate.payload?.original_message_id || candidate.source_ref || null,
+      at: sourceAt,
+      summary: `${candidate.payload?.original_from || '-'} -> ${candidate.payload?.original_to || '-'} [${candidate.payload?.original_message_type || '-'}]`,
+    });
+    items.push({
+      type: 'thread',
+      ref: candidate.thread_id || candidate.payload?.thread_id || null,
+      at: sourceAt,
+      summary: `reply_missing_for=${candidate.age_hours ?? '-'}h excerpt=${candidate.payload?.original_excerpt || '-'}`,
+    });
+  } else if (candidate?.kind === 'decision_follow_up') {
+    items.push({
+      type: 'reflection',
+      ref: candidate.payload?.reflection_id || candidate.source_ref || null,
+      at: sourceAt,
+      summary: candidate.payload?.reflection_excerpt || 'what_needs_decision',
+    });
+    items.push({
+      type: 'decision_state',
+      ref: taskId,
+      at: ctx?.updated_at || ctx?.created_at || null,
+      summary: `decision_status=${ctx?.decision?.status || 'none'} age_hours=${candidate.age_hours ?? '-'}`,
+    });
+  }
+
+  return {
+    captured_at: capturedAt,
+    source_at: sourceAt,
+    freshness_hours: Number.isInteger(freshnessHours) ? freshnessHours : null,
+    why: candidate?.summary || null,
+    items,
+  };
+}
+
+function createActionCheck(stage, checkedAt, ok, code, summary, facts = {}) {
+  return {
+    stage,
+    checked_at: checkedAt,
+    ok: Boolean(ok),
+    code,
+    summary,
+    facts,
+  };
+}
+
+function findReplyAfterMessage(messages, message) {
+  if (!message?.thread_id || !message?.to_agent) return null;
+  return messages.find(item =>
+    item.thread_id === message.thread_id
+    && (item.created_at || '') > (message.created_at || '')
+    && item.from_agent === message.to_agent
+  ) || null;
+}
+
+function findDecisionReplyAfter(messages, threadId, createdAt) {
+  if (!threadId) return null;
+  return messages.find(message =>
+    message.thread_id === threadId
+    && message.message_type === 'decision_reply'
+    && (message.created_at || '') > (createdAt || '')
+  ) || null;
+}
+
+function runActionPreflight(taskId, action, ctx, checkedAt = null) {
+  const now = checkedAt || new Date().toISOString();
+
+  if (!action) {
+    return createActionCheck('preflight', now, false, 'missing_action', 'action record is missing');
+  }
+
+  if (action.kind === 'stale_review_follow_up') {
+    const ownerAgent = action.owner_agent || getPrimaryTaskReviewee(ctx);
+    const reviewStatus = getEffectiveTaskReviewStatus(ctx);
+    const ageDays = computeAgeDays(ctx?.updated_at || ctx?.created_at);
+    const staleDays = Number.isInteger(action.payload?.stale_days) ? action.payload.stale_days : null;
+
+    if (!ownerAgent) {
+      return createActionCheck('preflight', now, false, 'missing_owner', 'review follow-up has no owner agent', {
+        review_status: reviewStatus,
+      });
+    }
+    if (!isReviewEligibleTaskStatus(reviewStatus)) {
+      return createActionCheck('preflight', now, false, 'review_not_eligible', `task review status is now ${reviewStatus}`, {
+        review_status: reviewStatus,
+      });
+    }
+    if (!taskNeedsReview(ctx, ownerAgent)) {
+      return createActionCheck('preflight', now, false, 'review_closed', 'external review already exists', {
+        review_status: reviewStatus,
+        owner_agent: ownerAgent,
+      });
+    }
+    if (Number.isInteger(staleDays) && Number.isInteger(ageDays) && ageDays < staleDays) {
+      return createActionCheck('preflight', now, false, 'review_not_stale', `review backlog age ${ageDays}d is below threshold ${staleDays}d`, {
+        age_days: ageDays,
+        stale_days: staleDays,
+      });
+    }
+    return createActionCheck('preflight', now, true, 'review_pending', 'external review is still missing', {
+      owner_agent: ownerAgent,
+      review_status: reviewStatus,
+      age_days: ageDays,
+      stale_days: staleDays,
+    });
+  }
+
+  if (action.kind === 'pending_reply_follow_up') {
+    const originalMessageId = action.payload?.original_message_id || action.source_ref || null;
+    const originalMessage = originalMessageId ? readMessage(taskId, originalMessageId) : null;
+    if (!originalMessage) {
+      return createActionCheck('preflight', now, false, 'missing_source_message', 'source message no longer exists', {
+        original_message_id: originalMessageId,
+      });
+    }
+    const status = effectiveMessageStatus(originalMessage);
+    if (status !== 'sent') {
+      return createActionCheck('preflight', now, false, 'source_message_closed', `source message status is ${status}`, {
+        original_message_id: originalMessageId,
+        status,
+      });
+    }
+    const messages = readTaskMessages(taskId);
+    const reply = findReplyAfterMessage(messages, originalMessage);
+    if (reply) {
+      return createActionCheck('preflight', now, false, 'reply_received', `thread already received a reply from ${reply.from_agent}`, {
+        original_message_id: originalMessageId,
+        reply_message_id: reply.message_id,
+        thread_id: originalMessage.thread_id || null,
+      });
+    }
+    return createActionCheck('preflight', now, true, 'reply_pending', 'thread is still waiting for a reply', {
+      original_message_id: originalMessageId,
+      thread_id: originalMessage.thread_id || null,
+      age_hours: computeAgeHours(originalMessage.created_at),
+    });
+  }
+
+  if (action.kind === 'decision_follow_up') {
+    const reflectionId = action.payload?.reflection_id || action.source_ref || null;
+    const reflection = reflectionId ? readReflection(taskId, reflectionId) : null;
+    if (!reflection) {
+      return createActionCheck('preflight', now, false, 'missing_source_reflection', 'source reflection no longer exists', {
+        reflection_id: reflectionId,
+      });
+    }
+    if (reflection.field !== 'what_needs_decision') {
+      return createActionCheck('preflight', now, false, 'reflection_mismatch', `reflection field is now ${reflection.field}`, {
+        reflection_id: reflectionId,
+        field: reflection.field,
+      });
+    }
+    if (ctx?.decision?.status === 'waiting' || ctx?.decision?.status === 'decided') {
+      return createActionCheck('preflight', now, false, 'decision_state_closed', `task decision status is ${ctx.decision.status}`, {
+        decision_status: ctx.decision.status,
+      });
+    }
+    const threadId = action.thread_id || defaultThreadId(taskId, reflection.focus_id || null, null);
+    const reply = findDecisionReplyAfter(readTaskMessages(taskId), threadId, reflection.created_at);
+    if (reply) {
+      return createActionCheck('preflight', now, false, 'decision_reply_received', 'thread already contains a later decision reply', {
+        reflection_id: reflectionId,
+        reply_message_id: reply.message_id,
+        thread_id: threadId,
+      });
+    }
+    return createActionCheck('preflight', now, true, 'decision_pending', 'decision reflection is still open', {
+      reflection_id: reflectionId,
+      thread_id: threadId,
+      age_hours: computeAgeHours(reflection.created_at),
+    });
+  }
+
+  return createActionCheck('preflight', now, true, 'generic', 'no kind-specific preflight rule matched');
+}
+
+function runActionPostflight(taskId, action, execution, checkedAt = null) {
+  const now = checkedAt || new Date().toISOString();
+
+  if (!execution) {
+    return createActionCheck('postflight', now, false, 'missing_execution', 'execution metadata is missing');
+  }
+
+  if (execution.mode === 'noop') {
+    return createActionCheck('postflight', now, true, 'noop', 'noop mode intentionally produced no side effect');
+  }
+
+  if (execution.status !== 'executed') {
+    return createActionCheck('postflight', now, false, 'not_dispatched', execution.error?.message || 'action was not dispatched');
+  }
+
+  if (execution.mode === 'message') {
+    const messageId = execution.artifacts?.message_id || null;
+    const message = messageId ? readMessage(taskId, messageId) : null;
+    if (!message) {
+      return createActionCheck('postflight', now, false, 'message_missing', 'message artifact was not found after execution', {
+        message_id: messageId,
+      });
+    }
+    if (message.source_ref !== action.action_id) {
+      return createActionCheck('postflight', now, false, 'message_source_mismatch', 'message exists but source_ref does not point back to the action', {
+        message_id: messageId,
+        source_ref: message.source_ref || null,
+      });
+    }
+    return createActionCheck('postflight', now, true, 'message_recorded', 'follow-up message was written successfully', {
+      message_id: messageId,
+      to_agent: message.to_agent || null,
+      thread_id: message.thread_id || null,
+    });
+  }
+
+  if (execution.mode === 'pending_task') {
+    const filePath = execution.artifacts?.pending_task_path || null;
+    const pendingTask = filePath ? loadJson(filePath) : null;
+    if (!pendingTask) {
+      return createActionCheck('postflight', now, false, 'pending_task_missing', 'pending-task artifact was not found after execution', {
+        pending_task_path: filePath,
+      });
+    }
+    if (pendingTask.action_id !== action.action_id) {
+      return createActionCheck('postflight', now, false, 'pending_task_mismatch', 'pending-task artifact does not point back to the action', {
+        pending_task_path: filePath,
+        action_id: pendingTask.action_id || null,
+      });
+    }
+    return createActionCheck('postflight', now, true, 'pending_task_written', 'pending-task artifact was written successfully', {
+      pending_task_path: filePath,
+      assigned_to: pendingTask.assigned_to || null,
+    });
+  }
+
+  return createActionCheck('postflight', now, false, 'unsupported_mode', `unsupported action mode: ${execution.mode}`);
+}
+
+function createActionRecord(taskId, ctx, candidate, planner = 'action-scan') {
+  const now = new Date().toISOString();
+  const action = {
+    schema: 'atf.action.v1',
+    action_id: generateId('ACT'),
+    task_id: ctx.short_id || ctx.task_id,
+    focus_id: candidate.focus_id || null,
+    thread_id: candidate.thread_id || defaultThreadId(ctx.short_id || ctx.task_id, candidate.focus_id || null, null),
+    owner_agent: candidate.owner_agent || null,
+    kind: candidate.kind,
+    status: 'pending',
+    priority: candidate.priority || 'normal',
+    source_type: candidate.source_type,
+    source_ref: candidate.source_ref || null,
+    dedupe_key: candidate.dedupe_key,
+    summary: candidate.summary,
+    guidance: candidate.guidance,
+    suggested_message_type: candidate.suggested_message_type || 'request',
+    confidence: deriveActionConfidence(candidate),
+    policy: buildActionPolicy(candidate),
+    evidence: buildActionEvidence(taskId, ctx, candidate, now),
+    age_days: Number.isInteger(candidate.age_days) ? candidate.age_days : null,
+    age_hours: Number.isInteger(candidate.age_hours) ? candidate.age_hours : null,
+    payload: candidate.payload || {},
+    execution_mode: null,
+    executed_at: null,
+    execution: null,
+    verification: {
+      preflight: null,
+      postflight: null,
+    },
+    created_at: now,
+    updated_at: now,
+    history: [
+      {
+        event: 'planned',
+        by: planner,
+        at: now,
+        note: candidate.summary,
+      },
+    ],
+  };
+  saveAction(taskId, action);
+  appendNotificationHistory(taskId, {
+    event: 'action_planned',
+    action_id: action.action_id,
+    kind: action.kind,
+    owner_agent: action.owner_agent,
+    source_type: action.source_type,
+    source_ref: action.source_ref,
+    at: now,
+  });
+  return action;
+}
+
+function buildStaleReviewActionCandidates(options = {}) {
+  const staleDays = Number.isInteger(options.stale_days) && options.stale_days >= 0 ? options.stale_days : 4;
+  const ownerFilter = isClearedValue(options.owner_agent) ? null : String(options.owner_agent).trim();
+  return collectPendingReviewTasks({ min_age: staleDays })
+    .map(task => {
+      const ctx = readCtx(task.task_id);
+      if (!ctx) return null;
+      const ownerAgent = task.reviewee || ctx.dri || ctx.assigned_to || null;
+      if (!ownerAgent) return null;
+      if (ownerFilter && ownerAgent !== ownerFilter) return null;
+      const ageDays = Number.isInteger(task.age_days) ? task.age_days : null;
+      return {
+        task_id: task.task_id,
+        owner_agent: ownerAgent,
+        kind: 'stale_review_follow_up',
+        priority: deriveFollowUpPriority(ageDays, null),
+        source_type: 'review_backlog',
+        source_ref: task.task_id,
+        source_at: task.updated_at || ctx.updated_at || ctx.created_at || null,
+        dedupe_key: `stale_review_follow_up:${task.task_id}:${ownerAgent}:${task.updated_at || 'na'}`,
+        summary: `${task.task_id} 已 ${task.status} ${ageDays ?? '?'}d 仍缺外部 review`,
+        guidance: `跟进外部 review，或直接补一条非 self review 结果回写到 ATF。`,
+        suggested_message_type: 'request',
+        thread_id: defaultThreadId(task.task_id, null, null),
+        age_days: ageDays,
+        payload: {
+          reviewee: task.reviewee,
+          task_status: task.status,
+          task_type: task.task_type || null,
+          description: task.description,
+          updated_at: task.updated_at || null,
+          self_review_count: task.self_review_count || 0,
+          stale_days: staleDays,
+        },
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildPendingReplyActionCandidates(options = {}) {
+  const messageHours = Number.isInteger(options.message_hours) && options.message_hours >= 0 ? options.message_hours : 12;
+  const ownerFilter = isClearedValue(options.owner_agent) ? null : String(options.owner_agent).trim();
+  const candidates = [];
+
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    const messages = readTaskMessages(taskId);
+    for (const message of messages) {
+      if (!['request', 'decision_request', 'blocker'].includes(message.message_type)) continue;
+      if (message.source_type === 'action' || String(message.from_agent || '').startsWith('adapter-action')) continue;
+      if (effectiveMessageStatus(message) !== 'sent') continue;
+      const ageHours = computeAgeHours(message.created_at);
+      if (!Number.isInteger(ageHours) || ageHours < messageHours) continue;
+      if (!message.to_agent) continue;
+      if (ownerFilter && message.to_agent !== ownerFilter) continue;
+      const replied = findReplyAfterMessage(messages, message);
+      if (replied) continue;
+
+      candidates.push({
+        task_id: taskId,
+        owner_agent: message.to_agent,
+        focus_id: message.focus_id || null,
+        thread_id: message.thread_id || defaultThreadId(taskId, message.focus_id || null, null),
+        kind: 'pending_reply_follow_up',
+        priority: message.message_type === 'blocker'
+          ? 'high'
+          : deriveFollowUpPriority(null, ageHours),
+        source_type: 'message',
+        source_ref: message.message_id,
+        source_at: message.created_at || null,
+        dedupe_key: `pending_reply_follow_up:${message.message_id}`,
+        summary: `${message.to_agent} 仍未响应 ${message.from_agent} 的 ${message.message_type}`,
+        guidance: `回复或回执这条消息，避免 thread ${message.thread_id} 持续悬挂。`,
+        suggested_message_type: message.message_type === 'decision_request' ? 'decision_request' : 'request',
+        age_hours: ageHours,
+        payload: {
+          description: ctx.description,
+          original_message_id: message.message_id,
+          original_message_type: message.message_type,
+          original_from: message.from_agent,
+          original_to: message.to_agent,
+          original_excerpt: compactText(message.body, 180),
+          created_at: message.created_at || null,
+          thread_id: message.thread_id || null,
+        },
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function buildDecisionFollowUpCandidates(options = {}) {
+  const decisionHours = Number.isInteger(options.decision_hours) && options.decision_hours >= 0 ? options.decision_hours : 6;
+  const ownerFilter = isClearedValue(options.owner_agent) ? null : String(options.owner_agent).trim();
+  const candidates = [];
+
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    if (ctx.decision?.status === 'waiting' || ctx.decision?.status === 'decided') continue;
+    const messages = readTaskMessages(taskId);
+    for (const reflection of readTaskReflections(taskId)) {
+      if (reflection.field !== 'what_needs_decision') continue;
+      const ageHours = computeAgeHours(reflection.created_at);
+      if (!Number.isInteger(ageHours) || ageHours < decisionHours) continue;
+      const ownerAgent = ctx.dri || ctx.assigned_to || reflection.author || null;
+      if (!ownerAgent) continue;
+      if (ownerFilter && ownerAgent !== ownerFilter) continue;
+      const threadId = defaultThreadId(taskId, reflection.focus_id || null, null);
+      const replied = findDecisionReplyAfter(messages, threadId, reflection.created_at);
+      if (replied) continue;
+
+      candidates.push({
+        task_id: taskId,
+        owner_agent: ownerAgent,
+        focus_id: reflection.focus_id || null,
+        thread_id: threadId,
+        kind: 'decision_follow_up',
+        priority: deriveFollowUpPriority(null, ageHours),
+        source_type: 'reflection',
+        source_ref: reflection.reflection_id,
+        source_at: reflection.created_at || null,
+        dedupe_key: `decision_follow_up:${reflection.reflection_id}`,
+        summary: `${taskId} 存在未闭环的 decision reflection`,
+        guidance: `明确给出决策，或把任务显式切到 blocked/decide 流程。`,
+        suggested_message_type: 'decision_request',
+        age_hours: ageHours,
+        payload: {
+          description: ctx.description,
+          reflection_id: reflection.reflection_id,
+          reflection_author: reflection.author,
+          reflection_excerpt: compactText(reflection.content, 180),
+          created_at: reflection.created_at || null,
+        },
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function buildActionCandidates(options = {}) {
+  const kindFilter = normalizeActionKind(options.kind);
+  let candidates = [];
+  if (!kindFilter || kindFilter === 'stale_review_follow_up') {
+    candidates.push(...buildStaleReviewActionCandidates(options));
+  }
+  if (!kindFilter || kindFilter === 'pending_reply_follow_up') {
+    candidates.push(...buildPendingReplyActionCandidates(options));
+  }
+  if (!kindFilter || kindFilter === 'decision_follow_up') {
+    candidates.push(...buildDecisionFollowUpCandidates(options));
+  }
+  return candidates.sort(compareActionCandidates);
+}
+
+function scanActions(options = {}) {
+  const planner = options.planner || 'action-scan';
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const candidates = buildActionCandidates(options);
+  const created = [];
+  let duplicates = 0;
+
+  for (const candidate of candidates) {
+    if (limit && created.length >= limit) break;
+    if (hasActionForDedupeKey(candidate.task_id, candidate.dedupe_key)) {
+      duplicates += 1;
+      continue;
+    }
+    const ctx = readCtx(candidate.task_id);
+    if (!ctx) continue;
+    created.push(createActionRecord(candidate.task_id, ctx, candidate, planner));
+  }
+
+  refreshActionIndexes();
+  return {
+    scanned: candidates.length,
+    created,
+    duplicates,
+  };
+}
+
+function buildActionMessageBody(action) {
+  const parts = [
+    `[phase-d/${action.kind}] ${action.task_id}`,
+    action.summary,
+    `Action: ${action.guidance}`,
+  ];
+  if (Number.isFinite(action.confidence)) parts.push(`Confidence: ${action.confidence}`);
+  if (action.policy?.verification_mode) parts.push(`Verify: ${action.policy.verification_mode}`);
+  if (action.payload?.description) parts.push(`Task: ${action.payload.description}`);
+  if (Number.isInteger(action.age_days)) parts.push(`Age: ${action.age_days}d`);
+  if (Number.isInteger(action.age_hours)) parts.push(`Age: ${action.age_hours}h`);
+  if (action.payload?.original_excerpt) parts.push(`Signal: ${action.payload.original_excerpt}`);
+  if (action.payload?.reflection_excerpt) parts.push(`Reflection: ${action.payload.reflection_excerpt}`);
+  return parts.join('\n');
+}
+
+function executeAction(taskId, action, ctx, options = {}) {
+  const mode = normalizeActionExecutionMode(options.mode) || 'message';
+  const executor = options.executor || 'action-executor';
+  const toAgent = options.toAgent || action.owner_agent || null;
+  const threadId = options.threadId || action.thread_id || defaultThreadId(ctx.short_id || ctx.task_id, action.focus_id || null, null);
+  const now = new Date().toISOString();
+  const preflight = action.status === 'pending'
+    ? runActionPreflight(taskId, action, ctx, now)
+    : createActionCheck('preflight', now, false, 'not_pending', `action ${action.action_id} is not pending`);
+  const execution = {
+    executor,
+    mode,
+    to_agent: toAgent,
+    thread_id: threadId,
+    note: options.note || null,
+    executed_at: now,
+    artifacts: {},
+    verification: {
+      preflight,
+      postflight: null,
+    },
+  };
+
+  if (action.status !== 'pending') {
+    execution.status = 'skipped';
+    execution.error = { message: `action ${action.action_id} is not pending` };
+  } else if (!preflight.ok) {
+    execution.status = 'skipped';
+    execution.error = { message: preflight.summary };
+  } else if (!toAgent && mode !== 'noop') {
+    execution.status = 'skipped';
+    execution.error = { message: `action ${action.action_id} has no owner agent` };
+  } else if (mode === 'noop') {
+    execution.status = 'skipped';
+  } else if (mode === 'message') {
+    const nowDate = new Date(now);
+    const ttlSeconds = 24 * 60 * 60;
+    const message = {
+      schema: 'atf.message.v1',
+      message_id: generateId('MSG'),
+      task_id: ctx.short_id || ctx.task_id,
+      thread_id: threadId,
+      focus_id: action.focus_id || null,
+      reply_to_message_id: null,
+      from_agent: 'adapter-action',
+      to_agent: toAgent,
+      message_type: action.suggested_message_type || 'request',
+      body: buildActionMessageBody(action),
+      created_at: now,
+      ttl_seconds: ttlSeconds,
+      expires_at: new Date(nowDate.getTime() + (ttlSeconds * 1000)).toISOString(),
+      status: 'sent',
+      receipt_ids: [],
+      last_receipt_type: null,
+      last_receipt_at: null,
+      source_type: 'action',
+      source_ref: action.action_id,
+      action_id: action.action_id,
+    };
+    saveMessage(taskId, message);
+    appendNotificationHistory(taskId, {
+      event: 'message_sent',
+      message_id: message.message_id,
+      from: message.from_agent,
+      to: message.to_agent,
+      type: message.message_type,
+      thread_id: message.thread_id,
+      focus_id: message.focus_id,
+      at: message.created_at,
+    });
+    execution.status = 'executed';
+    execution.artifacts.message_id = message.message_id;
+    execution.artifacts.message_path = messagePath(taskId, message.message_id);
+  } else if (mode === 'pending_task') {
+    const workspace = resolveAgentWorkspace(toAgent);
+    if (!fs.existsSync(workspace)) fs.mkdirSync(workspace, { recursive: true });
+    const filePath = path.join(workspace, 'pending-task.json');
+    const pendingTask = {
+      schema: 'atf.action-pending-task.v1',
+      action_id: action.action_id,
+      task_id: ctx.short_id || ctx.task_id,
+      assigned_to: toAgent,
+      kind: action.kind,
+      priority: action.priority,
+      summary: action.summary,
+      guidance: action.guidance,
+      payload: action.payload,
+      created_by: executor,
+      created_at: now,
+    };
+    fs.writeFileSync(filePath, JSON.stringify(pendingTask, null, 2));
+    execution.status = 'executed';
+    execution.artifacts.pending_task_path = filePath;
+  } else {
+    execution.status = 'skipped';
+    execution.error = { message: `unsupported action mode: ${mode}` };
+  }
+
+  execution.verification.postflight = runActionPostflight(taskId, action, execution, now);
+  if (execution.status === 'executed' && !execution.verification.postflight.ok) {
+    execution.status = 'skipped';
+    execution.error = { message: execution.verification.postflight.summary };
+  }
+
+  action.execution_mode = mode;
+  action.executed_at = execution.status === 'executed' ? now : action.executed_at;
+  action.execution = execution;
+  action.verification = execution.verification;
+  action.status = execution.status === 'executed' ? 'executed' : 'skipped';
+  action.history = appendHistoryEvent(action.history, {
+    event: execution.status === 'executed' ? 'executed' : 'skipped',
+    by: executor,
+    at: now,
+    note: execution.note || execution.error?.message || mode,
+  });
+  saveAction(taskId, action);
+  appendNotificationHistory(taskId, {
+    event: execution.status === 'executed' ? 'action_executed' : 'action_skipped',
+    action_id: action.action_id,
+    kind: action.kind,
+    owner_agent: action.owner_agent,
+    execution_mode: mode,
+    at: now,
+  });
+  refreshActionIndexes();
+  return action;
+}
+
+function collectActions(options = {}) {
+  const ownerFilter = isClearedValue(options.owner_agent) ? null : String(options.owner_agent).trim();
+  const statusFilter = isClearedValue(options.status) ? null : String(options.status).trim().toLowerCase();
+  const kindFilter = normalizeActionKind(options.kind);
+  const taskFilter = isClearedValue(options.task_id) ? null : String(options.task_id).trim();
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const rows = [];
+
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    if (taskFilter && taskId !== taskFilter) continue;
+    for (const action of readTaskActions(taskId)) {
+      if (ownerFilter && action.owner_agent !== ownerFilter) continue;
+      if (statusFilter && action.status !== statusFilter) continue;
+      if (kindFilter && action.kind !== kindFilter) continue;
+      rows.push(action);
+    }
+  }
+
+  rows.sort((a, b) => {
+    if (a.status !== b.status) {
+      if (a.status === 'pending') return -1;
+      if (b.status === 'pending') return 1;
+    }
+    return (a.created_at || '').localeCompare(b.created_at || '');
+  });
+  return limit ? rows.slice(0, limit) : rows;
+}
+
+function parseActionPlanArgs(parts) {
+  let ownerAgent = null;
+  let kind = null;
+  let staleDays = 4;
+  let messageHours = 12;
+  let decisionHours = 6;
+  let limit = null;
+  let invalid = null;
+
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('kind=')) {
+      kind = normalizeActionKind(part.substring('kind='.length));
+      if (!kind) invalid = part;
+      continue;
+    }
+    if (part.startsWith('stale_days=')) {
+      const value = Number(part.substring('stale_days='.length));
+      if (!Number.isInteger(value) || value < 0) {
+        invalid = part;
+        break;
+      }
+      staleDays = value;
+      continue;
+    }
+    if (part.startsWith('message_hours=')) {
+      const value = Number(part.substring('message_hours='.length));
+      if (!Number.isInteger(value) || value < 0) {
+        invalid = part;
+        break;
+      }
+      messageHours = value;
+      continue;
+    }
+    if (part.startsWith('decision_hours=')) {
+      const value = Number(part.substring('decision_hours='.length));
+      if (!Number.isInteger(value) || value < 0) {
+        invalid = part;
+        break;
+      }
+      decisionHours = value;
+      continue;
+    }
+    if (part.startsWith('limit=')) {
+      const value = Number(part.substring('limit='.length));
+      if (!Number.isInteger(value) || value <= 0) {
+        invalid = part;
+        break;
+      }
+      limit = value;
+      continue;
+    }
+    if (!ownerAgent) {
+      ownerAgent = part;
+      continue;
+    }
+    invalid = part;
+    break;
+  }
+
+  return {
+    ownerAgent,
+    kind,
+    staleDays,
+    messageHours,
+    decisionHours,
+    limit,
+    invalid,
+  };
+}
+
+function parseActionExecuteArgs(parts) {
+  let ownerAgent = null;
+  let kind = null;
+  let executor = 'action-executor';
+  let mode = null;
+  let limit = null;
+  let note = null;
+  let toAgent = null;
+  let threadId = null;
+  let invalid = null;
+
+  for (const part of parts.filter(Boolean)) {
+    if (part.startsWith('kind=')) {
+      kind = normalizeActionKind(part.substring('kind='.length));
+      if (!kind) invalid = part;
+      continue;
+    }
+    if (part.startsWith('executor=')) {
+      executor = part.substring('executor='.length) || executor;
+      continue;
+    }
+    if (part.startsWith('mode=')) {
+      mode = normalizeActionExecutionMode(part.substring('mode='.length));
+      if (!mode) invalid = part;
+      continue;
+    }
+    if (part.startsWith('limit=')) {
+      const value = Number(part.substring('limit='.length));
+      if (!Number.isInteger(value) || value <= 0) {
+        invalid = part;
+        break;
+      }
+      limit = value;
+      continue;
+    }
+    if (part.startsWith('note=')) {
+      note = part.substring('note='.length) || null;
+      continue;
+    }
+    if (part.startsWith('to=')) {
+      toAgent = part.substring('to='.length) || null;
+      continue;
+    }
+    if (part.startsWith('thread=')) {
+      threadId = part.substring('thread='.length) || null;
+      continue;
+    }
+    if (!ownerAgent) {
+      ownerAgent = part;
+      continue;
+    }
+    invalid = part;
+    break;
+  }
+
+  return {
+    ownerAgent,
+    kind,
+    executor,
+    mode,
+    limit,
+    note,
+    toAgent,
+    threadId,
+    invalid,
   };
 }
 
@@ -3628,6 +4619,13 @@ ATF CLI v2
   atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]  查看待评价任务
   atf review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看待评价 backlog 汇总
   atf review show <taskId> <reviewId>                查看单条 Review
+  atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [limit=N]  扫描并生成 Phase D 动作
+  atf action list [taskId|owner] [status=x] [kind=x] [limit=N]      查看动作队列
+  atf action inbox <agent> [kind=x]                 查看 agent 待执行动作
+  atf action rebuild-index                          重建全局动作索引
+  atf action show <taskId> <actionId>               查看动作
+  atf action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]
+  atf action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop]
   atf agent list                                     查看注册 agent 列表
   atf agent audit [top=N]                            审计未知/脏 agent 引用
   atf agent remap <from> <to> [apply=true]          重映射错误 agent 名（默认 dry-run）
@@ -5085,6 +6083,289 @@ switch (cmd) {
     }
 
     console.error('用法: atf review add|pending|backlog|list|show ...');
+    break;
+  }
+
+  // =============================================================
+  // action 命令 - Phase D 主动运营动作层
+  // =============================================================
+  case 'action': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'scan') {
+      const parsed = parseActionPlanArgs(restArgs);
+      if (parsed.invalid) {
+        console.error('用法: atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [limit=N]');
+        break;
+      }
+      const result = scanActions({
+        owner_agent: parsed.ownerAgent,
+        kind: parsed.kind,
+        stale_days: parsed.staleDays,
+        message_hours: parsed.messageHours,
+        decision_hours: parsed.decisionHours,
+        limit: parsed.limit,
+        planner: 'cli',
+      });
+      if (!result.created.length) {
+        console.log(`action scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}`);
+        break;
+      }
+      console.log(`action scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}`);
+      for (const action of result.created) {
+        console.log(`- [${action.task_id}] ${action.action_id}  ${action.kind}  owner=${action.owner_agent || '-'}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
+        console.log(`  ${action.summary}`);
+      }
+      break;
+    }
+
+    if (sub === 'list') {
+      let taskId = null;
+      let ownerAgent = null;
+      let statusFilter = null;
+      let kind = null;
+      let limit = null;
+      let invalid = false;
+
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('kind=')) {
+          kind = normalizeActionKind(part.substring('kind='.length));
+          if (!kind) {
+            invalid = true;
+            break;
+          }
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!taskId && readCtx(part)) {
+          taskId = part;
+          continue;
+        }
+        if (!ownerAgent) {
+          ownerAgent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+
+      if (invalid) {
+        console.error('用法: atf action list [taskId|owner] [status=x] [kind=x] [limit=N]');
+        break;
+      }
+      if (statusFilter && !ACTION_STATUSES.has(statusFilter)) {
+        console.error(`action status: ${[...ACTION_STATUSES].join('|')}`);
+        break;
+      }
+
+      const actions = collectActions({
+        task_id: taskId,
+        owner_agent: ownerAgent,
+        status: statusFilter,
+        kind,
+        limit,
+      });
+      const filterLabel = [
+        taskId ? `task=${taskId}` : null,
+        ownerAgent ? `owner=${ownerAgent}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        kind ? `kind=${kind}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!actions.length) {
+        console.log(filterLabel ? `action list (${filterLabel}) 暂无记录` : '当前暂无动作记录');
+        break;
+      }
+      console.log(`\nAction Queue${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      for (const action of actions) {
+        console.log(`[${action.task_id}] ${action.action_id}  ${action.status}  ${action.kind}`);
+        console.log(`  owner=${action.owner_agent || '-'}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}${action.execution_mode ? `  mode=${action.execution_mode}` : ''}`);
+        console.log(`  ${action.summary}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'inbox') {
+      const [agent, ...filterParts] = restArgs;
+      if (!agent) {
+        console.error('用法: atf action inbox <agent> [kind=x] [limit=N]');
+        break;
+      }
+      let kind = null;
+      let limit = null;
+      let invalid = false;
+      for (const part of filterParts.filter(Boolean)) {
+        if (part.startsWith('kind=')) {
+          kind = normalizeActionKind(part.substring('kind='.length));
+          if (!kind) {
+            invalid = true;
+            break;
+          }
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf action inbox <agent> [kind=x] [limit=N]');
+        break;
+      }
+      refreshActionIndexes();
+      const inbox = loadJson(actionInboxPath(agent));
+      let items = (inbox?.items || []).filter(action => action.status === 'pending');
+      if (kind) items = items.filter(action => action.kind === kind);
+      items = items.slice(0, limit || items.length);
+      if (!items.length) {
+        console.log(`agent ${agent} 当前没有待执行动作`);
+        break;
+      }
+      console.log(`\n${agent} Action Inbox (${items.length} 条)\n`);
+      for (const action of items) {
+        console.log(`[${action.task_id}] ${action.action_id}  ${action.kind}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
+        console.log(`  ${action.summary}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'rebuild-index') {
+      refreshActionIndexes();
+      const pending = loadJson(PENDING_ACTIONS_FILE) || { total: 0 };
+      console.log(`Action 索引已重建`);
+      console.log(`   pending actions: ${pending.total || 0}`);
+      console.log(`   global index: ${PENDING_ACTIONS_FILE}`);
+      break;
+    }
+
+    if (sub === 'show') {
+      const [taskId, actionId] = restArgs;
+      if (!taskId || !actionId) {
+        console.error('用法: atf action show <taskId> <actionId>');
+        break;
+      }
+      const ctx = readCtx(taskId);
+      if (!ctx) {
+        console.error(`❌ 任务不存在: ${taskId}`);
+        break;
+      }
+      const action = readAction(taskId, actionId);
+      if (!action) {
+        console.error(`❌ Action 不存在: ${actionId}`);
+        break;
+      }
+      console.log(JSON.stringify(action, null, 2));
+      break;
+    }
+
+    if (sub === 'execute') {
+      const [taskId, actionId, ...optionParts] = restArgs;
+      if (!taskId || !actionId) {
+        console.error('用法: atf action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]');
+        break;
+      }
+      const ctx = readCtx(taskId);
+      if (!ctx) {
+        console.error(`❌ 任务不存在: ${taskId}`);
+        break;
+      }
+      const action = readAction(taskId, actionId);
+      if (!action) {
+        console.error(`❌ Action 不存在: ${actionId}`);
+        break;
+      }
+      const parsed = parseActionExecuteArgs(optionParts);
+      if (parsed.invalid) {
+        console.error('用法: atf action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]');
+        break;
+      }
+      const executed = executeAction(taskId, action, ctx, {
+        executor: parsed.executor,
+        mode: parsed.mode,
+        note: parsed.note,
+        toAgent: parsed.toAgent,
+        threadId: parsed.threadId,
+      });
+      console.log(`${executed.status === 'executed' ? 'Executed' : 'Skipped'} action ${executed.action_id}`);
+      console.log(`   mode: ${executed.execution_mode}  |  owner: ${executed.owner_agent || '-'}  |  status: ${executed.status}`);
+      if (executed.verification?.preflight) console.log(`   preflight: ${executed.verification.preflight.ok ? 'ok' : 'skip'}  |  ${executed.verification.preflight.code}`);
+      if (executed.verification?.postflight) console.log(`   postflight: ${executed.verification.postflight.ok ? 'ok' : 'skip'}  |  ${executed.verification.postflight.code}`);
+      if (executed.execution?.artifacts?.message_id) console.log(`   message: ${executed.execution.artifacts.message_id}`);
+      if (executed.execution?.artifacts?.message_path) console.log(`   message-path: ${executed.execution.artifacts.message_path}`);
+      if (executed.execution?.artifacts?.pending_task_path) console.log(`   pending-task: ${executed.execution.artifacts.pending_task_path}`);
+      if (executed.execution?.error?.message) console.log(`   error: ${executed.execution.error.message}`);
+      break;
+    }
+
+    if (sub === 'execute-pending') {
+      const parsed = parseActionExecuteArgs(restArgs);
+      if (parsed.invalid) {
+        console.error('用法: atf action execute-pending [owner] [kind=x] [limit=N] [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x]');
+        break;
+      }
+      refreshActionIndexes();
+      const actions = collectActions({
+        owner_agent: parsed.ownerAgent,
+        status: 'pending',
+        kind: parsed.kind,
+        limit: parsed.limit,
+      });
+      if (!actions.length) {
+        console.log('当前没有可执行的 pending actions');
+        break;
+      }
+      const results = [];
+      for (const action of actions) {
+        const ctx = readCtx(action.task_id);
+        if (!ctx) continue;
+        const latest = readAction(action.task_id, action.action_id);
+        if (!latest || latest.status !== 'pending') continue;
+        results.push(executeAction(action.task_id, latest, ctx, {
+          executor: parsed.executor,
+          mode: parsed.mode,
+          note: parsed.note,
+          toAgent: parsed.toAgent,
+          threadId: parsed.threadId,
+        }));
+      }
+      if (!results.length) {
+        console.log('没有成功执行任何 pending actions');
+        break;
+      }
+      const executedCount = results.filter(action => action.status === 'executed').length;
+      const skippedCount = results.filter(action => action.status === 'skipped').length;
+      console.log(`Processed ${results.length} pending actions  |  executed:${executedCount}  skipped:${skippedCount}`);
+      for (const action of results) {
+        console.log(`   [${action.task_id}] ${action.action_id}  ${action.kind}  status:${action.status}  mode:${action.execution_mode}`);
+        if (action.verification?.preflight) console.log(`      preflight: ${action.verification.preflight.ok ? 'ok' : 'skip'}  ${action.verification.preflight.code}`);
+        if (action.verification?.postflight) console.log(`      postflight: ${action.verification.postflight.ok ? 'ok' : 'skip'}  ${action.verification.postflight.code}`);
+        if (action.execution?.error?.message) console.log(`      error: ${action.execution.error.message}`);
+      }
+      break;
+    }
+
+    console.error('用法: atf action scan|list|inbox|rebuild-index|show|execute|execute-pending ...');
     break;
   }
 
@@ -6636,5 +7917,5 @@ ${body}\n`;
 
   default:
     console.error(`未知命令: ${cmd}`);
-    console.error('用法: atf create|list|status|stats|profile|assign|update|fan-out|focus|trigger|reflect|review|credits|reputation|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
+    console.error('用法: atf create|list|status|stats|profile|assign|update|fan-out|focus|trigger|reflect|review|action|credits|reputation|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
 }

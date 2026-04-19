@@ -38,8 +38,10 @@ const FOCUS_STATUSES = new Set(['open', 'in_progress', 'blocked', 'done', 'dropp
 const TRIGGER_TYPES = new Set(['cron', 'interval', 'on_message', 'on_status_change', 'on_blocked']);
 const TRIGGER_STATUSES = new Set(['active', 'paused', 'fired', 'archived']);
 const TRIGGER_FIRE_STATUSES = new Set(['pending', 'consumed', 'ignored']);
-const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'noop']);
+const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'room', 'noop']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
+const HANDOFF_CONTEXT_LIMIT = 5;
+const HANDOFF_REFLECTION_LIMIT = 2;
 
 if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR))  fs.mkdirSync(DATA_DIR,   { recursive: true });
@@ -427,6 +429,8 @@ function normalizeTriggerExecutionMode(mode) {
 
 function inferTriggerExecutionMode(trigger, fire = null) {
   const intent = fire?.intent || trigger?.intent || 'generic';
+  const threadId = fire?.thread_id || trigger?.thread_id || null;
+  if (intent === 'review' && threadId && threadId.startsWith('room:')) return 'room';
   if (intent === 'follow_up' || intent === 'review') return 'pending_task';
   const triggerType = fire?.trigger_type || trigger?.trigger_type;
   if (['interval', 'cron', 'on_message', 'on_status_change', 'on_blocked'].includes(triggerType)) return 'pending_task';
@@ -439,17 +443,284 @@ function parseTriggerExecuteArgs(parts) {
   let mode = null;
   let limit = null;
   let note = null;
+  let toAgent = null;
+  let threadId = null;
+  let roomId = null;
   for (const part of parts.filter(Boolean)) {
     if (part.startsWith('mode=')) mode = normalizeTriggerExecutionMode(part.substring('mode='.length));
     else if (part.startsWith('limit=')) {
       const value = Number(part.substring('limit='.length));
       if (Number.isFinite(value) && value > 0) limit = Math.floor(value);
     } else if (part.startsWith('note=')) note = part.substring('note='.length) || null;
+    else if (part.startsWith('to=')) toAgent = part.substring('to='.length) || null;
+    else if (part.startsWith('thread=')) threadId = part.substring('thread='.length) || null;
+    else if (part.startsWith('room=')) roomId = part.substring('room='.length) || null;
     else if (part.startsWith('executor=')) executor = part.substring('executor='.length) || executor;
     else if (!target) target = part;
     else executor = part;
   }
-  return { target, executor, mode, limit, note };
+  return { target, executor, mode, limit, note, toAgent, threadId, roomId };
+}
+
+function compactText(text, maxLength = 220) {
+  if (!text) return '';
+  const normalized = String(text).replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function sortByTimestamp(items, field = 'created_at') {
+  return [...(items || [])].sort((a, b) => (a?.[field] || '').localeCompare(b?.[field] || ''));
+}
+
+function buildExecutionError(message, code = 'EXECUTION_FAILED') {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function sharedContextRelevanceScore(entry, focusId = null, threadId = null) {
+  let score = 0;
+  if (focusId && entry.focus_id === focusId) score += 2;
+  if (threadId && entry.thread_id === threadId) score += 2;
+  if (!entry.focus_id && !entry.thread_id) score += 1;
+  return score;
+}
+
+function selectSharedContextEntries(taskId, shortId, focusId = null, threadId = null, limit = HANDOFF_CONTEXT_LIMIT) {
+  const sharedContext = readSharedContext(taskId, shortId) || { entries: [] };
+  const entries = [...(sharedContext.entries || [])]
+    .map(entry => ({ ...entry, __score: sharedContextRelevanceScore(entry, focusId, threadId) }))
+    .filter(entry => entry.__score > 0 || (!focusId && !threadId))
+    .sort((a, b) => {
+      const scoreDiff = b.__score - a.__score;
+      if (scoreDiff) return scoreDiff;
+      return (b.created_at || '').localeCompare(a.created_at || '');
+    })
+    .slice(0, limit)
+    .reverse();
+
+  return entries.map(({ __score, ...entry }) => ({
+    entry_id: entry.entry_id,
+    type: entry.entry_type,
+    author: entry.author,
+    focus_id: entry.focus_id || null,
+    thread_id: entry.thread_id || null,
+    tags: entry.tags || [],
+    content: compactText(entry.content, 280),
+    created_at: entry.created_at,
+  }));
+}
+
+function buildThreadMessageSnapshot(taskId, threadId = null, limit = HANDOFF_CONTEXT_LIMIT) {
+  if (!threadId) return [];
+  return sortByTimestamp(readTaskMessages(taskId).filter(message => message.thread_id === threadId))
+    .slice(-limit)
+    .map(message => ({
+      message_id: message.message_id,
+      from_agent: message.from_agent,
+      to_agent: message.to_agent,
+      message_type: message.message_type,
+      body: compactText(message.body, 240),
+      created_at: message.created_at,
+      status: effectiveMessageStatus(message),
+      reply_to_message_id: message.reply_to_message_id || null,
+    }));
+}
+
+function buildReflectionSummarySnapshot(taskId, focusId = null, limitPerField = HANDOFF_REFLECTION_LIMIT) {
+  let reflections = readTaskReflections(taskId);
+  if (focusId) reflections = reflections.filter(reflection => reflection.focus_id === focusId);
+  return [...REFLECTION_FIELDS]
+    .map(field => {
+      const items = reflections.filter(reflection => reflection.field === field);
+      if (!items.length) return null;
+      return {
+        field,
+        total: items.length,
+        latest: sortByTimestamp(items, 'created_at').slice(-limitPerField).map(reflection => ({
+          reflection_id: reflection.reflection_id,
+          author: reflection.author,
+          content: compactText(reflection.content, 220),
+          created_at: reflection.created_at,
+        })),
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildFocusSnapshot(taskId, focusId = null) {
+  if (!focusId) return null;
+  const focus = readFocus(taskId, focusId);
+  if (!focus) return null;
+  return {
+    focus_id: focus.focus_id,
+    title: focus.title,
+    status: focus.status,
+    owner_agent: focus.owner_agent,
+    next_action: focus.next_action || null,
+    updated_at: focus.updated_at || null,
+  };
+}
+
+function inferTriggerRecommendedAction(ctx, trigger, fire, focus = null) {
+  const intent = fire.intent || trigger.intent || 'generic';
+  if (intent === 'follow_up') {
+    return focus?.next_action
+      ? `Follow up on focus "${focus.title}" and drive next action: ${focus.next_action}`
+      : focus?.title
+      ? `Follow up on focus "${focus.title}" and confirm latest progress.`
+      : `Follow up on task ${ctx.short_id || ctx.task_id} and confirm current progress.`;
+  }
+  if (intent === 'review') {
+    return focus?.title
+      ? `Review focus "${focus.title}", capture findings, and write back concrete issues or approvals.`
+      : `Review task ${ctx.short_id || ctx.task_id} and write back concrete findings.`;
+  }
+  return focus?.title
+    ? `Handle trigger for focus "${focus.title}" and update downstream context explicitly.`
+    : `Handle trigger for task ${ctx.short_id || ctx.task_id} and update downstream context explicitly.`;
+}
+
+function resolveTriggerDeliveryTarget(ctx, trigger, fire, mode, options = {}) {
+  const taskId = ctx.short_id || ctx.task_id;
+  const focusId = fire.focus_id || trigger.focus_id || null;
+  let threadId = options.threadId || fire.thread_id || trigger.thread_id || defaultThreadId(taskId, focusId, null);
+  const ownerAgent = fire.owner_agent || trigger.owner_agent || ctx.assigned_to || null;
+
+  if (mode === 'room') {
+    const roomId = options.roomId || (threadId && threadId.startsWith('room:') ? threadId.substring('room:'.length) : null);
+    if (!roomId) throw buildExecutionError('room mode requires room=<name> or thread=room:<name>', 'EXECUTION_SKIPPED');
+    threadId = `room:${roomId}`;
+    return {
+      kind: 'room',
+      room_id: roomId,
+      recipient: `room:${roomId}`,
+      thread_id: threadId,
+      focus_id: focusId,
+    };
+  }
+
+  if (mode === 'message') {
+    const targetAgent = options.toAgent || ownerAgent;
+    if (!targetAgent) throw buildExecutionError('message mode requires target agent', 'EXECUTION_SKIPPED');
+    return {
+      kind: 'agent',
+      agent: targetAgent,
+      thread_id: threadId,
+      focus_id: focusId,
+    };
+  }
+
+  if (mode === 'pending_task') {
+    return {
+      kind: 'pending_task',
+      agent: ownerAgent,
+      thread_id: threadId,
+      focus_id: focusId,
+    };
+  }
+
+  return {
+    kind: 'noop',
+    thread_id: threadId,
+    focus_id: focusId,
+  };
+}
+
+function buildTriggerHandoff(taskId, ctx, trigger, fire, execution, deliveryTarget) {
+  const shortId = ctx.short_id || ctx.task_id;
+  const focusId = fire.focus_id || trigger.focus_id || null;
+  const focus = buildFocusSnapshot(taskId, focusId);
+  const threadId = deliveryTarget.thread_id || fire.thread_id || trigger.thread_id || null;
+
+  return {
+    schema: 'atf.trigger-handoff.v1',
+    handoff_id: execution.execution_id,
+    built_at: execution.dispatched_at,
+    task: {
+      task_id: shortId,
+      status: ctx.status,
+      description: ctx.description,
+      instructions: ctx.instructions || null,
+      assigned_to: ctx.assigned_to || null,
+      dri: ctx.dri || null,
+    },
+    focus,
+    trigger: {
+      trigger_id: trigger.trigger_id,
+      trigger_type: trigger.trigger_type,
+      trigger_spec: trigger.trigger_spec,
+      intent: fire.intent || trigger.intent || 'generic',
+      owner_agent: fire.owner_agent || trigger.owner_agent || null,
+      note: fire.note || trigger.note || null,
+      thread_id: threadId,
+    },
+    fire: {
+      fire_id: fire.fire_id,
+      fired_at: fire.fired_at,
+      source_type: fire.source_type || null,
+      source_ref: fire.source_ref || null,
+      note: fire.note || null,
+    },
+    delivery: deliveryTarget,
+    guidance: {
+      recommended_action: inferTriggerRecommendedAction(ctx, trigger, fire, focus),
+      response_contract: `Acknowledge or write back outcome explicitly for ${shortId}.`,
+    },
+    context: {
+      shared_entries: selectSharedContextEntries(taskId, shortId, focusId, threadId),
+      recent_messages: buildThreadMessageSnapshot(taskId, threadId),
+      reflection_summary: buildReflectionSummarySnapshot(taskId, focusId),
+      source_paths: {
+        task_dir: taskDirPath(taskId),
+        shared_context: sharedContextPath(taskId),
+      },
+    },
+  };
+}
+
+function buildTriggerMessageBody(handoff, deliveryTarget, mode) {
+  const parts = [
+    `[${handoff.trigger.intent}] ${handoff.task.task_id} trigger fired.`,
+    handoff.focus?.title ? `Focus: ${handoff.focus.title}` : `Task: ${handoff.task.description}`,
+    `Action: ${handoff.guidance.recommended_action}`,
+  ];
+  if (handoff.trigger.note) parts.push(`Note: ${handoff.trigger.note}`);
+  if (mode === 'room' && deliveryTarget.room_id) parts.push(`Room: ${deliveryTarget.room_id}`);
+  return parts.join('\n');
+}
+
+function buildAdapterMessageRecord(taskId, ctx, trigger, fire, execution, deliveryTarget, handoff, mode) {
+  const ttlSeconds = 24 * 60 * 60;
+  const now = execution.dispatched_at;
+  const expiresAt = new Date(new Date(now).getTime() + ttlSeconds * 1000).toISOString();
+  const toAgent = deliveryTarget.kind === 'room' ? deliveryTarget.recipient : deliveryTarget.agent;
+  return {
+    schema: 'atf.message.v1',
+    message_id: generateId('MSG'),
+    task_id: ctx.short_id || ctx.task_id,
+    thread_id: deliveryTarget.thread_id,
+    focus_id: deliveryTarget.focus_id || null,
+    reply_to_message_id: null,
+    from_agent: execution.executor,
+    to_agent: toAgent,
+    message_type: 'handoff',
+    body: buildTriggerMessageBody(handoff, deliveryTarget, mode),
+    created_at: now,
+    ttl_seconds: ttlSeconds,
+    expires_at: expiresAt,
+    status: 'sent',
+    receipt_ids: [],
+    last_receipt_type: null,
+    last_receipt_at: null,
+    adapter_mode: mode,
+    trigger_id: trigger.trigger_id,
+    trigger_fire_id: fire.fire_id,
+    execution_id: execution.execution_id,
+    delivery_target: deliveryTarget,
+    handoff,
+  };
 }
 
 function readTaskMessages(taskId) {
@@ -841,7 +1112,9 @@ function settleTriggerFire(taskId, fire, trigger, status, consumer, result = nul
   return fire;
 }
 
-function buildPendingTaskFromTrigger(ctx, trigger, fire, executor, note = null, dispatchedAt = new Date().toISOString()) {
+function buildPendingTaskFromTrigger(ctx, trigger, fire, executor, options = {}) {
+  const dispatchedAt = options.dispatchedAt || new Date().toISOString();
+  const note = options.note || null;
   return {
     task_id: ctx.short_id || ctx.task_id,
     assigned_to: fire.owner_agent || trigger.owner_agent || ctx.assigned_to || null,
@@ -856,9 +1129,12 @@ function buildPendingTaskFromTrigger(ctx, trigger, fire, executor, note = null, 
     trigger_intent: fire.intent || trigger.intent || 'generic',
     source_type: fire.source_type || null,
     source_ref: fire.source_ref || null,
-    focus_id: fire.focus_id || trigger.focus_id || null,
-    thread_id: fire.thread_id || trigger.thread_id || null,
+    focus_id: (options.deliveryTarget && options.deliveryTarget.focus_id) || fire.focus_id || trigger.focus_id || null,
+    thread_id: (options.deliveryTarget && options.deliveryTarget.thread_id) || fire.thread_id || trigger.thread_id || null,
     note: note || fire.note || trigger.note || null,
+    adapter_mode: options.mode || 'pending_task',
+    delivery_target: options.deliveryTarget || null,
+    handoff: options.handoff || null,
   };
 }
 
@@ -887,73 +1163,144 @@ function executeTriggerFire(taskId, fire, trigger, ctx, options = {}) {
     created_at: now,
     dispatched_at: now,
     note: options.note || null,
+    delivery_target: null,
     artifacts: {},
     payload: null,
+    error: null,
   };
 
-  if (mode === 'pending_task') {
-    const pendingTaskPath = `${taskDirPath(taskId)}/pending-task.json`;
-    const pendingTask = buildPendingTaskFromTrigger(ctx, trigger, fire, execution.executor, execution.note, now);
-    fs.writeFileSync(pendingTaskPath, JSON.stringify(pendingTask, null, 2));
-    execution.payload = pendingTask;
-    execution.artifacts.pending_task_path = pendingTaskPath;
-  } else if (mode === 'message') {
-    const message = {
-      schema: 'atf.message.v1',
-      message_id: generateId('MSG'),
-      task_id: ctx.short_id || ctx.task_id,
-      thread_id: fire.thread_id || trigger.thread_id || defaultThreadId(ctx.short_id || ctx.task_id, fire.focus_id || trigger.focus_id || null, null),
-      focus_id: fire.focus_id || trigger.focus_id || null,
-      reply_to_message_id: null,
-      from_agent: execution.executor,
-      to_agent: fire.owner_agent || trigger.owner_agent,
-      message_type: 'info',
-      body: options.note || fire.note || trigger.note || `trigger fire ${fire.fire_id} dispatched`,
-      created_at: now,
-      ttl_seconds: 24 * 60 * 60,
-      expires_at: new Date(new Date(now).getTime() + 24 * 60 * 60 * 1000).toISOString(),
-      status: 'sent',
-      receipt_ids: [],
-      last_receipt_type: null,
-      last_receipt_at: null,
+  try {
+    const deliveryTarget = resolveTriggerDeliveryTarget(ctx, trigger, fire, mode, options);
+    execution.delivery_target = deliveryTarget;
+    execution.thread_id = deliveryTarget.thread_id || execution.thread_id;
+    const handoff = buildTriggerHandoff(taskId, ctx, trigger, fire, execution, deliveryTarget);
+
+    if (mode === 'pending_task') {
+      const pendingTaskPath = `${taskDirPath(taskId)}/pending-task.json`;
+      const pendingTask = buildPendingTaskFromTrigger(ctx, trigger, fire, execution.executor, {
+        note: execution.note,
+        dispatchedAt: now,
+        mode,
+        deliveryTarget,
+        handoff,
+      });
+      fs.writeFileSync(pendingTaskPath, JSON.stringify(pendingTask, null, 2));
+      execution.payload = {
+        handoff,
+        pending_task: pendingTask,
+      };
+      execution.artifacts.pending_task_path = pendingTaskPath;
+    } else if (mode === 'message' || mode === 'room') {
+      const message = buildAdapterMessageRecord(taskId, ctx, trigger, fire, execution, deliveryTarget, handoff, mode);
+      saveMessage(taskId, message);
+      appendNotificationHistory(taskId, {
+        event: 'message_sent',
+        message_id: message.message_id,
+        from: message.from_agent,
+        to: message.to_agent,
+        type: message.message_type,
+        adapter_mode: mode,
+        thread_id: message.thread_id,
+        focus_id: message.focus_id,
+        at: message.created_at,
+      });
+      execution.payload = {
+        handoff,
+        message: {
+          message_id: message.message_id,
+          to_agent: message.to_agent,
+          thread_id: message.thread_id,
+          message_type: message.message_type,
+        },
+      };
+      execution.artifacts.message_id = message.message_id;
+      execution.artifacts.message_path = messagePath(taskId, message.message_id);
+    } else {
+      execution.payload = {
+        handoff,
+        task_id: ctx.short_id || ctx.task_id,
+        trigger_fire_id: fire.fire_id,
+        action: 'noop',
+      };
+    }
+
+    fire.execution_id = execution.execution_id;
+    fire.execution_mode = mode;
+    fire.executed_at = now;
+    fire.executed_by = execution.executor;
+    fire.last_execution_id = execution.execution_id;
+    fire.last_execution_status = 'dispatched';
+    fire.last_execution_mode = mode;
+    fire.last_execution_at = now;
+    fire.last_execution_by = execution.executor;
+    fire.last_execution_error = null;
+    if (execution.note) {
+      fire.execution_note = execution.note;
+      fire.last_execution_note = execution.note;
+    }
+    saveTriggerExecution(taskId, execution);
+
+    trigger.history = appendHistoryEvent(trigger.history, {
+      event: 'executed',
+      by: execution.executor,
+      at: now,
+      note: `${execution.execution_id} ${mode}${execution.note ? ` ${execution.note}` : ''}`.trim(),
+      fire_id: fire.fire_id,
+    });
+    saveTrigger(taskId, trigger);
+    appendNotificationHistory(taskId, {
+      event: 'trigger_fire_executed',
+      trigger_id: trigger.trigger_id,
+      fire_id: fire.fire_id,
+      execution_id: execution.execution_id,
+      execution_mode: mode,
+      executor: execution.executor,
+      target_kind: deliveryTarget.kind,
+      at: now,
+    });
+
+    settleTriggerFire(taskId, fire, trigger, 'consumed', execution.executor, `executed:${mode}`);
+    return execution;
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    const status = error.code === 'EXECUTION_SKIPPED' ? 'skipped' : 'failed';
+    execution.status = status;
+    execution.failed_at = failedAt;
+    execution.error = {
+      code: error.code || 'EXECUTION_FAILED',
+      message: error.message,
     };
-    saveMessage(taskId, message);
-    execution.payload = message;
-    execution.artifacts.message_id = message.message_id;
-  } else {
-    execution.payload = {
-      task_id: ctx.short_id || ctx.task_id,
-      trigger_fire_id: fire.fire_id,
-      action: 'noop',
-    };
+
+    fire.last_execution_id = execution.execution_id;
+    fire.last_execution_status = status;
+    fire.last_execution_mode = mode;
+    fire.last_execution_at = failedAt;
+    fire.last_execution_by = execution.executor;
+    fire.last_execution_error = error.message;
+    if (execution.note) fire.last_execution_note = execution.note;
+    saveTriggerFire(taskId, fire);
+    saveTriggerExecution(taskId, execution);
+
+    trigger.history = appendHistoryEvent(trigger.history, {
+      event: status === 'skipped' ? 'execution_skipped' : 'execution_failed',
+      by: execution.executor,
+      at: failedAt,
+      note: `${execution.execution_id} ${mode} ${error.message}`.trim(),
+      fire_id: fire.fire_id,
+    });
+    saveTrigger(taskId, trigger);
+    appendNotificationHistory(taskId, {
+      event: status === 'skipped' ? 'trigger_fire_execution_skipped' : 'trigger_fire_execution_failed',
+      trigger_id: trigger.trigger_id,
+      fire_id: fire.fire_id,
+      execution_id: execution.execution_id,
+      execution_mode: mode,
+      executor: execution.executor,
+      error: error.message,
+      at: failedAt,
+    });
+    refreshTriggerIndexes();
   }
-
-  fire.execution_id = execution.execution_id;
-  fire.execution_mode = mode;
-  fire.executed_at = now;
-  fire.executed_by = execution.executor;
-  if (execution.note) fire.execution_note = execution.note;
-  saveTriggerExecution(taskId, execution);
-
-  trigger.history = appendHistoryEvent(trigger.history, {
-    event: 'executed',
-    by: execution.executor,
-    at: now,
-    note: `${execution.execution_id} ${mode}${execution.note ? ` ${execution.note}` : ''}`.trim(),
-    fire_id: fire.fire_id,
-  });
-  saveTrigger(taskId, trigger);
-  appendNotificationHistory(taskId, {
-    event: 'trigger_fire_executed',
-    trigger_id: trigger.trigger_id,
-    fire_id: fire.fire_id,
-    execution_id: execution.execution_id,
-    execution_mode: mode,
-    executor: execution.executor,
-    at: now,
-  });
-
-  settleTriggerFire(taskId, fire, trigger, 'consumed', execution.executor, `executed:${mode}`);
   return execution;
 }
 
@@ -1845,6 +2192,10 @@ switch (cmd) {
         if (fire.thread_id) console.log(`  thread: ${fire.thread_id}`);
         if (fire.note) console.log(`  note: ${fire.note}`);
         if (fire.execution_id) console.log(`  execution: ${fire.execution_id}${fire.execution_mode ? `  |  ${fire.execution_mode}` : ''}`);
+        if (fire.last_execution_status && fire.last_execution_status !== 'dispatched' && fire.last_execution_id) {
+          console.log(`  last-exec: ${fire.last_execution_id}  ${fire.last_execution_status}${fire.last_execution_mode ? `  |  ${fire.last_execution_mode}` : ''}`);
+          if (fire.last_execution_error) console.log(`  error: ${fire.last_execution_error}`);
+        }
         if (fire.consumed_at) console.log(`  consumed: ${fire.consumed_at} by ${fire.consumed_by || 'unknown'}${fire.result ? `  |  ${fire.result}` : ''}`);
       }
       console.log('');
@@ -1854,7 +2205,7 @@ switch (cmd) {
     if (sub === 'execute') {
       const [taskId, fireId, ...optionParts] = restArgs;
       if (!taskId || !fireId) {
-        console.error('用法: atf trigger execute <taskId> <fireId> [executor] [mode=pending_task|message|noop] [note=x]'); break;
+        console.error('用法: atf trigger execute <taskId> <fireId> [executor] [mode=pending_task|message|room|noop] [note=x] [to=agent] [thread=x] [room=x]'); break;
       }
       const ctx = readCtx(taskId);
       if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
@@ -1862,21 +2213,27 @@ switch (cmd) {
       if (!fire) { console.error(`❌ Trigger firing 不存在: ${fireId}`); break; }
       const trigger = readTrigger(taskId, fire.trigger_id);
       if (!trigger) { console.error(`❌ 对应 Trigger 不存在: ${fire.trigger_id}`); break; }
-      const { target, executor, mode, note } = parseTriggerExecuteArgs(optionParts);
+      const { target, executor, mode, note, toAgent, threadId, roomId } = parseTriggerExecuteArgs(optionParts);
       const execution = executeTriggerFire(taskId, fire, trigger, ctx, {
         executor: target || executor,
         mode,
         note,
+        toAgent,
+        threadId,
+        roomId,
       });
-      console.log(`Executed trigger fire ${fire.fire_id} -> ${execution.execution_id}`);
-      console.log(`   mode: ${execution.execution_mode}  |  executor: ${execution.executor}`);
+      console.log(`${execution.status === 'dispatched' ? 'Executed' : execution.status === 'skipped' ? 'Skipped' : 'Failed'} trigger fire ${fire.fire_id} -> ${execution.execution_id}`);
+      console.log(`   mode: ${execution.execution_mode}  |  executor: ${execution.executor}  |  status: ${execution.status}`);
+      if (execution.delivery_target?.kind) console.log(`   target: ${execution.delivery_target.kind}${execution.delivery_target.agent ? `:${execution.delivery_target.agent}` : execution.delivery_target.room_id ? `:${execution.delivery_target.room_id}` : ''}`);
       if (execution.artifacts.pending_task_path) console.log(`   pending-task: ${execution.artifacts.pending_task_path}`);
       if (execution.artifacts.message_id) console.log(`   message: ${execution.artifacts.message_id}`);
+      if (execution.artifacts.message_path) console.log(`   message-path: ${execution.artifacts.message_path}`);
+      if (execution.error?.message) console.log(`   error: ${execution.error.message}`);
       break;
     }
 
     if (sub === 'execute-pending') {
-      const { target: agent, executor, mode, limit, note } = parseTriggerExecuteArgs(restArgs);
+      const { target: agent, executor, mode, limit, note, toAgent, threadId, roomId } = parseTriggerExecuteArgs(restArgs);
       refreshTriggerIndexes();
       let fires = [];
       if (agent) {
@@ -1902,12 +2259,19 @@ switch (cmd) {
           executor,
           mode,
           note,
+          toAgent,
+          threadId,
+          roomId,
         }));
       }
       if (!executions.length) { console.log('没有成功执行的 trigger fires'); break; }
-      console.log(`Executed ${executions.length} pending trigger fires`);
+      const dispatched = executions.filter(execution => execution.status === 'dispatched').length;
+      const failed = executions.filter(execution => execution.status === 'failed').length;
+      const skipped = executions.filter(execution => execution.status === 'skipped').length;
+      console.log(`Processed ${executions.length} pending trigger fires  |  dispatched:${dispatched}  skipped:${skipped}  failed:${failed}`);
       for (const execution of executions) {
-        console.log(`   [${execution.task_id}] ${execution.execution_id}  fire:${execution.fire_id}  mode:${execution.execution_mode}`);
+        console.log(`   [${execution.task_id}] ${execution.execution_id}  fire:${execution.fire_id}  mode:${execution.execution_mode}  status:${execution.status}`);
+        if (execution.error?.message) console.log(`      error: ${execution.error.message}`);
       }
       break;
     }
@@ -1924,10 +2288,13 @@ switch (cmd) {
       for (const execution of executions) {
         console.log(`${execution.execution_id}  ${execution.status}  fire:${execution.fire_id}  mode:${execution.execution_mode}`);
         console.log(`  ${execution.dispatched_at}  executor:${execution.executor}  owner:${execution.owner_agent || '-'}`);
+        if (execution.delivery_target?.kind) console.log(`  target: ${execution.delivery_target.kind}${execution.delivery_target.agent ? `:${execution.delivery_target.agent}` : execution.delivery_target.room_id ? `:${execution.delivery_target.room_id}` : ''}`);
         if (execution.thread_id) console.log(`  thread: ${execution.thread_id}`);
         if (execution.note) console.log(`  note: ${execution.note}`);
         if (execution.artifacts?.pending_task_path) console.log(`  pending-task: ${execution.artifacts.pending_task_path}`);
         if (execution.artifacts?.message_id) console.log(`  message: ${execution.artifacts.message_id}`);
+        if (execution.artifacts?.message_path) console.log(`  message-path: ${execution.artifacts.message_path}`);
+        if (execution.error?.message) console.log(`  error: ${execution.error.message}`);
       }
       console.log('');
       break;

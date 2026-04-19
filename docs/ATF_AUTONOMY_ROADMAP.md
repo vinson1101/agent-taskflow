@@ -191,14 +191,17 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 
 这一步的目标是让 Agent 不只“接任务”，还会主动跟进任务。
 
-当前进展（2026-04-19，第一批）：
+当前进展（2026-04-19，按当前定义范围已完成）：
 
 - 已支持 `trigger follow-up` / `trigger review` 快捷入口
 - Trigger 已支持 `intent`、`thread_id`、`note`
 - 已支持 `msg threads` 查看任务线程总览
 - 已支持 `shared` 的 `focus/thread/tag` 绑定与过滤
 - 已支持 `reflect summary` 生成任务级摘要
-- 已支持最小 `Trigger Action Executor`，可将 pending fire 执行成 `pending-task.json`
+- 已支持 `Trigger Action Executor`
+- 已支持 `pending_task / message / room / noop` adapter
+- 已支持显式 handoff schema，把 shared-context / recent messages / reflection summary 传给下游
+- 已支持 `skipped / failed` 执行结果，adapter 配置错误不会误消费 fire
 
 ### Phase C：评价和信誉层
 

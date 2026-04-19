@@ -14,11 +14,13 @@
 - watcher 可直接消费的全局索引
 - 仓库内可见的 `workspace/bin/atf-watcher.cjs`
 - 最小 `Trigger Action Executor`
+- `pending_task / message / room / noop` adapter
+- 显式 `handoff` payload
 
 当前仓库里还没有：
 
 - 常驻实时执行引擎
-- 更丰富的 Trigger Action Adapter（直达 session / bot / room）
+- 更丰富的 Trigger Action Adapter（直达 session / bot）
 - 分布式 broker / relay / websocket 层
 
 所以当前推荐的最小接法已经不是“手写 watcher 原型”，而是直接跑这条链：
@@ -26,10 +28,10 @@
 1. `trigger scan-all`
 2. `pending-trigger-fires.json` / `trigger-inboxes/*.json`
 3. `trigger execute-pending`
-4. `pending-task.json` / `trigger-executions/*.json`
+4. `pending-task.json` / `messages/*.json` / `trigger-executions/*.json`
 5. `reflect from-fire`
 
-默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`，同时把 execution 记录写进 `trigger-executions/`。
+默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`，同时把 execution 记录写进 `trigger-executions/`。如果显式使用 `mode=message` 或 `mode=room`，则会生成 `handoff` 消息，而不是任务文件信号。
 
 ## 2. 仓库内可见的 watcher v1
 
@@ -50,7 +52,7 @@ npm run atf:watcher -- --agent f0x --executor watcher-v1
 
 - `--agent <name>` 只执行某个 agent 的 pending fires
 - `--executor <name>` execution record 里的执行者名字
-- `--mode <mode>` 强制执行模式，当前最常用是 `pending_task`
+- `--mode <mode>` 强制执行模式，支持 `pending_task|message|room|noop`
 - `--limit <n>` 限制本轮执行数量
 - `--at <ISO>` 用指定时间运行 scan
 - `--note <text>` 附加 execution note
@@ -110,6 +112,8 @@ node workspace/bin/atf-watcher.cjs --agent f0x --executor watcher-v1
 
 ```bash
 node atf-cli.js trigger execute-pending f0x executor=watcher-v1 limit=20
+node atf-cli.js trigger execute-pending f0x executor=adapter-message mode=message
+node atf-cli.js trigger execute-pending pinchymeow executor=adapter-room mode=room room=design
 node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次触发有效
 ```
 
@@ -120,6 +124,7 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 - `ATF_DATA_DIR/pending-trigger-fires.json`
 - `ATF_DATA_DIR/trigger-inboxes/<agent>.json`
 - `<taskDir>/pending-task.json`
+- `<taskDir>/messages/*.json`
 - `<taskDir>/trigger-executions/*.json`
 
 含义：
@@ -130,6 +135,8 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
   单 agent 待处理 fire 视图，适合 agent 自己轮询
 - `pending-task.json`
   当前最小执行模式的落地交付物
+- `messages/*.json`
+  `message / room` adapter 的 handoff 投递物
 - `trigger-executions/*.json`
   fire 的执行审计记录
 
@@ -211,6 +218,21 @@ node atf-cli.js trigger executions T-001
 - `pending-task.json` 生成
 - `trigger-executions/*.json` 生成
 
+Adapter smoke：
+
+```bash
+node atf-cli.js trigger execute-pending f0x executor=adapter-message mode=message
+node atf-cli.js trigger review T-001 pinchymeow 1s thread=room:design
+node atf-cli.js trigger execute-pending pinchymeow executor=adapter-room
+node atf-cli.js trigger execute-pending f0x executor=adapter-skip mode=room
+```
+
+通过标准：
+
+- `message` 模式会生成 `handoff` 消息并投给 agent
+- `room` 模式会生成 `room:<name>` 线程消息
+- 缺少 room 参数时得到 `skipped`，fire 仍保持 `pending`
+
 ## 8. 当前边界
 
 这份文档描述的是当前版本的最小可用闭环，不代表已经有完整 watcher 平台。
@@ -218,7 +240,7 @@ node atf-cli.js trigger executions T-001
 还没做的仍然包括：
 
 - 更完整的 cron parser
-- 更丰富的 Trigger Action Adapter（直达 agent session / bot / room）
+- 更丰富的 Trigger Action Adapter（直达 agent session / bot）
 - 多节点 / 多 gateway 分布式路由
 - 常驻实时 runtime
 

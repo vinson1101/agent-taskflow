@@ -28,6 +28,8 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - 已可读取 `ATF_DATA_DIR/pending-trigger-fires.json`
 - 已可读取 `ATF_DATA_DIR/trigger-inboxes/*.json`
 - 默认执行模式会把 pending fire 落成 `pending-task.json`
+- 已支持 `pending_task / message / room / noop` 4 种 adapter mode
+- 已支持显式 `handoff` payload，把任务/上下文/反思传给 adapter
 - 同时会写入 `trigger-executions/` 审计记录
 - 本地隔离 smoke 已通过，不会破坏既有 `pending-task / timeout / DLQ / delivery` 主链
 
@@ -53,7 +55,10 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - Trigger firing 的创建、列出、消费、忽略
 - `trigger-executions/` 目录
 - 已支持 `trigger execute` / `trigger execute-pending` / `trigger executions`
-- 最小执行模式已可把 pending fire 落成 `pending-task.json`
+- 已支持 `pending_task / message / room / noop`
+- pending fire 已可执行成 `pending-task.json`、agent message 或 room thread message
+- 已支持显式 handoff schema（shared-context / recent messages / reflection summary）
+- 已支持 execution 的 `dispatched / skipped / failed` 结果
 - Agent 维度的 Trigger inbox
 - `ATF_DATA_DIR/pending-trigger-fires.json`
 - `ATF_DATA_DIR/trigger-inboxes/*.json`
@@ -97,9 +102,9 @@ ATF 当前还不是：
 - 依赖 OpenClaw heartbeat 和 cron 扫描
 - 不是实时事件驱动
 - 扫描间隔较长，不适合即时任务
-- 已有最小任务线程对象和线程总览，但还没有完整讨论房间 / 广播模型
+- 已有最小任务线程对象、线程总览和 room adapter，但还没有完整广播 / 订阅模型
 - 已有最小 Agent-to-Agent 消息模型，但还没有跨节点通信层
-- Trigger 执行器目前只有 `pending_task / message / noop` 最小模式，还没有更丰富的 adapter
+- Trigger 执行器目前已支持 `pending_task / message / room / noop`，但还没有直达 session / bot 的 adapter
 - 评价、信誉、激励尚未闭环
 
 注：
@@ -131,7 +136,7 @@ ATF 的价值已经不只是“记录任务”，而是：
 
 ## Phase B 当前进展
 
-`Phase B / 协作自治层` 已启动，当前第一批已落地：
+`Phase B / 协作自治层` 已按当前定义范围完成：
 
 - Agent 可直接创建 `follow-up / review` 语义 Trigger
 - Trigger 可显式绑定 `thread_id`
@@ -140,3 +145,6 @@ ATF 的价值已经不只是“记录任务”，而是：
 - reflection 已可直接产出任务级摘要
 - pending fire 已可直接执行并沉淀 execution record
 - 仓库内可见 watcher v1 已可直接跑 `scan-all -> execute-pending`
+- `pending_task / message / room / noop` adapter 已落地
+- handoff schema 已显式传递 shared context / thread context / reflection summary
+- execution 失败模型已落地，不会因 adapter 配置错误误消费 fire

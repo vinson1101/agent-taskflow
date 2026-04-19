@@ -217,12 +217,61 @@ node atf-cli.js trigger inbox f0x T-001
 ```bash
 node atf-cli.js trigger execute T-001 TGF-xxx
 node atf-cli.js trigger execute T-001 TGF-xxx executor=watcher-v1 mode=pending_task
+node atf-cli.js trigger execute T-001 TGF-xxx executor=adapter-message mode=message
+node atf-cli.js trigger execute T-001 TGF-xxx executor=adapter-room mode=room room=design
 node atf-cli.js trigger execute-pending
 node atf-cli.js trigger execute-pending f0x
 node atf-cli.js trigger execute-pending f0x executor=watcher-v1 limit=10
+node atf-cli.js trigger execute-pending f0x executor=adapter-message mode=message
+node atf-cli.js trigger execute-pending pinchymeow executor=adapter-room mode=room room=design
 node atf-cli.js trigger executions T-001
 node atf-cli.js trigger executions T-001 TGF-xxx
 ```
+
+Adapter 说明：
+
+- `pending_task`
+  默认模式，生成 `pending-task.json`
+- `message`
+  生成任务内 `handoff` 消息，默认投给 `owner_agent`
+- `room`
+  生成 `room:<name>` 线程消息，适合 review / 多人可见场景
+- `noop`
+  只写 execution record，不做实际投递
+
+额外参数：
+
+- `to=agent`
+  覆盖 `message` 模式的目标 agent
+- `thread=x`
+  覆盖目标线程
+- `room=x`
+  显式指定 room，等价于 `thread=room:x`
+
+显式 handoff：
+
+- `pending_task`、`message`、`room` 三种模式都会生成 `handoff`
+- handoff 内包含任务描述、focus、trigger/fire 元数据、shared-context、最近线程消息、reflection 摘要
+- specialist / adapter 不再假设共享上下文，而是拿显式 handoff
+
+失败模型：
+
+- `dispatched`
+  已成功投递并结算 fire
+- `skipped`
+  参数不足或策略拒绝执行，fire 保持 `pending`
+- `failed`
+  adapter 执行失败，fire 保持 `pending`
+
+示例：
+
+```bash
+node atf-cli.js trigger execute-pending f0x executor=adapter-message mode=message
+node atf-cli.js trigger execute-pending pinchymeow executor=adapter-room mode=room room=design
+node atf-cli.js trigger execute-pending f0x executor=adapter-skip mode=room
+```
+
+最后一个例子会得到 `skipped`，因为它没有提供 `room=<name>`，同时 fire 不会被误消费。
 
 消费或忽略：
 

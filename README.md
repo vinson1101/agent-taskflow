@@ -81,8 +81,8 @@ node atf-cli.js trigger show <taskId> <triggerId>             # 查看 Trigger
 node atf-cli.js trigger update <taskId> <triggerId> <status>  # 更新 Trigger
 node atf-cli.js trigger fire <taskId> <triggerId> <sourceType> [ref=...] [note] # 手动记录 Trigger firing
 node atf-cli.js trigger fires <taskId> [triggerId] [status]   # 查看 Trigger firing 记录
-node atf-cli.js trigger execute <taskId> <fireId> [executor] [mode=pending_task|message|noop] [note=x] # 执行单条 pending fire
-node atf-cli.js trigger execute-pending [agent] [executor=x] [mode=x] [limit=N] [note=x] # 批量执行 pending fires
+node atf-cli.js trigger execute <taskId> <fireId> [executor] [mode=pending_task|message|room|noop] [note=x] [to=agent] [thread=x] [room=x] # 执行单条 pending fire
+node atf-cli.js trigger execute-pending [agent] [executor=x] [mode=x] [limit=N] [note=x] [to=agent] [thread=x] [room=x] # 批量执行 pending fires
 node atf-cli.js trigger executions <taskId> [fireId]          # 查看 Trigger execution 记录
 node atf-cli.js trigger consume <taskId> <fireId> <consumer> [result] # 标记 Trigger firing 已消费
 node atf-cli.js trigger ignore <taskId> <fireId> <consumer> [reason] # 标记 Trigger firing 已忽略
@@ -121,6 +121,15 @@ npm run atf:watcher:dry -- --agent f0x
 2. 调用 `node atf-cli.js trigger execute-pending`
 
 默认执行模式仍是 `pending_task`，也就是把 pending fire 落成任务目录下的 `pending-task.json`，同时写入 `trigger-executions/` 审计记录。
+
+当前已经支持 4 种 adapter / mode：
+
+- `pending_task`
+- `message`
+- `room`
+- `noop`
+
+执行器现在会显式生成 `handoff` payload，把任务、focus、shared-context、最近消息、reflection 摘要一起传给下游 adapter。`room` 模式要求 `room=<name>` 或 `thread=room:<name>`；缺参时会记成 `skipped`，fire 保持 `pending`，不会误消费。
 
 ---
 
@@ -173,12 +182,15 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ reflect summary 任务级摘要
 - ✅ Trigger Action Executor 最小版（`execute / execute-pending / executions`）
 - ✅ 仓库内可见 watcher v1（`workspace/bin/atf-watcher.cjs`）
+- ✅ Trigger Action Adapter 第一批（`pending_task / message / room / noop`）
+- ✅ 显式 handoff schema（shared context / recent messages / reflection summary）
+- ✅ execution failure model（`dispatched / skipped / failed`）
 - ✅ learnings-promote.cjs（→ MEMORY）
 - ✅ 岚遥机制（learnings/ 即时记录 + promote）
 
 ## 未完成 / 待优化
 
-- [ ] **Trigger Action Adapter 扩展** — 已有最小执行器并可落成 `pending-task.json`，但还没有直接触达 agent session / bot / room 的更多 adapter
+- [ ] **Trigger Action Adapter 扩展** — `pending_task / message / room` 已落地，但还没有直接触达 agent session / bot 的 adapter
 - [ ] **learnings → lessons 合并** — 已存在 `memory/lessons/`，learnings 机制是重复的，应迁移到 lessons
 - [ ] **简化 watcher** — 投递确认、delivery-history、pending-decisions 复杂度过高，简化回基本超时 DLQ 即可
 - [ ] **block/decide/revise 命令移除** — 设计过重，用 `update <status>` 代替即可

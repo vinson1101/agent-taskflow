@@ -431,12 +431,14 @@ function main() {
   const launchStatusLeased = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
   if (launcherRun.leased !== 1) throw new Error(`expected launcher leased=1, got ${launcherRun.leased}`);
   if (launcherRun.status !== 'completed') throw new Error(`expected launcher run status completed, got ${launcherRun.status}`);
+  if (!launcherRun.audit_path) throw new Error('expected launcher run output to include audit_path');
   if (leasedLaunchRequest.status !== 'leased') throw new Error(`expected launch request leased, got ${leasedLaunchRequest.status}`);
   if (launchStatusLeased.status !== 'leased') throw new Error(`expected launch status leased, got ${launchStatusLeased.status}`);
   assertIncludes(launcherRuns, launcherDryRun.run_id, 'launcher runs');
   assertIncludes(launcherRuns, launcherRun.run_id, 'launcher runs');
   if (latestLauncherRun.run_id !== launcherRun.run_id) throw new Error(`expected latest launcher run to be ${launcherRun.run_id}, got ${latestLauncherRun.run_id}`);
   if (latestLauncherRun.schema !== 'atf.launcher-run.v1') throw new Error(`expected latest launcher run schema, got ${latestLauncherRun.schema}`);
+  if (!latestLauncherRun.audit_path) throw new Error('expected latest launcher run to persist audit_path');
   if (launcherWatcherStatus.status !== 'ok') throw new Error(`expected launcher watcher status ok, got ${launcherWatcherStatus.status}`);
   if (launcherWatcherStatus.latest_run?.run_id !== launcherRun.run_id) throw new Error(`expected launcher watcher latest run ${launcherRun.run_id}, got ${launcherWatcherStatus.latest_run?.run_id}`);
   if (launcherWatcherStatus.recent_runs.total !== 2) throw new Error(`expected launcher watcher recent run total=2, got ${launcherWatcherStatus.recent_runs.total}`);

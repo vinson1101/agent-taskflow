@@ -70,13 +70,15 @@ function generateRunId() {
 }
 
 function persistSummary(summary) {
+  const auditPath = launcherRunPath(summary.run_id);
   const payload = {
     schema: 'atf.launcher-run.v1',
     ...summary,
+    audit_path: summary.audit_path || auditPath,
   };
-  writeJson(launcherRunPath(summary.run_id), payload);
+  writeJson(auditPath, payload);
   writeJson(launcherLatestPath(), payload);
-  return launcherRunPath(summary.run_id);
+  return auditPath;
 }
 
 function parseArgs(argv) {

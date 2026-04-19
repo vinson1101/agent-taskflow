@@ -2404,6 +2404,78 @@ function buildReviewCoverageStats(options = {}) {
   };
 }
 
+function buildRecentTaskWindow(options = {}) {
+  const days = Number.isInteger(options.days) && options.days >= 0 ? options.days : 1;
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 10;
+  const rows = collectTaskStatsRows({
+    agent: options.agent,
+    type: options.type,
+    status: options.status,
+    review: options.review,
+    max_age: days,
+  });
+  const statusCounts = new Map();
+  const feedbackCounts = new Map();
+  let selfReviewed = 0;
+  let completed = 0;
+  let delivered = 0;
+
+  for (const row of rows) {
+    statusCounts.set(row.status, (statusCounts.get(row.status) || 0) + 1);
+    feedbackCounts.set(row.feedback_state, (feedbackCounts.get(row.feedback_state) || 0) + 1);
+    if (row.self_review_count) selfReviewed += 1;
+    if (row.status === 'delivered') delivered += 1;
+    if (row.status === 'completed') completed += 1;
+  }
+
+  return {
+    days,
+    total: rows.length,
+    completed,
+    delivered,
+    self_reviewed: selfReviewed,
+    pending: feedbackCounts.get('pending') || 0,
+    reviewed: (feedbackCounts.get('approved') || 0) + (feedbackCounts.get('needs_revision') || 0) + (feedbackCounts.get('rejected') || 0) + (feedbackCounts.get('reviewed') || 0),
+    status_counts: [...statusCounts.entries()]
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => a.status.localeCompare(b.status)),
+    feedback_counts: [...feedbackCounts.entries()]
+      .map(([state, count]) => ({ state, count }))
+      .sort((a, b) => a.state.localeCompare(b.state)),
+    rows: rows.slice(0, limit),
+  };
+}
+
+function buildStaleBacklogStats(options = {}) {
+  const days = Number.isInteger(options.days) && options.days >= 0 ? options.days : 4;
+  const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 10;
+  const reviewStats = buildReviewCoverageStats({
+    agent: options.agent,
+    type: options.type,
+    status: options.status,
+    min_age: days,
+    top,
+  });
+  const tasks = collectPendingReviewTasks({
+    agent: options.agent,
+    type: options.type,
+    status: options.status,
+    min_age: days,
+  }).sort((a, b) => {
+    const ageA = Number.isInteger(a.age_days) ? a.age_days : -1;
+    const ageB = Number.isInteger(b.age_days) ? b.age_days : -1;
+    if (ageB !== ageA) return ageB - ageA;
+    return (a.updated_at || '').localeCompare(b.updated_at || '');
+  });
+
+  return {
+    days,
+    pending: tasks.length,
+    review_stats: reviewStats,
+    tasks: tasks.slice(0, top),
+  };
+}
+
 function formatAgentReputationSummary(agent) {
   if (!agent) return 'no data';
   return [
@@ -2841,6 +2913,8 @@ ATF CLI v2
   atf status <taskId>                    查看状态（+投递状态+DRI）
   atf stats summary                      查看整体完成/反馈统计
   atf stats agents                       查看 agent 完成度/反馈统计
+  atf stats recent [days=N] [agent=x] [type=x] [status=x] [review=x] [limit=N]  查看最近窗口任务活动
+  atf stats stale [days=N] [agent=x] [type=x] [status=completed|delivered] [top=N]  查看 stale review backlog
   atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N]  查看任务级统计
   atf stats reviews [agent=x] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看 review 覆盖率和 backlog 汇总
   atf stats types                        查看任务类型维度统计
@@ -4382,6 +4456,193 @@ switch (cmd) {
       for (const typeStat of typeStats) {
         const completion = typeStat.completion_rate === null ? '-' : `${roundNumber(typeStat.completion_rate * 100, 1)}%`;
         console.log(`${typeStat.type.padEnd(16)} ${String(typeStat.total).padEnd(5)} ${String(typeStat.completed).padEnd(10)} ${String(typeStat.delivered).padEnd(10)} ${String(completion).padEnd(11)} ${String(typeStat.reviews).padEnd(7)} ${String(typeStat.avg_overall ?? '-').padEnd(11)} ${String(typeStat.outcomes.approved).padEnd(9)} ${String(typeStat.outcomes.needs_revision).padEnd(9)} ${String(typeStat.outcomes.rejected).padEnd(9)} ${String(typeStat.pending_reviews).padEnd(7)}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'recent') {
+      let days = 1;
+      let agentFilter = null;
+      let typeFilter = null;
+      let statusFilter = null;
+      let reviewFilter = null;
+      let limit = 10;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('days=')) {
+          const value = normalizeAgeFilterValue(part.substring('days='.length));
+          if (value === undefined) {
+            console.error('stats recent days 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          days = value ?? 1;
+          continue;
+        }
+        if (part.startsWith('agent=')) {
+          agentFilter = part.substring('agent='.length);
+          continue;
+        }
+        if (part.startsWith('type=')) {
+          typeFilter = normalizeTaskTypeValue(part.substring('type='.length));
+          continue;
+        }
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('review=')) {
+          reviewFilter = String(part.substring('review='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('stats recent limit 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf stats recent [days=N] [agent=x] [type=x] [status=x] [review=x] [limit=N]');
+        break;
+      }
+      const recent = buildRecentTaskWindow({
+        days,
+        agent: agentFilter,
+        type: typeFilter,
+        status: statusFilter,
+        review: reviewFilter,
+        limit,
+      });
+      const filterLabel = [
+        `days=${recent.days}`,
+        agentFilter ? `agent=${agentFilter}` : null,
+        typeFilter ? `type=${typeFilter}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        reviewFilter ? `review=${reviewFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      console.log(`\nRecent Activity  |  ${filterLabel}\n`);
+      console.log(`tasks=${recent.total}  completed=${recent.completed}  delivered=${recent.delivered}  reviewed=${recent.reviewed}  pending=${recent.pending}  self_reviewed=${recent.self_reviewed}`);
+      if (recent.status_counts.length) {
+        console.log('\nstatus counts:');
+        for (const bucket of recent.status_counts) {
+          console.log(`- ${bucket.status}: ${bucket.count}`);
+        }
+      }
+      if (recent.feedback_counts.length) {
+        console.log('\nfeedback counts:');
+        for (const bucket of recent.feedback_counts) {
+          console.log(`- ${bucket.state}: ${bucket.count}`);
+        }
+      }
+      if (recent.rows.length) {
+        console.log('\nrecent tasks:');
+        console.log('task     status      agent           type             feedback        self  age  updated');
+        console.log('-'.repeat(108));
+        for (const row of recent.rows) {
+          console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.self_review_count || 0).padEnd(5)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
+          console.log(`  ${row.description}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'stale') {
+      let days = 4;
+      let agentFilter = null;
+      let typeFilter = null;
+      let statusFilter = null;
+      let top = 10;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('days=')) {
+          const value = normalizeAgeFilterValue(part.substring('days='.length));
+          if (value === undefined) {
+            console.error('stats stale days 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          days = value ?? 4;
+          continue;
+        }
+        if (part.startsWith('agent=')) {
+          agentFilter = part.substring('agent='.length);
+          continue;
+        }
+        if (part.startsWith('type=')) {
+          typeFilter = normalizeTaskTypeValue(part.substring('type='.length));
+          continue;
+        }
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('top=')) {
+          const value = Number(part.substring('top='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('stats stale top 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          top = value;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf stats stale [days=N] [agent=x] [type=x] [status=completed|delivered] [top=N]');
+        break;
+      }
+      if (statusFilter && !['completed', 'delivered'].includes(statusFilter)) {
+        console.error('stats stale status 只支持 completed|delivered');
+        break;
+      }
+      const stale = buildStaleBacklogStats({
+        days,
+        agent: agentFilter,
+        type: typeFilter,
+        status: statusFilter,
+        top,
+      });
+      const filterLabel = [
+        `days=${stale.days}`,
+        agentFilter ? `agent=${agentFilter}` : null,
+        typeFilter ? `type=${typeFilter}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        top ? `top=${top}` : null,
+      ].filter(Boolean).join('  ');
+      console.log(`\nStale Review Backlog  |  ${filterLabel}\n`);
+      console.log(`stale_pending=${stale.pending}  eligible=${stale.review_stats.eligible_tasks}  reviewed=${stale.review_stats.reviewed_tasks}  self_reviewed=${stale.review_stats.self_reviewed_tasks}  external_review_coverage=${formatRate(stale.review_stats.external_review_coverage)}${stale.review_stats.oldest_pending_age_days !== null ? `  oldest_age=${stale.review_stats.oldest_pending_age_days}d` : ''}`);
+      if (stale.review_stats.by_agent.length) {
+        console.log('\nstale by agent:');
+        for (const bucket of stale.review_stats.by_agent) {
+          console.log(`- ${bucket.agent}: pending=${bucket.pending}  completed=${bucket.completed}  delivered=${bucket.delivered}  oldest=${bucket.oldest_updated_at || '-'}`);
+        }
+      }
+      if (stale.review_stats.by_type.length) {
+        console.log('\nstale by type:');
+        for (const bucket of stale.review_stats.by_type) {
+          console.log(`- ${bucket.type}: pending=${bucket.pending}  completed=${bucket.completed}  delivered=${bucket.delivered}`);
+        }
+      }
+      if (stale.tasks.length) {
+        console.log('\nstale tasks:');
+        console.log('task     age  agent           status      type             updated');
+        console.log('-'.repeat(88));
+        for (const task of stale.tasks) {
+          console.log(`${task.task_id.padEnd(8)} ${String(Number.isInteger(task.age_days) ? `${task.age_days}d` : '-').padEnd(4)} ${String(task.reviewee || '-').padEnd(15)} ${task.status.padEnd(11)} ${String(task.task_type || 'untyped').padEnd(16)} ${task.updated_at || '-'}`);
+          console.log(`  ${task.description}`);
+        }
       }
       console.log('');
       break;

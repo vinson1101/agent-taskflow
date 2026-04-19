@@ -105,6 +105,35 @@ function assertIncludes(output, fragment, label) {
   }
 }
 
+function assertNotIncludes(output, fragment, label) {
+  if (output.includes(fragment)) {
+    throw new Error(`${label} unexpectedly contained fragment: ${fragment}\n--- output ---\n${output}`);
+  }
+}
+
+function resolveTaskDir(taskId, env) {
+  const entries = fs.readdirSync(env.ATF_TASKS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const ctxFile = path.join(env.ATF_TASKS_DIR, entry.name, 'ctx.json');
+    if (!fs.existsSync(ctxFile)) continue;
+    const ctx = JSON.parse(fs.readFileSync(ctxFile, 'utf8'));
+    if (ctx.task_id === taskId || ctx.short_id === taskId) {
+      return path.join(env.ATF_TASKS_DIR, entry.name);
+    }
+  }
+  throw new Error(`task dir not found for ${taskId}`);
+}
+
+function setTaskUpdatedAt(taskId, env, updatedAt, createdAt = updatedAt) {
+  const taskDir = resolveTaskDir(taskId, env);
+  const ctxFile = path.join(taskDir, 'ctx.json');
+  const ctx = JSON.parse(fs.readFileSync(ctxFile, 'utf8'));
+  ctx.updated_at = updatedAt;
+  ctx.created_at = createdAt;
+  fs.writeFileSync(ctxFile, `${JSON.stringify(ctx, null, 2)}\n`);
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   safeResetDir(smokeRoot);
@@ -137,14 +166,25 @@ function main() {
   runCli(['update', pendingTaskId, 'completed'], env, options);
   const selfReview = runCli(['review', 'add', pendingTaskId, 'f0x', 'f0x', 'approved', 'self check only', 'type=task', 'overall=4', 'quality=4', 'timeliness=4', 'communication=4', 'ownership=4'], env, options);
 
+  const createStale = runCli(['create', 'Phase C stale backlog demo', 'type=shadow', 'difficulty=1', 'priority=low'], env, options);
+  const staleTaskId = extractTaskId(createStale);
+  runCli(['assign', staleTaskId, 'f0x'], env, options);
+  runCli(['update', staleTaskId, 'completed'], env, options);
+  const staleUpdatedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+  setTaskUpdatedAt(staleTaskId, env, staleUpdatedAt);
+
   const statsSummary = runCli(['stats', 'summary'], env, options);
+  const statsRecent = runCli(['stats', 'recent'], env, options);
+  const statsRecentF0x = runCli(['stats', 'recent', 'days=1', 'agent=f0x', 'limit=5'], env, options);
+  const statsStale = runCli(['stats', 'stale'], env, options);
+  const statsStaleF0x = runCli(['stats', 'stale', 'agent=f0x', 'status=completed', 'top=5'], env, options);
   const statsTasks = runCli(['stats', 'tasks'], env, options);
   const statsTasksFiltered = runCli(['stats', 'tasks', 'type=research', 'review=pending', 'limit=1'], env, options);
   const statsTasksAgeFiltered = runCli(['stats', 'tasks', 'review=pending', 'max_age=0', 'limit=1'], env, options);
-  const statsTasksTooOld = runCli(['stats', 'tasks', 'review=pending', 'min_age=1'], env, options);
+  const statsTasksTooOld = runCli(['stats', 'tasks', 'review=pending', 'min_age=6'], env, options);
   const statsReviews = runCli(['stats', 'reviews'], env, options);
   const statsReviewsAgeFiltered = runCli(['stats', 'reviews', 'max_age=0'], env, options);
-  const statsReviewsTooOld = runCli(['stats', 'reviews', 'min_age=1'], env, options);
+  const statsReviewsTooOld = runCli(['stats', 'reviews', 'min_age=6'], env, options);
   const statsTypes = runCli(['stats', 'types'], env, options);
   const statsAgents = runCli(['stats', 'agents'], env, options);
   const statsShowF0x = runCli(['stats', 'show', 'f0x'], env, options);
@@ -154,15 +194,26 @@ function main() {
   const reviewPending = runCli(['review', 'pending'], env, options);
   const reviewPendingFiltered = runCli(['review', 'pending', 'type=research', 'status=completed', 'limit=1'], env, options);
   const reviewPendingAgeFiltered = runCli(['review', 'pending', 'max_age=0', 'limit=1'], env, options);
-  const reviewPendingTooOld = runCli(['review', 'pending', 'min_age=1'], env, options);
+  const reviewPendingTooOld = runCli(['review', 'pending', 'min_age=6'], env, options);
 
-  assertIncludes(statsSummary, 'tasks: total=3', 'stats summary');
+  assertIncludes(statsSummary, 'tasks: total=4', 'stats summary');
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
   assertIncludes(statsSummary, 'self_reviewed=1', 'stats summary');
-  assertIncludes(statsSummary, 'pending_reviews=1', 'stats summary');
-  assertIncludes(statsSummary, 'stale_pending_reviews=0', 'stats summary');
-  assertIncludes(statsSummary, 'oldest_pending_age=0d', 'stats summary');
+  assertIncludes(statsSummary, 'pending_reviews=2', 'stats summary');
+  assertIncludes(statsSummary, 'stale_pending_reviews=1', 'stats summary');
+  assertIncludes(statsSummary, 'oldest_pending_age=5d', 'stats summary');
+  assertIncludes(statsRecent, 'tasks=3  completed=2  delivered=1  reviewed=2  pending=1  self_reviewed=1', 'stats recent');
+  assertIncludes(statsRecent, pendingTaskId, 'stats recent');
+  assertNotIncludes(statsRecent, staleTaskId, 'stats recent');
+  assertIncludes(statsRecentF0x, 'agent=f0x', 'stats recent f0x');
+  assertIncludes(statsRecentF0x, pendingTaskId, 'stats recent f0x');
+  assertIncludes(statsStale, 'stale_pending=1  eligible=1  reviewed=0  self_reviewed=0', 'stats stale');
+  assertIncludes(statsStale, staleTaskId, 'stats stale');
+  assertIncludes(statsStale, 'shadow', 'stats stale');
+  assertIncludes(statsStaleF0x, 'agent=f0x', 'stats stale f0x');
+  assertIncludes(statsStaleF0x, staleTaskId, 'stats stale f0x');
   assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
+  assertIncludes(statsTasks, staleTaskId, 'stats tasks');
   assertIncludes(statsTasks, 'approved', 'stats tasks');
   assertIncludes(statsTasks, 'self', 'stats tasks');
   assertIncludes(statsTasks, 'age', 'stats tasks');
@@ -171,8 +222,9 @@ function main() {
   assertIncludes(statsTasksAgeFiltered, pendingTaskId, 'age filtered stats tasks');
   assertIncludes(statsTasksAgeFiltered, 'max_age=0', 'age filtered stats tasks');
   assertIncludes(statsTasksTooOld, '暂无任务统计结果', 'too old stats tasks');
-  assertIncludes(statsReviews, 'eligible=3  reviewed=2  self_reviewed=1  pending=1', 'stats reviews');
+  assertIncludes(statsReviews, 'eligible=4  reviewed=2  self_reviewed=1  pending=2', 'stats reviews');
   assertIncludes(statsReviews, '0-1d: 1', 'stats reviews');
+  assertIncludes(statsReviews, '4-7d: 1', 'stats reviews');
   assertIncludes(statsReviews, 'f0x', 'stats reviews');
   assertIncludes(statsReviewsAgeFiltered, 'max_age=0', 'age filtered stats reviews');
   assertIncludes(statsReviewsAgeFiltered, 'pending=1', 'age filtered stats reviews');
@@ -185,9 +237,10 @@ function main() {
   assertIncludes(statsShowF0x, 'completion=', 'stats show f0x');
   assertIncludes(creditsList, 'completion', 'credits list');
   assertIncludes(creditsShowPinchy, 'completion: completed=0  delivered=1', 'credits show pinchymeow');
-  assertIncludes(creditsShowF0x, 'total_credits: 23', 'credits show f0x');
+  assertIncludes(creditsShowF0x, 'total_credits: 29', 'credits show f0x');
   assertIncludes(selfReview, 'self_review=true', 'self review add');
   assertIncludes(reviewPending, pendingTaskId, 'review pending');
+  assertIncludes(reviewPending, staleTaskId, 'review pending');
   assertIncludes(reviewPending, 'type=research', 'review pending');
   assertIncludes(reviewPending, 'age=0d', 'review pending');
   assertIncludes(reviewPending, 'self_reviews=1', 'review pending');

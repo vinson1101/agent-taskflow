@@ -406,6 +406,10 @@ node atf-cli.js credits show f0x
 ```bash
 node atf-cli.js stats summary
 node atf-cli.js stats agents
+node atf-cli.js stats recent
+node atf-cli.js stats recent days=1 agent=f0x limit=10
+node atf-cli.js stats stale
+node atf-cli.js stats stale days=4 agent=f0x status=completed top=10
 node atf-cli.js stats tasks
 node atf-cli.js stats tasks type=research review=pending limit=5
 node atf-cli.js stats tasks review=pending min_age=4 limit=20
@@ -442,6 +446,8 @@ node atf-cli.js assign recommend T-001 top=5
 - `task_profile` 当前只做内部任务画像，支持 `type / difficulty / priority / tags`
 - `status` 会直接显示任务画像、review 摘要，以及 assignee 的 reputation / credits 摘要
 - `stats` 是更直接的内部统计入口，优先服务完成度和反馈查看
+- `stats recent` 用于看最近 1 天或最近 N 天的任务活动窗口，可按 agent / type / status / review 过滤
+- `stats stale` 用于直接切出 4 天以上的 pending review backlog，默认按最老任务优先展示
 - `stats tasks` 用于直接看任务级完成度、反馈状态和完成度积分
 - `stats tasks` 支持 `min_age=` / `max_age=`，可直接筛出 stale review backlog
 - `stats reviews` 用于看外部 review 覆盖率，以及待评价 backlog 在 agent / type / status / age 上的分布

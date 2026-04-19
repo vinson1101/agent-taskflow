@@ -285,6 +285,74 @@ function parseTaskProfileArgs(parts = []) {
   return { profile, descriptionTokens, errors, matched };
 }
 
+function parseProtocolTimeoutValue(raw, fieldName) {
+  const normalized = String(raw || '').trim().toLowerCase();
+  if (!normalized) return { error: `${fieldName} 不能为空` };
+  const durationSeconds = parseDurationSeconds(normalized);
+  if (durationSeconds !== null) return { value: durationSeconds };
+  const seconds = Number(normalized);
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    return { error: `${fieldName} 必须是正整数秒数，或像 40m / 2h 这样的时长` };
+  }
+  return { value: seconds };
+}
+
+function parseProtocolTimeoutArgs(parts = []) {
+  const protocol = {};
+  const remainingParts = [];
+  const errors = [];
+  let matched = false;
+
+  const consumeField = (fieldName, raw) => {
+    matched = true;
+    const parsed = parseProtocolTimeoutValue(raw, fieldName);
+    if (parsed.error) errors.push(parsed.error);
+    else protocol[fieldName] = parsed.value;
+  };
+
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (!part) continue;
+
+    if (part.startsWith('confirm_timeout=')) {
+      consumeField('confirm_timeout', part.substring('confirm_timeout='.length));
+      continue;
+    }
+    if (part.startsWith('final_timeout=')) {
+      consumeField('final_timeout', part.substring('final_timeout='.length));
+      continue;
+    }
+    if (part.startsWith('confirm-timeout=')) {
+      consumeField('confirm_timeout', part.substring('confirm-timeout='.length));
+      continue;
+    }
+    if (part.startsWith('final-timeout=')) {
+      consumeField('final_timeout', part.substring('final-timeout='.length));
+      continue;
+    }
+    if (part.startsWith('--confirm-timeout=')) {
+      consumeField('confirm_timeout', part.substring('--confirm-timeout='.length));
+      continue;
+    }
+    if (part.startsWith('--final-timeout=')) {
+      consumeField('final_timeout', part.substring('--final-timeout='.length));
+      continue;
+    }
+    if (part === '--confirm-timeout' || part === '--final-timeout') {
+      const fieldName = part === '--confirm-timeout' ? 'confirm_timeout' : 'final_timeout';
+      const raw = parts[i + 1];
+      if (raw === undefined) errors.push(`${fieldName} 缺少值`);
+      else consumeField(fieldName, raw);
+      i += 1;
+      continue;
+    }
+
+    remainingParts.push(part);
+  }
+
+  return { protocol, remainingParts, errors, matched };
+}
+
 
 const WEEKDAY_MAP = {
   sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
@@ -3455,8 +3523,8 @@ function initCtx(taskNum, description, options = {}) {
     sub_tasks: [],
     assigned_to: options.assigned_to || null,
     protocol: {
-      confirm_timeout: options.confirm_timeout || 300,
-      final_timeout: options.final_timeout || 7200,
+      confirm_timeout: options.confirm_timeout ?? 300,
+      final_timeout: options.final_timeout ?? 7200,
       retry_count: 0,
       max_retries: options.max_retries || 3,
       delivery_status: 'pending', // pending → delivered | failed
@@ -3507,7 +3575,7 @@ if (!cmd) {
   console.log(`
 ATF CLI v2
 用法:
-  atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b]  创建任务
+  atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b] [--confirm-timeout=40m] [--final-timeout=2h]  创建任务
   atf list                                列出所有任务
   atf status <taskId>                    查看状态（+投递状态+DRI）
   atf stats summary                      查看整体完成/反馈统计
@@ -3521,7 +3589,7 @@ ATF CLI v2
   atf stats show <agent>                 查看单个 agent 完成度/反馈统计
   atf profile <taskId>                   查看任务画像
   atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]  更新任务画像
-  atf assign <taskId> <agent>            指派
+  atf assign <taskId> <agent> [--confirm-timeout=40m] [--final-timeout=2h]  指派
   atf assign recommend <taskId> [top=N]  查看内部指派建议
   atf update <taskId> <status>           更新状态
   atf fan-out <taskId> <agent1,agent2>   fan-out 分发
@@ -3605,12 +3673,14 @@ switch (cmd) {
   case 'nextnum': console.log(`下一个编号: ${getNextTaskNum()}`); break;
 
   case 'create': {
-    const parsed = parseTaskProfileArgs(args);
+    const timeoutParsed = parseProtocolTimeoutArgs(args);
+    if (timeoutParsed.errors.length) { console.error(`❌ ${timeoutParsed.errors.join('；')}`); break; }
+    const parsed = parseTaskProfileArgs(timeoutParsed.remainingParts);
     if (parsed.errors.length) { console.error(`❌ ${parsed.errors.join('；')}`); break; }
     const description = parsed.descriptionTokens.join(' ');
-    if (!description) { console.error('用法: atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b]'); break; }
+    if (!description) { console.error('用法: atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b] [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
     const num = getNextTaskNum();
-    const { taskId, dirName, ctx } = initCtx(num, description, { task_profile: parsed.profile });
+    const { taskId, dirName, ctx } = initCtx(num, description, { task_profile: parsed.profile, ...timeoutParsed.protocol });
     console.log(`\n✅ 任务已创建: ${dirName}`);
     console.log(`   task_id: ${ctx.task_id}  |  status: ${ctx.status}`);
     console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
@@ -3720,12 +3790,16 @@ switch (cmd) {
       break;
     }
 
-    const [taskId, agent] = args;
-    if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent>'); break; }
+    const [taskId, agent, ...rest] = args;
+    const timeoutParsed = parseProtocolTimeoutArgs(rest);
+    if (timeoutParsed.errors.length) { console.error(`❌ ${timeoutParsed.errors.join('；')}`); break; }
+    if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent> [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
     ctx.assigned_to = agent; ctx.status = 'assigned';
     if (!ctx.protocol) ctx.protocol = {};
+    if (timeoutParsed.protocol.confirm_timeout !== undefined) ctx.protocol.confirm_timeout = timeoutParsed.protocol.confirm_timeout;
+    if (timeoutParsed.protocol.final_timeout !== undefined) ctx.protocol.final_timeout = timeoutParsed.protocol.final_timeout;
     ctx.protocol.delivery_status = 'pending';
     ctx.protocol.delivery_attempts = 0;
     writeCtx(taskId, ctx);
@@ -3740,12 +3814,17 @@ switch (cmd) {
       description: ctx.description,
       instructions: ctx.instructions || null,
       task_profile: getTaskProfile(ctx),
+      protocol: {
+        confirm_timeout: ctx.protocol.confirm_timeout,
+        final_timeout: ctx.protocol.final_timeout,
+      },
       created_by: ctx.assigned_to || 'pinchymeow',
       created_at: new Date().toISOString()
     };
     fs.writeFileSync(`${ws}/pending-task.json`, JSON.stringify(pending, null, 2));
     console.log(`✅ 已指派 ${taskId} → ${agent}`);
     console.log(`   pending-task.json → ${ws}/pending-task.json`);
+    console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
     if (hasTaskProfile(ctx)) console.log(`   task_profile: ${formatTaskProfileSummary(ctx)}`);
     const assigneeReputation = findAgentReputation(agent, loadReputationIndex());
     const assigneeCredits = findAgentCredits(agent, loadCreditsIndex());

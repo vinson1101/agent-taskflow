@@ -110,44 +110,60 @@ ATF 当前更适合定位为：
 
 **让多 Agent 可以稳定协作。**
 
-### 第二阶段：协作与管理层
+### 第二阶段：协作与自主对象层
 
 目标：
 
-- 让多 Agent 协作可见、可管、可复盘
+- 让多 Agent 协作不仅可见、可管、可复盘，还具备最小自主对象层
 
 重点：
 
 - 任务内消息线程
-- 更快的唤醒与轮询
 - shared context
+- Focus / Trigger Binding / Reflections
+- 更快的唤醒与轮询
+- watcher 执行链
 - review / reflection
-- SLA / reliability 统计
-- 决策与审批链路
 
 这一阶段的价值：
 
-**让多 Agent 协作可运营。**
+**让多 Agent 协作具备最小自主协议对象。**
 
-### 第三阶段：信誉与激励
+### 第三阶段：内部信誉与运营层
 
 目标：
 
-- 形成可信的评价与分配机制
+- 形成 review、credits、digest、backlog 的内部巡检闭环
 
 重点：
 
-- 评分模型
-- 任务结果验证
-- 信誉画像
-- 预算、记账、结算
-- 激励分配
+- review / credits / reputation
+- stats digest / stale / backlog
+- agent audit / register / remap
+- backlog aging 与日常巡检
 
 这一阶段的价值：
 
-**让多 Agent 协作具备经济层。**
+**让多 Agent 协作进入可运营、可巡检的内部管理状态。**
 
-### 第四阶段：市场化
+### 第四阶段：主动运营动作层
+
+目标：
+
+- 把已有的 Focus / Trigger / Message / Reflection / review 信号推进成主动动作
+
+重点：
+
+- stale backlog follow-up
+- pending review reminder
+- 基于 trigger / message / reflection 的任务自推进
+- digest / cleanup / follow-up 执行层
+
+这一阶段的价值：
+
+**让多 Agent 协作从“有对象”走向“有主动动作”。**
+
+### 第五阶段：市场化
 
 目标：
 
@@ -163,12 +179,12 @@ ATF 当前更适合定位为：
 
 这一阶段的价值：
 
-**让 ATF 从协作内核成长为协作市场基础设施。**
+**让 ATF 从内部协作控制层成长为协作市场基础设施。**
 
 ## 结论
 
 ATF 不需要一开始就直接盈利，但它应该朝“可形成商业基础设施”的方向设计。
 
-最现实的切口不是开放市场，而是：
+最现实的切口不是开放市场，也不是过早做激励结算，而是：
 
-**先成为多 Agent 团队的协作内核，再逐步长出控制台、信誉层和市场机制。**
+**先把多 Agent 团队的协作内核、自主对象层、内部巡检层和主动动作层做稳，再决定是否长出市场机制。**

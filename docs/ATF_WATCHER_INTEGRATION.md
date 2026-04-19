@@ -17,6 +17,8 @@
 - `pending_task / message / room / noop` adapter
 - 显式 `handoff` payload
 
+这条链已经可以视为 Clawith 式 `Self-Adaptive Triggering` 的轻量执行底座：Trigger 负责唤醒，watcher 负责扫描和执行，handoff / reflection 负责把动作结果沉淀回任务协议。
+
 当前仓库里还没有：
 
 - 常驻实时执行引擎
@@ -48,9 +50,14 @@ node workspace/bin/atf-watcher.cjs --agent f0x --dry-run
 npm run atf:watcher -- --agent f0x --executor watcher-v1
 ```
 
+前提：
+
+- `--agent <name>` 目标必须已经在 registry 里
+- 当前默认不再内置 `f0x` / `pinchymeow`，所以生产环境应先通过环境变量、`agents.json` 或 `agent register` 注册 agent
+
 当前支持的主要参数：
 
-- `--agent <name>` 只执行某个 agent 的 pending fires
+- `--agent <name>` 只执行某个 agent 的 pending fires；目标 agent 需要已注册
 - `--executor <name>` execution record 里的执行者名字
 - `--mode <mode>` 强制执行模式，支持 `pending_task|message|room|noop`
 - `--limit <n>` 限制本轮执行数量
@@ -244,4 +251,4 @@ node atf-cli.js trigger execute-pending f0x executor=adapter-skip mode=room
 - 多节点 / 多 gateway 分布式路由
 - 常驻实时 runtime
 
-但对当前阶段来说，仓库里的 watcher v1 已经足够支撑下一轮 `scan-all -> execute-pending` 集成测试。
+但对当前阶段来说，仓库里的 watcher v1 已经足够支撑 `scan-all -> execute-pending` 集成测试，并可作为下一阶段主动动作闭环的执行底座。

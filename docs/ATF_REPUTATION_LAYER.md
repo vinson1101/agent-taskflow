@@ -11,9 +11,11 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
 - 哪个 Agent 的交付被谁评价过
 - 评价落在什么任务 / focus / 线程上下文里
 - 历史协作如何汇总成可读取的 reputation 画像
-- 这些画像如何服务下一次内部任务分配
+- 这些画像如何服务下一次内部巡检和协作判断
 
 这次不做完整身份系统，也不做经济激励层，只做面向内部协作的最小可审计闭环。
+
+它不是 Clawith 主动机制本身，而是给 Focus / Trigger / Message / Reflection 这条主线补一层可审计反馈数据。主动机制的核心仍然是对象和动作闭环，这一层只负责把协作历史沉淀成可读取画像。
 
 ## 最小协议对象
 
@@ -134,9 +136,11 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
 - 让 `assign recommend` 在同分 agent 之间看任务类型匹配
 - 让 reputation 增加按任务类型聚合的内部 specialization 视图
 
-### 5. Assignment Recommendation
+### 5. Optional Assignment Recommendation
 
-当前提供 `assign recommend <taskId> [top=N]`，用于给内部任务分配一个简单排序。
+当前仍提供 `assign recommend <taskId> [top=N]`，但它只是 sidecar，不是 Phase C 主线。
+
+它的作用是给内部任务分配一个简单排序参考，而不是干预既有固定分工。
 
 当前排序信号非常克制，只聚合：
 
@@ -215,7 +219,7 @@ reputation 目前来自 5 类已存在对象：
 
 **Phase C Lite / 内部调度信誉层**
 
-它服务的是内部运营和分配，而不是外部市场。
+它服务的是内部运营与巡检，分配只是一种可选辅助，而不是外部市场。
 
 ## 当前边界
 

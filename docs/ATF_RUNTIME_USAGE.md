@@ -27,6 +27,19 @@ ATF 现在支持通过环境变量改写路径，不再强依赖 `/root/.opencla
 - `ATF_WORKSPACE_<AGENT>`
   任意 agent 的 workspace；设置后会自动进入注册集，例如 `ATF_WORKSPACE_HUNTMIND`
 
+Agent 注册前提：
+
+- 当前默认不再内置 `f0x` / `pinchymeow`
+- 如果你要直接照抄下面这些带 agent 名字的示例，先确保 agent 已经来自环境变量、`data/agents.json` 或 `agent register`
+
+例如：
+
+```bash
+node atf-cli.js agent list
+node atf-cli.js agent register f0x workspace=/root/.openclaw/workspace
+node atf-cli.js agent register pinchymeow workspace=/root/.openclaw/workspace-pinchymeow
+```
+
 本地测试示例：
 
 ```powershell
@@ -42,6 +55,7 @@ node atf-cli.js list
 
 ```bash
 node atf-cli.js create "实现 trigger runtime"
+node atf-cli.js create "给 F0x 的长轮询任务" --confirm-timeout=45m --final-timeout=4h
 ```
 
 查看任务：
@@ -56,6 +70,7 @@ node atf-cli.js ctx T-001
 
 ```bash
 node atf-cli.js assign T-001 f0x
+node atf-cli.js assign T-001 f0x --confirm-timeout=45m --final-timeout=4h
 node atf-cli.js update T-001 executing
 node atf-cli.js update T-001 completed
 ```
@@ -442,6 +457,8 @@ node workspace/bin/atf-phasec-smoke.cjs --cleanup
 node atf-cli.js assign recommend T-001
 node atf-cli.js assign recommend T-001 top=5
 ```
+
+这组命令只是辅助参考，不应该替代当前固定分工。
 
 说明：
 

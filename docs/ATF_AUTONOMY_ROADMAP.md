@@ -216,7 +216,7 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 
 但在当前 `claw army` 内部场景下，应该先收敛成 `Phase C Lite / 内部调度信誉层`，而不是直接按市场规模设计。
 
-当前进展（2026-04-19，最小切口已开始）：
+当前进展（2026-04-19，最小闭环已完成）：
 
 - 已支持任务目录下的 `reviews/` 评价对象
 - 已支持 `review add / list / show`
@@ -236,6 +236,20 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 - 已支持 `agent audit` 发现未知 / 脏 agent 引用，让巡检可以直接暴露数据卫生问题
 - 已支持 `agent remap` 用 dry-run / apply 两段式修复错误 agent 名
 - 已支持 `assign recommend` 读取任务画像并给内部调度提供排序建议
+
+## Phase D 建议定义
+
+下一阶段更适合正式定义为：
+
+**Phase D / 主动运营动作层**
+
+它不再补 `Focus / Trigger / Message / Reflection / review` 这些对象本身，而是把它们推进成实际动作：
+
+- 对 stale backlog / pending review 发 follow-up 或 reminder
+- 基于 trigger / message / reflection 推动任务自推进
+- 把 digest / cleanup / 巡检信号推进成可执行动作
+
+这一步完成后，ATF 才会从“有自主对象”真正进入“有主动动作”阶段。
 
 当前收敛原则：
 
@@ -257,10 +271,18 @@ ATF 现阶段更需要的是：
 
 ATF 当前缺的不是更多任务命令，而是一个位于任务协议之上的自主协作层。
 
-下一阶段应当围绕以下三件事展开：
+到当前阶段，ATF 已经把 Clawith 主动机制里最关键的协议对象吸收成最小可用版本：
 
 1. Focus
 2. Trigger Binding
 3. Agent Messaging
+4. Reflections
+5. Review / Reputation Lite
 
-如果这三件事补上，ATF 就会从“异步任务总线”升级为“具备初步自治能力的多 Agent 协作内核”。
+所以下一阶段不再是“补这些对象本身”，而应转向 `Phase D / 主动运营动作层`，把这些对象变成主动动作闭环，例如：
+
+1. 基于 stale backlog / pending review 的主动 follow-up
+2. 基于 trigger / message / reflection 的任务自推进动作
+3. 面向日常巡检的 reminder / digest / cleanup 执行层
+
+如果这一步补上，ATF 才会从“有自主对象的异步任务内核”继续升级为“具备主动运营能力的多 Agent 协作内核”。

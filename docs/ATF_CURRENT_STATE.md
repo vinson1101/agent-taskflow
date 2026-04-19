@@ -158,7 +158,7 @@ ATF 的价值已经不只是“记录任务”，而是：
 
 ## Phase C 当前进展
 
-`Phase C Lite / 内部调度信誉层` 已开始落地最小闭环：
+`Phase C Lite / 内部调度信誉层` 已完成最小闭环：
 
 - 已支持任务目录下的 `reviews/` 评价记录
 - 已支持 `review add / list / show`
@@ -183,6 +183,19 @@ ATF 的价值已经不只是“记录任务”，而是：
 - 已支持 `agent remap` 以 dry-run / apply 两段式修复错误 agent 名
 - 已支持在 `status / assign` 中直接读取 review / reputation / credits 摘要
 - 已支持 `assign recommend` 结合任务画像给内部指派提供排序参考
+
+## 下一阶段
+
+下一阶段建议正式定义为：
+
+**Phase D / 主动运营动作层**
+
+重点不是继续补对象定义，而是把当前已有的 `Focus / Trigger / Message / Reflection / review` 信号推进成：
+
+- stale backlog follow-up
+- pending review reminder
+- digest / cleanup 执行层
+- 基于 trigger / message / reflection 的任务自推进动作
 
 当前仍未完成的部分：
 

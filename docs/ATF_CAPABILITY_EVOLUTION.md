@@ -146,18 +146,15 @@ ATF 未来的能力可以分成 6 层。
 
 当前状态：
 
-- 只有弱雏形
-- 已开始落地最小 Focus Items 和 shared context
-- 已开始落地最小 Trigger Binding
-- 已开始落地最小 Reflections
-- 已出现 focus 状态变化对 trigger 的最小收束行为
-- 已出现 trigger firing record / consume 的最小运行时钩子
+- 最小自主对象层已落地，不再只是弱雏形
+- 已具备 Focus Items、Trigger Binding、Reflections 和 shared context 的最小协议对象
+- 已具备 `on_message / on_status_change / on_blocked` 唤醒模型
+- 已具备 focus 状态变化对 trigger 的最小收束行为
+- 已具备 trigger firing / execution / consume 的最小运行时钩子
 - `update` / `focus update` / `msg send` 已能自动产生日志和 trigger fires
-- 已出现 agent 维度的 trigger inbox
-- 已出现 due trigger 的 scan / scan-all 入口
-- 已出现全局 pending-trigger-fires / trigger-inboxes 索引
-- 已出现 firing 到 reflection 的最小绑定
-- 仍需继续建设任务自推进能力
+- 已具备 agent 维度的 trigger inbox、全局 pending-trigger-fires 索引，以及 `scan / scan-all / execute-pending` 入口
+- 已具备 firing 到 reflection 的最小绑定，以及 handoff 对 shared context / reflection summary 的显式传递
+- 下一步缺的不是对象定义，而是把这些对象推进成主动运营和任务自推进动作
 
 ### Layer 5：评价与信誉层
 
@@ -179,8 +176,10 @@ ATF 未来的能力可以分成 6 层。
 
 当前状态：
 
-- 尚未形成闭环
-- 需要在通信层和自主层之后建设
+- `Phase C Lite / 内部调度信誉层` 已形成最小闭环
+- 已具备 `review / credits / reputation / stats digest / review backlog / agent audit`
+- 已能把任务、消息、回执、反思和 review 聚合成内部画像与巡检信号
+- 当前仍未延伸到市场级身份、激励、结算和公开信誉网络
 
 ### Layer 6：激励与市场层
 
@@ -221,27 +220,27 @@ ATF 后续开发建议按以下顺序推进。
 
 ### Priority B
 
-- 建设 Layer 3：消息、讨论线程、shared context
+- 强化 Layer 3：消息、讨论线程、shared context
 
 目标：
 
-- 让多个 Agent 真正具备协作面，而不是只会接单
+- 把已有最小协作面继续做稳，而不是回到只会接单
 
 ### Priority C
 
-- 建设 Layer 4：Focus、Trigger Binding、Reflections
+- 强化 Layer 4：Focus、Trigger Binding、Reflections 的动作闭环
 
 目标：
 
-- 让 Agent 具备初步自治和任务自推进能力
+- 让 Agent 从“有自治对象”走向“有主动动作”
 
 ### Priority D
 
-- 建设 Layer 5：评价、review、信誉
+- 建设 Phase D：主动运营动作层
 
 目标：
 
-- 让协作历史形成能力判断和分配依据
+- 把已有的 Focus / Trigger / Message / Reflection / review 信号推进成主动动作
 
 ### Priority E
 

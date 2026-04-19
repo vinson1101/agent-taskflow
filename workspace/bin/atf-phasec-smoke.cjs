@@ -131,22 +131,40 @@ function main() {
   runCli(['delivered', deliveredTaskId], env, options);
   runCli(['review', 'add', deliveredTaskId, 'f0x', 'pinchymeow', 'approved', 'delivered well', 'type=delivery', 'overall=5', 'quality=5', 'timeliness=4', 'communication=4', 'ownership=5'], env, options);
 
+  const createPending = runCli(['create', 'Phase C pending review demo', 'type=research', 'difficulty=2', 'priority=normal'], env, options);
+  const pendingTaskId = extractTaskId(createPending);
+  runCli(['assign', pendingTaskId, 'f0x'], env, options);
+  runCli(['update', pendingTaskId, 'completed'], env, options);
+
   const statsSummary = runCli(['stats', 'summary'], env, options);
+  const statsTasks = runCli(['stats', 'tasks'], env, options);
+  const statsTasksFiltered = runCli(['stats', 'tasks', 'type=research', 'review=pending', 'limit=1'], env, options);
+  const statsTypes = runCli(['stats', 'types'], env, options);
   const statsAgents = runCli(['stats', 'agents'], env, options);
   const statsShowF0x = runCli(['stats', 'show', 'f0x'], env, options);
   const creditsList = runCli(['credits', 'list'], env, options);
   const creditsShowPinchy = runCli(['credits', 'show', 'pinchymeow'], env, options);
   const reviewPending = runCli(['review', 'pending'], env, options);
+  const reviewPendingFiltered = runCli(['review', 'pending', 'type=research', 'status=completed', 'limit=1'], env, options);
 
-  assertIncludes(statsSummary, 'tasks: total=2', 'stats summary');
-  assertIncludes(statsSummary, 'pending_reviews=0', 'stats summary');
+  assertIncludes(statsSummary, 'tasks: total=3', 'stats summary');
+  assertIncludes(statsSummary, 'pending_reviews=1', 'stats summary');
+  assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
+  assertIncludes(statsTasks, 'approved', 'stats tasks');
+  assertIncludes(statsTasksFiltered, pendingTaskId, 'filtered stats tasks');
+  assertIncludes(statsTasksFiltered, 'pending', 'filtered stats tasks');
+  assertIncludes(statsTypes, 'research', 'stats types');
+  assertIncludes(statsTypes, 'delivery', 'stats types');
   assertIncludes(statsAgents, 'f0x', 'stats agents');
   assertIncludes(statsAgents, 'pinchymeow', 'stats agents');
   assertIncludes(statsShowF0x, 'credits: total=', 'stats show f0x');
   assertIncludes(statsShowF0x, 'completion=', 'stats show f0x');
   assertIncludes(creditsList, 'completion', 'credits list');
   assertIncludes(creditsShowPinchy, 'completion: completed=0  delivered=1', 'credits show pinchymeow');
-  assertIncludes(reviewPending, '当前暂无待评价任务', 'review pending');
+  assertIncludes(reviewPending, pendingTaskId, 'review pending');
+  assertIncludes(reviewPending, 'type=research', 'review pending');
+  assertIncludes(reviewPendingFiltered, pendingTaskId, 'filtered review pending');
+  assertIncludes(reviewPendingFiltered, 'status=completed', 'filtered review pending');
 
   console.log('ATF Phase C Lite smoke passed.');
   console.log(`Smoke data: ${smokeRoot}`);

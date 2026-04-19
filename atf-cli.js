@@ -1941,6 +1941,16 @@ function formatRate(value) {
   return `${roundNumber(value * 100, 1)}%`;
 }
 
+function getEffectiveTaskReviewStatus(ctx) {
+  if (!ctx) return 'unknown';
+  if (ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered') return 'delivered';
+  return ctx.status || 'unknown';
+}
+
+function isReviewEligibleTaskStatus(status) {
+  return status === 'completed' || status === 'delivered';
+}
+
 function buildTaskReviewSummary(taskId, options = {}) {
   let reviews = readTaskReviews(taskId);
   if (options.reviewee) reviews = reviews.filter(review => review.reviewee === options.reviewee);
@@ -1981,8 +1991,8 @@ function taskNeedsReview(ctx, reviewee = null) {
   if (!ctx) return false;
   const targetReviewee = reviewee || getPrimaryTaskReviewee(ctx);
   if (!targetReviewee) return false;
-  const delivered = ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered';
-  if (!delivered && ctx.status !== 'completed') return false;
+  const reviewStatus = getEffectiveTaskReviewStatus(ctx);
+  if (!isReviewEligibleTaskStatus(reviewStatus)) return false;
   const taskId = ctx.short_id || ctx.task_id;
   const reviews = readTaskReviews(taskId).filter(review =>
     review.reviewee === targetReviewee
@@ -1991,27 +2001,162 @@ function taskNeedsReview(ctx, reviewee = null) {
   return reviews.length === 0;
 }
 
-function collectPendingReviewTasks(agent = null) {
-  return getAllTasks()
+function collectPendingReviewTasks(agentOrOptions = null, options = {}) {
+  const filters = agentOrOptions && typeof agentOrOptions === 'object' && !Array.isArray(agentOrOptions)
+    ? { ...agentOrOptions }
+    : { ...options, agent: agentOrOptions || options.agent || null };
+  const agent = filters.agent || null;
+  const typeFilter = normalizeTaskTypeValue(filters.type);
+  const statusFilter = isClearedValue(filters.status) ? null : String(filters.status).trim().toLowerCase();
+  const limit = Number.isInteger(filters.limit) && filters.limit > 0 ? filters.limit : null;
+
+  const pendingTasks = getAllTasks()
     .filter(ctx => {
       const targetReviewee = agent || getPrimaryTaskReviewee(ctx);
       if (!targetReviewee) return false;
       if (agent && ctx.assigned_to !== agent && ctx.dri !== agent) return false;
+      const taskProfile = getTaskProfile(ctx);
+      const reviewStatus = getEffectiveTaskReviewStatus(ctx);
+      if (typeFilter && taskProfile.type !== typeFilter) return false;
+      if (statusFilter && reviewStatus !== statusFilter) return false;
       return taskNeedsReview(ctx, targetReviewee);
     })
     .map(ctx => {
       const taskId = ctx.short_id || ctx.task_id;
       const targetReviewee = agent || getPrimaryTaskReviewee(ctx);
+      const taskProfile = getTaskProfile(ctx);
       return {
         task_id: taskId,
         description: ctx.description,
-        status: ctx.status,
+        status: getEffectiveTaskReviewStatus(ctx),
         reviewee: targetReviewee,
         updated_at: ctx.updated_at,
+        task_type: taskProfile.type || null,
+        task_profile: taskProfile,
         existing_review_summary: buildTaskReviewSummary(taskId),
       };
     })
     .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+
+  return limit ? pendingTasks.slice(0, limit) : pendingTasks;
+}
+
+function buildTaskTypeStats() {
+  const buckets = new Map();
+  const ensureBucket = (taskType) => {
+    const key = taskType || 'untyped';
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        type: key,
+        total: 0,
+        completed: 0,
+        delivered: 0,
+        reviews: 0,
+        pending_reviews: 0,
+        outcomes: {
+          approved: 0,
+          needs_revision: 0,
+          rejected: 0,
+        },
+        overall_scores: [],
+      });
+    }
+    return buckets.get(key);
+  };
+
+  for (const ctx of getAllTasks()) {
+    const taskId = ctx.short_id || ctx.task_id;
+    const taskProfile = getTaskProfile(ctx);
+    const bucket = ensureBucket(taskProfile.type);
+    const reviewStatus = getEffectiveTaskReviewStatus(ctx);
+    bucket.total += 1;
+    if (isReviewEligibleTaskStatus(reviewStatus)) bucket.completed += 1;
+    if (reviewStatus === 'delivered') bucket.delivered += 1;
+
+    for (const review of readTaskReviews(taskId)) {
+      bucket.reviews += 1;
+      if (bucket.outcomes[review.outcome] !== undefined) bucket.outcomes[review.outcome] += 1;
+      if (Number.isFinite(review?.scores?.overall)) bucket.overall_scores.push(review.scores.overall);
+    }
+  }
+
+  for (const task of collectPendingReviewTasks()) {
+    ensureBucket(task.task_type).pending_reviews += 1;
+  }
+
+  return [...buckets.values()]
+    .map(bucket => ({
+      type: bucket.type,
+      total: bucket.total,
+      completed: bucket.completed,
+      delivered: bucket.delivered,
+      completion_rate: bucket.total ? bucket.completed / bucket.total : null,
+      delivery_rate: bucket.total ? bucket.delivered / bucket.total : null,
+      reviews: bucket.reviews,
+      pending_reviews: bucket.pending_reviews,
+      outcomes: bucket.outcomes,
+      avg_overall: roundNumber(averageNumbers(bucket.overall_scores), 2),
+    }))
+    .sort((a, b) => {
+      if (b.total !== a.total) return b.total - a.total;
+      return a.type.localeCompare(b.type);
+    });
+}
+
+function deriveTaskFeedbackState(ctx, reviewSummary = null) {
+  const reviewStatus = getEffectiveTaskReviewStatus(ctx);
+  if (!isReviewEligibleTaskStatus(reviewStatus)) return 'n/a';
+  if (taskNeedsReview(ctx)) return 'pending';
+  if (!reviewSummary || !reviewSummary.total) return 'reviewed';
+  if (reviewSummary.outcomes.rejected > 0) return 'rejected';
+  if (reviewSummary.outcomes.needs_revision > 0) return 'needs_revision';
+  if (reviewSummary.outcomes.approved > 0) return 'approved';
+  return 'reviewed';
+}
+
+function collectTaskStatsRows(options = {}) {
+  const agentFilter = isClearedValue(options.agent) ? null : String(options.agent).trim();
+  const typeFilter = normalizeTaskTypeValue(options.type);
+  const statusFilter = isClearedValue(options.status) ? null : String(options.status).trim().toLowerCase();
+  const reviewFilterRaw = isClearedValue(options.review) ? null : String(options.review).trim().toLowerCase();
+  const reviewFilter = reviewFilterRaw === 'na' ? 'n/a' : reviewFilterRaw;
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+
+  const rows = getAllTasks()
+    .map(ctx => {
+      const taskId = ctx.short_id || ctx.task_id;
+      const taskProfile = getTaskProfile(ctx);
+      const reviewSummary = buildTaskReviewSummary(taskId);
+      const completion = computeTaskCompletionCredits(ctx);
+      return {
+        task_id: taskId,
+        status: getEffectiveTaskReviewStatus(ctx),
+        assigned_to: ctx.assigned_to || '-',
+        dri: ctx.dri || null,
+        type: taskProfile.type || '-',
+        priority: taskProfile.priority || '-',
+        difficulty: taskProfile.difficulty || null,
+        feedback_state: deriveTaskFeedbackState(ctx, reviewSummary),
+        avg_overall: reviewSummary?.avg_overall ?? null,
+        review_count: reviewSummary?.total ?? 0,
+        completion_credits: completion?.completion_credits ?? 0,
+        updated_at: ctx.updated_at || ctx.created_at || null,
+        description: ctx.description || '',
+      };
+    })
+    .filter(row => {
+      if (agentFilter && row.assigned_to !== agentFilter && row.dri !== agentFilter) return false;
+      if (typeFilter && row.type !== typeFilter) return false;
+      if (statusFilter && row.status !== statusFilter) return false;
+      if (reviewFilter && reviewFilter !== 'all') {
+        if (reviewFilter === 'reviewed') return ['approved', 'needs_revision', 'rejected', 'reviewed'].includes(row.feedback_state);
+        return row.feedback_state === reviewFilter;
+      }
+      return true;
+    })
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+
+  return limit ? rows.slice(0, limit) : rows;
 }
 
 function formatAgentReputationSummary(agent) {
@@ -2052,14 +2197,14 @@ function computeReviewCredits(review) {
 }
 
 function computeTaskCompletionCredits(ctx) {
-  const delivered = ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered';
-  if (delivered) {
+  const reviewStatus = getEffectiveTaskReviewStatus(ctx);
+  if (reviewStatus === 'delivered') {
     return {
       completion_credits: 10,
       completion_stage: 'delivered',
     };
   }
-  if (ctx.status === 'completed') {
+  if (reviewStatus === 'completed') {
     return {
       completion_credits: 6,
       completion_stage: 'completed',
@@ -2450,6 +2595,8 @@ ATF CLI v2
   atf status <taskId>                    查看状态（+投递状态+DRI）
   atf stats summary                      查看整体完成/反馈统计
   atf stats agents                       查看 agent 完成度/反馈统计
+  atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N]  查看任务级统计
+  atf stats types                        查看任务类型维度统计
   atf stats show <agent>                 查看单个 agent 完成度/反馈统计
   atf profile <taskId>                   查看任务画像
   atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]  更新任务画像
@@ -2489,7 +2636,7 @@ ATF CLI v2
   atf reflect show <taskId> <reflectionId>               查看 Reflection
   atf review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...]
   atf review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...]
-  atf review pending [agent]                          查看待评价任务
+  atf review pending [agent] [type=x] [status=completed|delivered] [limit=N]  查看待评价任务
   atf review show <taskId> <reviewId>                查看单条 Review
   atf credits rebuild                                重建 credits 积分索引
   atf credits list                                   查看内部积分概览
@@ -3655,15 +3802,64 @@ switch (cmd) {
     }
 
     if (sub === 'pending') {
-      const [agent] = restArgs;
-      const pendingTasks = collectPendingReviewTasks(agent || null);
-      if (!pendingTasks.length) {
-        console.log(agent ? `agent ${agent} 暂无待评价任务` : '当前暂无待评价任务');
+      let agent = null;
+      let typeFilter = null;
+      let statusFilter = null;
+      let limit = null;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('type=')) {
+          typeFilter = normalizeTaskTypeValue(part.substring('type='.length));
+          continue;
+        }
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('review pending limit 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalidArgs = true;
         break;
       }
-      console.log(`\n待评价任务 (${pendingTasks.length} 条)\n`);
+      if (invalidArgs) {
+        console.error('用法: atf review pending [agent] [type=x] [status=completed|delivered] [limit=N]');
+        break;
+      }
+      if (statusFilter && !['completed', 'delivered'].includes(statusFilter)) {
+        console.error('review pending status 只支持 completed|delivered');
+        break;
+      }
+      const pendingTasks = collectPendingReviewTasks({
+        agent: agent || null,
+        type: typeFilter,
+        status: statusFilter,
+        limit,
+      });
+      const filterLabel = [
+        agent ? `agent=${agent}` : null,
+        typeFilter ? `type=${typeFilter}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!pendingTasks.length) {
+        console.log(filterLabel ? `${filterLabel} 暂无待评价任务` : '当前暂无待评价任务');
+        break;
+      }
+      console.log(`\n待评价任务 (${pendingTasks.length}${filterLabel ? `  |  ${filterLabel}` : ''})\n`);
       for (const task of pendingTasks) {
-        console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}`);
+        console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}`);
         console.log(`  ${task.description}`);
         if (task.existing_review_summary) {
           console.log(`  existing_reviews=${task.existing_review_summary.total}  avg_overall=${task.existing_review_summary.avg_overall ?? '-'}`);
@@ -3870,8 +4066,8 @@ switch (cmd) {
         statusCounts.set(status, (statusCounts.get(status) || 0) + 1);
       }
       const pendingReviews = collectPendingReviewTasks();
-      const deliveredTasks = tasks.filter(task => task.status === 'delivered' || task.protocol?.delivery_status === 'delivered').length;
-      const completedTasks = tasks.filter(task => task.status === 'completed' || task.status === 'delivered' || task.protocol?.delivery_status === 'delivered').length;
+      const deliveredTasks = tasks.filter(task => getEffectiveTaskReviewStatus(task) === 'delivered').length;
+      const completedTasks = tasks.filter(task => isReviewEligibleTaskStatus(getEffectiveTaskReviewStatus(task))).length;
       console.log('\nATF Stats Summary\n');
       console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  pending_reviews=${pendingReviews.length}`);
       if (statusCounts.size) {
@@ -3879,6 +4075,98 @@ switch (cmd) {
         for (const [status, count] of [...statusCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
           console.log(`- ${status}: ${count}`);
         }
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'types') {
+      const typeStats = buildTaskTypeStats();
+      if (!typeStats.length) { console.log('当前暂无任务类型统计数据'); break; }
+      console.log(`\nTask Type Stats (${typeStats.length} types)\n`);
+      console.log('type             tasks  completed  delivered  completion  reviews  avg_review  approved  revision  rejected  pending');
+      console.log('─'.repeat(121));
+      for (const typeStat of typeStats) {
+        const completion = typeStat.completion_rate === null ? '-' : `${roundNumber(typeStat.completion_rate * 100, 1)}%`;
+        console.log(`${typeStat.type.padEnd(16)} ${String(typeStat.total).padEnd(5)} ${String(typeStat.completed).padEnd(10)} ${String(typeStat.delivered).padEnd(10)} ${String(completion).padEnd(11)} ${String(typeStat.reviews).padEnd(7)} ${String(typeStat.avg_overall ?? '-').padEnd(11)} ${String(typeStat.outcomes.approved).padEnd(9)} ${String(typeStat.outcomes.needs_revision).padEnd(9)} ${String(typeStat.outcomes.rejected).padEnd(9)} ${String(typeStat.pending_reviews).padEnd(7)}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'tasks') {
+      let agentFilter = null;
+      let typeFilter = null;
+      let statusFilter = null;
+      let reviewFilter = null;
+      let limit = null;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('agent=')) {
+          agentFilter = part.substring('agent='.length);
+          continue;
+        }
+        if (part.startsWith('type=')) {
+          typeFilter = normalizeTaskTypeValue(part.substring('type='.length));
+          continue;
+        }
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('review=')) {
+          reviewFilter = String(part.substring('review='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('stats tasks limit 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N]');
+        break;
+      }
+      if (statusFilter && !['created', 'assigned', 'confirmed', 'executing', 'paused', 'blocked', 'completed', 'delivered', 'cancelled', 'archived', 'unknown'].includes(statusFilter)) {
+        console.error('stats tasks status 不合法');
+        break;
+      }
+      if (reviewFilter && !['all', 'pending', 'reviewed', 'approved', 'needs_revision', 'rejected', 'na', 'n/a'].includes(reviewFilter)) {
+        console.error('stats tasks review 只支持 all|pending|reviewed|approved|needs_revision|rejected|na');
+        break;
+      }
+      const rows = collectTaskStatsRows({
+        agent: agentFilter,
+        type: typeFilter,
+        status: statusFilter,
+        review: reviewFilter,
+        limit,
+      });
+      const filterLabel = [
+        agentFilter ? `agent=${agentFilter}` : null,
+        typeFilter ? `type=${typeFilter}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        reviewFilter ? `review=${reviewFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!rows.length) {
+        console.log(filterLabel ? `${filterLabel} 暂无任务统计结果` : '当前暂无任务统计结果');
+        break;
+      }
+      console.log(`\nTask Stats (${rows.length}${filterLabel ? `  |  ${filterLabel}` : ''})\n`);
+      console.log('task     status      agent           type             feedback        avg   pts  updated');
+      console.log('─'.repeat(106));
+      for (const row of rows) {
+        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${row.updated_at || '-'}`);
+        console.log(`  ${row.description}`);
       }
       console.log('');
       break;
@@ -3930,7 +4218,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf stats summary|agents|show ...');
+    console.error('用法: atf stats summary|agents|tasks|types|show ...');
     break;
   }
 

@@ -60,8 +60,11 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
 
 - `review pending`
   找出 `completed / delivered` 但还没有形成 `task / delivery review` 的任务
+  现在支持 `type=` / `status=` / `limit=` 过滤，便于内部清理积压
 - `status / assign`
   在日常任务流里直接显示 task profile / review / reputation / credits 摘要，而不是只靠单独查询
+- `stats tasks`
+  直接看任务级完成度、反馈状态和 completion credits，可按 agent / type / status / review 过滤
 
 ### 2. Reputation Index
 

@@ -61,6 +61,8 @@ node atf-cli.js nextnum                  # 下一个编号
 node atf-cli.js status <taskId>         # 查看状态
 node atf-cli.js stats summary            # 查看整体完成/反馈统计
 node atf-cli.js stats agents             # 查看 agent 完成度/反馈统计
+node atf-cli.js stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N] # 查看任务级统计
+node atf-cli.js stats types              # 查看任务类型维度统计
 node atf-cli.js stats show <agent>       # 查看单个 agent 统计
 node atf-cli.js profile <taskId>         # 查看任务画像
 node atf-cli.js profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b] # 更新任务画像
@@ -100,7 +102,7 @@ node atf-cli.js reflect summary <taskId> [focus=FOC-...] [author=x] # 查看 Ref
 node atf-cli.js reflect show <taskId> <reflectionId>          # 查看 Reflection
 node atf-cli.js review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...] # 写入 Review
 node atf-cli.js review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...] # 查看任务 Reviews
-node atf-cli.js review pending [agent]                        # 查看待评价任务
+node atf-cli.js review pending [agent] [type=x] [status=completed|delivered] [limit=N] # 查看待评价任务
 node atf-cli.js review show <taskId> <reviewId>               # 查看 Review
 node atf-cli.js credits rebuild                               # 重建内部积分索引（完成度 + 反馈）
 node atf-cli.js credits list                                  # 查看 agent 积分概览

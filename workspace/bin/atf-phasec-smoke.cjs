@@ -145,6 +145,11 @@ function setTaskActors(taskId, env, updates) {
   }
 }
 
+function writeAgentRegistry(env, registry) {
+  const filePath = path.join(env.ATF_DATA_DIR, 'agents.json');
+  fs.writeFileSync(filePath, `${JSON.stringify(registry, null, 2)}\n`);
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   safeResetDir(smokeRoot);
@@ -153,11 +158,35 @@ function main() {
     ATF_TASKS_DIR: path.join(smokeRoot, 'tasks'),
     ATF_WORKSPACE_DIR: path.join(smokeRoot, 'workspace'),
     ATF_DATA_DIR: path.join(smokeRoot, 'data'),
+    ATF_WORKSPACE_PINCHYMEOW: path.join(smokeRoot, 'workspace-pinchymeow'),
+    ATF_WORKSPACE_F0X: path.join(smokeRoot, 'workspace-f0x'),
+    ATF_WORKSPACE_ACESTOCK: path.join(smokeRoot, 'workspace-acestock'),
+    ATF_WORKSPACE_HUNTMIND: path.join(smokeRoot, 'workspace-huntmind'),
   };
 
   fs.mkdirSync(env.ATF_TASKS_DIR, { recursive: true });
   fs.mkdirSync(env.ATF_WORKSPACE_DIR, { recursive: true });
   fs.mkdirSync(env.ATF_DATA_DIR, { recursive: true });
+  fs.mkdirSync(env.ATF_WORKSPACE_PINCHYMEOW, { recursive: true });
+  fs.mkdirSync(env.ATF_WORKSPACE_F0X, { recursive: true });
+  fs.mkdirSync(env.ATF_WORKSPACE_ACESTOCK, { recursive: true });
+  fs.mkdirSync(env.ATF_WORKSPACE_HUNTMIND, { recursive: true });
+
+  const claudeWorkspace = path.join(smokeRoot, 'workspace-claude');
+  fs.mkdirSync(claudeWorkspace, { recursive: true });
+  writeAgentRegistry(env, {
+    schema: 'legacy.atf.agents.v0',
+    updated_at: new Date().toISOString(),
+    agents: {
+      purplewolf: {
+        source: 'legacy',
+      },
+      claude: {
+        workspace: claudeWorkspace,
+        source: 'legacy',
+      },
+    },
+  });
 
   const createCompleted = runCli(['create', 'Phase C completed demo', 'type=ops', 'difficulty=3', 'priority=normal'], env, options);
   const completedTaskId = extractTaskId(createCompleted);
@@ -276,6 +305,23 @@ function main() {
   assertIncludes(reviewBacklogStale, staleTaskId, 'review backlog stale');
   assertIncludes(agentList, 'f0x', 'agent list');
   assertIncludes(agentList, 'pinchymeow', 'agent list');
+  assertIncludes(agentList, 'acestock', 'agent list');
+  assertIncludes(agentList, 'huntmind', 'agent list');
+  assertIncludes(agentList, 'purplewolf', 'agent list');
+  assertIncludes(agentList, 'claude', 'agent list');
+  assertIncludes(agentList, env.ATF_WORKSPACE_PINCHYMEOW, 'agent list');
+  assertIncludes(agentList, env.ATF_WORKSPACE_ACESTOCK, 'agent list');
+  assertIncludes(agentList, claudeWorkspace, 'agent list');
+
+  setTaskActors(staleTaskId, env, {
+    assigned_to: 'acestock',
+    dri: 'acestock',
+  });
+  const reviewBacklogRegistered = runCli(['review', 'backlog', 'min_age=4', 'top=5'], env, options);
+  const agentAuditRegistered = runCli(['agent', 'audit'], env, options);
+  assertIncludes(reviewBacklogRegistered, 'acestock', 'registered review backlog');
+  assertNotIncludes(reviewBacklogRegistered, 'acestock [unknown]', 'registered review backlog');
+  assertIncludes(agentAuditRegistered, 'unknown_agents=0', 'registered agent audit');
 
   setTaskActors(staleTaskId, env, {
     assigned_to: 'fake-no-such-agent',

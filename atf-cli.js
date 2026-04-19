@@ -27,11 +27,23 @@ const PENDING_TRIGGER_FIRES_FILE = `${DATA_DIR}/pending-trigger-fires.json`;
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
 const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORKSPACE_DIR}/pending-decisions.json`;
 const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
-const DEFAULT_AGENT_WORKSPACE = process.env.ATF_DEFAULT_AGENT_WORKSPACE || `${OPENCLAW_ROOT}/workspace-acestock`;
-const AGENT_WORKSPACES = {
-  pinchymeow: process.env.ATF_WORKSPACE_PINCHYMEOW || DEFAULT_AGENT_WORKSPACE,
-  f0x: process.env.ATF_WORKSPACE_F0X || `${OPENCLAW_ROOT}/workspace-f0x`,
-};
+const DEFAULT_AGENT_WORKSPACE = process.env.ATF_DEFAULT_AGENT_WORKSPACE || WORKSPACE_DIR;
+function buildConfiguredAgentWorkspaces() {
+  const workspaces = {
+    pinchymeow: process.env.ATF_WORKSPACE_PINCHYMEOW || WORKSPACE_DIR,
+    f0x: process.env.ATF_WORKSPACE_F0X || `${OPENCLAW_ROOT}/workspace-f0x`,
+  };
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('ATF_WORKSPACE_') || !value) continue;
+    const suffix = key.substring('ATF_WORKSPACE_'.length);
+    if (!suffix || suffix === 'DIR') continue;
+    const agent = suffix.toLowerCase().replace(/_/g, '-');
+    if (!agent) continue;
+    workspaces[agent] = value;
+  }
+  return workspaces;
+}
+const AGENT_WORKSPACES = buildConfiguredAgentWorkspaces();
 const MESSAGE_TYPES = new Set(['info', 'request', 'decision_request', 'decision_reply', 'handoff', 'feedback', 'blocker']);
 const RECEIPT_TYPES = new Set(['delivered', 'seen', 'acked', 'expired', 'failed']);
 const SHARED_ENTRY_TYPES = new Set(['context', 'decision', 'intel', 'result', 'note', 'risk']);
@@ -651,7 +663,7 @@ function buildDefaultAgentRegistry() {
       .filter(([agent]) => isReputationAgent(agent))
       .map(([agent, workspace]) => ({
         agent,
-        workspace: workspace || null,
+        workspace: workspace || inferAgentWorkspace(agent),
         source: 'workspace',
         enabled: true,
       }))
@@ -659,25 +671,84 @@ function buildDefaultAgentRegistry() {
   };
 }
 
+function normalizeAgentName(agent) {
+  if (!isReputationAgent(agent)) return null;
+  const normalized = String(agent).trim();
+  return normalized || null;
+}
+
+function inferAgentWorkspace(agent) {
+  const normalized = normalizeAgentName(agent);
+  if (!normalized) return DEFAULT_AGENT_WORKSPACE;
+  return AGENT_WORKSPACES[normalized] || `${OPENCLAW_ROOT}/workspace-${normalized}`;
+}
+
+function normalizeAgentRegistryItem(agent, value = null, fallbackSource = 'registry') {
+  const normalized = normalizeAgentName(agent);
+  if (!normalized) return null;
+  if (typeof value === 'string') {
+    return {
+      agent: normalized,
+      workspace: value || inferAgentWorkspace(normalized),
+      source: fallbackSource,
+      enabled: true,
+    };
+  }
+
+  const item = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return {
+    agent: normalized,
+    workspace: item.workspace || inferAgentWorkspace(normalized),
+    source: item.source || fallbackSource,
+    enabled: item.enabled !== false,
+  };
+}
+
+function normalizeAgentRegistryObjectEntries(entries, fallbackSource = 'registry') {
+  return entries
+    .map(([agent, value]) => normalizeAgentRegistryItem(agent, value, fallbackSource))
+    .filter(Boolean);
+}
+
+function extractAgentRegistryItems(registry) {
+  if (Array.isArray(registry)) return registry;
+  if (!registry || typeof registry !== 'object') return [];
+  if (Array.isArray(registry.agents)) return registry.agents;
+  if (registry.agents && typeof registry.agents === 'object') {
+    return normalizeAgentRegistryObjectEntries(Object.entries(registry.agents), 'registry');
+  }
+  if (Array.isArray(registry.items)) return registry.items;
+  if (registry.items && typeof registry.items === 'object') {
+    return normalizeAgentRegistryObjectEntries(Object.entries(registry.items), 'registry');
+  }
+
+  const reservedKeys = new Set(['schema', 'updated_at', 'version', 'meta', 'items']);
+  const entries = Object.entries(registry).filter(([key]) => !reservedKeys.has(key));
+  const looksLikeAgentMap = entries.length > 0 && entries.every(([key, value]) => {
+    if (!isReputationAgent(key)) return false;
+    if (value == null) return true;
+    if (typeof value === 'string') return true;
+    return typeof value === 'object' && !Array.isArray(value);
+  });
+  return looksLikeAgentMap
+    ? normalizeAgentRegistryObjectEntries(entries, 'registry')
+    : [];
+}
+
 function normalizeAgentRegistry(registry) {
   const defaults = buildDefaultAgentRegistry();
   const agents = new Map(defaults.agents.map(entry => [entry.agent, entry]));
-  const items = Array.isArray(registry?.agents)
-    ? registry.agents
-    : Array.isArray(registry)
-      ? registry
-      : [];
+  const items = extractAgentRegistryItems(registry);
 
   for (const item of items) {
-    const agentName = typeof item === 'string' ? item : item?.agent;
-    if (!isReputationAgent(agentName)) continue;
-    const normalized = String(agentName).trim();
-    agents.set(normalized, {
-      agent: normalized,
-      workspace: typeof item === 'string' ? (AGENT_WORKSPACES[normalized] || null) : (item.workspace || AGENT_WORKSPACES[normalized] || null),
-      source: typeof item === 'string' ? 'registry' : (item.source || 'registry'),
-      enabled: typeof item === 'string' ? true : item.enabled !== false,
-    });
+    const agentName = typeof item === 'string'
+      ? item
+      : (item?.agent || item?.name || item?.id);
+    const normalized = normalizeAgentName(agentName);
+    if (!normalized) continue;
+    const normalizedItem = normalizeAgentRegistryItem(normalized, item, typeof item === 'string' ? 'registry' : (item?.source || 'registry'));
+    if (!normalizedItem) continue;
+    agents.set(normalized, normalizedItem);
   }
 
   return {
@@ -1188,7 +1259,7 @@ function triggerInboxPath(agent) {
 }
 
 function resolveAgentWorkspace(agent) {
-  return AGENT_WORKSPACES[agent] || DEFAULT_AGENT_WORKSPACE;
+  return inferAgentWorkspace(agent);
 }
 
 function refreshTriggerIndexes() {

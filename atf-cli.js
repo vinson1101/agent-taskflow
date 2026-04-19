@@ -646,6 +646,7 @@ function isReputationAgent(actor) {
   if (!actor || typeof actor !== 'string') return false;
   const normalized = actor.trim();
   if (!normalized || normalized.startsWith('room:')) return false;
+  if (normalized === '-') return false;
   if (normalized === 'trigger-executor') return false;
   if (normalized.startsWith('watcher')) return false;
   if (normalized.startsWith('adapter-')) return false;
@@ -814,8 +815,14 @@ function isRegisteredAgent(agent, registryOrSet = null) {
   return set.has(normalized);
 }
 
+function isUnassignedAgentValue(agent) {
+  if (agent === null || agent === undefined) return true;
+  const normalized = String(agent).trim();
+  return !normalized || normalized === '-';
+}
+
 function formatAgentDisplay(agent, registryOrSet = null) {
-  if (!agent) return '-';
+  if (isUnassignedAgentValue(agent)) return '[unassigned]';
   const normalized = String(agent).trim();
   return isRegisteredAgent(normalized, registryOrSet)
     ? normalized
@@ -2612,6 +2619,7 @@ function buildRecentTaskWindow(options = {}) {
       agentCounts.set(agentKey, {
         agent: agentKey,
         registered: isRegisteredAgent(agentKey, registeredAgents),
+        unassigned: isUnassignedAgentValue(agentKey),
         tasks: 0,
         completed: 0,
         delivered: 0,
@@ -2720,6 +2728,7 @@ function buildReviewBacklogStats(options = {}) {
       byAgent.set(agentKey, {
         agent: agentKey,
         registered: isRegisteredAgent(agentKey, registeredAgents),
+        unassigned: isUnassignedAgentValue(agentKey),
         pending: 0,
         self_reviewed: 0,
         completed: 0,
@@ -2806,8 +2815,8 @@ function buildOpsDigest(options = {}) {
   const reviewCoverage = buildReviewCoverageStats({ top });
   const recent = buildRecentTaskWindow({ days, limit: top * 2 });
   const backlog = buildReviewBacklogStats({ min_age: staleDays, top });
-  const activeAgents = recent.by_agent.filter(bucket => bucket.tasks > 0).length;
-  const backlogAgents = backlog.by_agent.filter(bucket => bucket.pending > 0).length;
+  const activeAgents = recent.by_agent.filter(bucket => bucket.tasks > 0 && !bucket.unassigned).length;
+  const backlogAgents = backlog.by_agent.filter(bucket => bucket.pending > 0 && !bucket.unassigned).length;
 
   return {
     days,
@@ -5219,7 +5228,7 @@ switch (cmd) {
       console.log('overview:');
       console.log(`- tasks=${digest.total_tasks}  review_eligible=${digest.review_coverage.eligible_tasks}  reviewed=${digest.review_coverage.reviewed_tasks}  self_reviewed=${digest.review_coverage.self_reviewed_tasks}  pending=${digest.review_coverage.pending_reviews}  stale=${digest.backlog.pending_tasks}`);
       console.log(`- recent_tasks=${digest.recent.total}  completed=${digest.recent.completed}  delivered=${digest.recent.delivered}  reviewed=${digest.recent.reviewed}  pending=${digest.recent.pending}`);
-      console.log(`- external_review_coverage=${formatRate(digest.review_coverage.external_review_coverage)}  active_agents=${digest.active_agents}  backlog_agents=${digest.backlog_agents}  unknown_recent_agents=${digest.recent.by_agent.filter(bucket => !bucket.registered).length}  unknown_backlog_agents=${digest.backlog.by_agent.filter(bucket => !bucket.registered).length}${digest.backlog.oldest_pending_age_days !== null ? `  oldest_pending_age=${digest.backlog.oldest_pending_age_days}d` : ''}`);
+      console.log(`- external_review_coverage=${formatRate(digest.review_coverage.external_review_coverage)}  active_agents=${digest.active_agents}  backlog_agents=${digest.backlog_agents}  unknown_recent_agents=${digest.recent.by_agent.filter(bucket => !bucket.registered && !bucket.unassigned).length}  unknown_backlog_agents=${digest.backlog.by_agent.filter(bucket => !bucket.registered && !bucket.unassigned).length}${digest.backlog.oldest_pending_age_days !== null ? `  oldest_pending_age=${digest.backlog.oldest_pending_age_days}d` : ''}`);
       if (digest.backlog.oldest_pending_at) console.log(`- oldest_pending_at=${digest.backlog.oldest_pending_at}`);
 
       if (digest.recent.by_agent.length) {
@@ -5348,7 +5357,7 @@ switch (cmd) {
         console.log('task     status      agent           type             feedback        self  age  updated');
         console.log('-'.repeat(108));
         for (const row of recent.rows) {
-          console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.self_review_count || 0).padEnd(5)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
+          console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${formatAgentDisplay(row.assigned_to).padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.self_review_count || 0).padEnd(5)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
           console.log(`  ${row.description}`);
         }
       }
@@ -5549,7 +5558,7 @@ switch (cmd) {
       console.log('task     status      agent           type             feedback        avg   pts  self  age  updated');
       console.log('─'.repeat(119));
       for (const row of rows) {
-        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${String(row.self_review_count || 0).padEnd(5)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
+        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${formatAgentDisplay(row.assigned_to).padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${String(row.self_review_count || 0).padEnd(5)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
         console.log(`  ${row.description}`);
       }
       console.log('');

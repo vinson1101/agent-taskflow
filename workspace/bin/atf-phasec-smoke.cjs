@@ -382,6 +382,16 @@ function main() {
   assertNotIncludes(reviewBacklogAfterRegister, 'manual-agent [unknown]', 'review backlog after register');
   assertIncludes(agentAuditAfterRegister, 'unknown_agents=0', 'agent audit after register');
 
+  const createUnassigned = runCli(['create', 'Phase C unassigned recent demo', 'type=ops', 'difficulty=1', 'priority=low'], env, options);
+  const unassignedTaskId = extractTaskId(createUnassigned);
+  const statsDigestUnassigned = runCli(['stats', 'digest'], env, options);
+  const statsRecentUnassigned = runCli(['stats', 'recent'], env, options);
+
+  assertIncludes(statsDigestUnassigned, 'unknown_recent_agents=0', 'stats digest unassigned');
+  assertIncludes(statsDigestUnassigned, 'active_agents=2', 'stats digest unassigned');
+  assertIncludes(statsRecentUnassigned, unassignedTaskId, 'stats recent unassigned');
+  assertIncludes(statsRecentUnassigned, '[unassigned]', 'stats recent unassigned');
+
   console.log('ATF Phase C Lite smoke passed.');
   console.log(`Smoke data: ${smokeRoot}`);
   console.log(`Tasks dir: ${env.ATF_TASKS_DIR}`);

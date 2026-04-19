@@ -139,6 +139,7 @@ function main() {
   const statsSummary = runCli(['stats', 'summary'], env, options);
   const statsTasks = runCli(['stats', 'tasks'], env, options);
   const statsTasksFiltered = runCli(['stats', 'tasks', 'type=research', 'review=pending', 'limit=1'], env, options);
+  const statsReviews = runCli(['stats', 'reviews'], env, options);
   const statsTypes = runCli(['stats', 'types'], env, options);
   const statsAgents = runCli(['stats', 'agents'], env, options);
   const statsShowF0x = runCli(['stats', 'show', 'f0x'], env, options);
@@ -148,11 +149,14 @@ function main() {
   const reviewPendingFiltered = runCli(['review', 'pending', 'type=research', 'status=completed', 'limit=1'], env, options);
 
   assertIncludes(statsSummary, 'tasks: total=3', 'stats summary');
+  assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
   assertIncludes(statsSummary, 'pending_reviews=1', 'stats summary');
   assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
   assertIncludes(statsTasks, 'approved', 'stats tasks');
   assertIncludes(statsTasksFiltered, pendingTaskId, 'filtered stats tasks');
   assertIncludes(statsTasksFiltered, 'pending', 'filtered stats tasks');
+  assertIncludes(statsReviews, 'eligible=3  reviewed=2  pending=1', 'stats reviews');
+  assertIncludes(statsReviews, 'f0x', 'stats reviews');
   assertIncludes(statsTypes, 'research', 'stats types');
   assertIncludes(statsTypes, 'delivery', 'stats types');
   assertIncludes(statsAgents, 'f0x', 'stats agents');

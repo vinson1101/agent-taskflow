@@ -168,7 +168,7 @@ ATF 的价值已经不只是“记录任务”，而是：
 - 已支持 `overall / quality / timeliness / communication / ownership` 评分维度
 - 已支持 `credits rebuild / list / show`
 - 已支持 `reputation rebuild / list / show`
-- 已支持 `stats summary / agents / tasks / types / show`
+- 已支持 `stats summary / agents / tasks / reviews / types / show`
 - 已支持把任务、消息、回执、反思和 review 聚合为 `ATF_DATA_DIR/scores.json`
 - 已支持把“完成度 + review 反馈”聚合为 `ATF_DATA_DIR/credits.json` 内部积分账本
 - 已支持任务级 `task_profile`，可记录 `type / difficulty / priority / tags`

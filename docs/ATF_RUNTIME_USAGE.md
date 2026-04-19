@@ -407,6 +407,8 @@ node atf-cli.js stats summary
 node atf-cli.js stats agents
 node atf-cli.js stats tasks
 node atf-cli.js stats tasks type=research review=pending limit=5
+node atf-cli.js stats reviews
+node atf-cli.js stats reviews agent=f0x status=completed top=10
 node atf-cli.js stats types
 node atf-cli.js stats show f0x
 ```
@@ -438,6 +440,7 @@ node atf-cli.js assign recommend T-001 top=5
 - `status` 会直接显示任务画像、review 摘要，以及 assignee 的 reputation / credits 摘要
 - `stats` 是更直接的内部统计入口，优先服务完成度和反馈查看
 - `stats tasks` 用于直接看任务级完成度、反馈状态和完成度积分
+- `stats reviews` 用于看 review 覆盖率，以及待评价 backlog 在 agent / type / status 上的分布
 - `stats types` 用于按 `task_profile.type` 看完成度、反馈和待评价积压
 - `assign` 会在指派时直接显示目标 agent 的 reputation / credits 摘要
 - `assign recommend` 仍然只是辅助参考，不应该替代当前固定分工

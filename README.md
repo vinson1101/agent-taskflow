@@ -62,6 +62,7 @@ node atf-cli.js status <taskId>         # 查看状态
 node atf-cli.js stats summary            # 查看整体完成/反馈统计
 node atf-cli.js stats agents             # 查看 agent 完成度/反馈统计
 node atf-cli.js stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N] # 查看任务级统计
+node atf-cli.js stats reviews [agent=x] [type=x] [status=completed|delivered] [top=N] # 查看 review 覆盖率和 backlog 汇总
 node atf-cli.js stats types              # 查看任务类型维度统计
 node atf-cli.js stats show <agent>       # 查看单个 agent 统计
 node atf-cli.js profile <taskId>         # 查看任务画像

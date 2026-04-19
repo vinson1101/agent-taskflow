@@ -2159,6 +2159,106 @@ function collectTaskStatsRows(options = {}) {
   return limit ? rows.slice(0, limit) : rows;
 }
 
+function buildReviewCoverageStats(options = {}) {
+  const agentFilter = isClearedValue(options.agent) ? null : String(options.agent).trim();
+  const typeFilter = normalizeTaskTypeValue(options.type);
+  const statusFilter = isClearedValue(options.status) ? null : String(options.status).trim().toLowerCase();
+  const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 5;
+
+  const eligibleRows = getAllTasks()
+    .map(ctx => {
+      const taskProfile = getTaskProfile(ctx);
+      return {
+        ctx,
+        review_status: getEffectiveTaskReviewStatus(ctx),
+        reviewee: getPrimaryTaskReviewee(ctx),
+        task_type: taskProfile.type || 'untyped',
+      };
+    })
+    .filter(row => {
+      if (!isReviewEligibleTaskStatus(row.review_status)) return false;
+      if (agentFilter && row.ctx.assigned_to !== agentFilter && row.ctx.dri !== agentFilter) return false;
+      if (typeFilter && row.task_type !== typeFilter) return false;
+      if (statusFilter && row.review_status !== statusFilter) return false;
+      return true;
+    });
+
+  const pendingTasks = collectPendingReviewTasks({
+    agent: agentFilter,
+    type: typeFilter,
+    status: statusFilter,
+  });
+
+  const pendingByAgent = new Map();
+  const pendingByType = new Map();
+  const pendingByStatus = new Map();
+
+  for (const task of pendingTasks) {
+    const agentKey = task.reviewee || '-';
+    const typeKey = task.task_type || 'untyped';
+    const statusKey = task.status || 'unknown';
+
+    if (!pendingByAgent.has(agentKey)) {
+      pendingByAgent.set(agentKey, {
+        agent: agentKey,
+        pending: 0,
+        completed: 0,
+        delivered: 0,
+        oldest_updated_at: task.updated_at || null,
+        latest_updated_at: task.updated_at || null,
+      });
+    }
+    if (!pendingByType.has(typeKey)) {
+      pendingByType.set(typeKey, {
+        type: typeKey,
+        pending: 0,
+        completed: 0,
+        delivered: 0,
+      });
+    }
+
+    const agentBucket = pendingByAgent.get(agentKey);
+    agentBucket.pending += 1;
+    if (statusKey === 'delivered') agentBucket.delivered += 1;
+    else if (statusKey === 'completed') agentBucket.completed += 1;
+    if (!agentBucket.oldest_updated_at || (task.updated_at || '') < agentBucket.oldest_updated_at) agentBucket.oldest_updated_at = task.updated_at || agentBucket.oldest_updated_at;
+    if (!agentBucket.latest_updated_at || (task.updated_at || '') > agentBucket.latest_updated_at) agentBucket.latest_updated_at = task.updated_at || agentBucket.latest_updated_at;
+
+    const typeBucket = pendingByType.get(typeKey);
+    typeBucket.pending += 1;
+    if (statusKey === 'delivered') typeBucket.delivered += 1;
+    else if (statusKey === 'completed') typeBucket.completed += 1;
+
+    pendingByStatus.set(statusKey, (pendingByStatus.get(statusKey) || 0) + 1);
+  }
+
+  const eligible = eligibleRows.length;
+  const pending = pendingTasks.length;
+  const reviewed = Math.max(eligible - pending, 0);
+
+  return {
+    eligible_tasks: eligible,
+    reviewed_tasks: reviewed,
+    pending_reviews: pending,
+    review_coverage: eligible ? reviewed / eligible : null,
+    by_agent: [...pendingByAgent.values()]
+      .sort((a, b) => {
+        if (b.pending !== a.pending) return b.pending - a.pending;
+        return a.agent.localeCompare(b.agent);
+      })
+      .slice(0, top),
+    by_type: [...pendingByType.values()]
+      .sort((a, b) => {
+        if (b.pending !== a.pending) return b.pending - a.pending;
+        return a.type.localeCompare(b.type);
+      })
+      .slice(0, top),
+    by_status: [...pendingByStatus.entries()]
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status)),
+  };
+}
+
 function formatAgentReputationSummary(agent) {
   if (!agent) return 'no data';
   return [
@@ -2596,6 +2696,7 @@ ATF CLI v2
   atf stats summary                      查看整体完成/反馈统计
   atf stats agents                       查看 agent 完成度/反馈统计
   atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N]  查看任务级统计
+  atf stats reviews [agent=x] [type=x] [status=completed|delivered] [top=N]  查看 review 覆盖率和 backlog 汇总
   atf stats types                        查看任务类型维度统计
   atf stats show <agent>                 查看单个 agent 完成度/反馈统计
   atf profile <taskId>                   查看任务画像
@@ -4068,8 +4169,10 @@ switch (cmd) {
       const pendingReviews = collectPendingReviewTasks();
       const deliveredTasks = tasks.filter(task => getEffectiveTaskReviewStatus(task) === 'delivered').length;
       const completedTasks = tasks.filter(task => isReviewEligibleTaskStatus(getEffectiveTaskReviewStatus(task))).length;
+      const reviewedTasks = Math.max(completedTasks - pendingReviews.length, 0);
+      const reviewCoverage = completedTasks ? `${roundNumber((reviewedTasks / completedTasks) * 100, 1)}%` : '-';
       console.log('\nATF Stats Summary\n');
-      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  pending_reviews=${pendingReviews.length}`);
+      console.log(`tasks: total=${tasks.length}  completed=${completedTasks}  delivered=${deliveredTasks}  reviewed=${reviewedTasks}  pending_reviews=${pendingReviews.length}  review_coverage=${reviewCoverage}`);
       if (statusCounts.size) {
         console.log('\nstatus counts:');
         for (const [status, count] of [...statusCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -4172,6 +4275,88 @@ switch (cmd) {
       break;
     }
 
+    if (sub === 'reviews') {
+      let agentFilter = null;
+      let typeFilter = null;
+      let statusFilter = null;
+      let top = 5;
+      let topSpecified = false;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('agent=')) {
+          agentFilter = part.substring('agent='.length);
+          continue;
+        }
+        if (part.startsWith('type=')) {
+          typeFilter = normalizeTaskTypeValue(part.substring('type='.length));
+          continue;
+        }
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('top=')) {
+          const value = Number(part.substring('top='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('stats reviews top 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          top = value;
+          topSpecified = true;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf stats reviews [agent=x] [type=x] [status=completed|delivered] [top=N]');
+        break;
+      }
+      if (statusFilter && !['completed', 'delivered'].includes(statusFilter)) {
+        console.error('stats reviews status 只支持 completed|delivered');
+        break;
+      }
+      const reviewStats = buildReviewCoverageStats({
+        agent: agentFilter,
+        type: typeFilter,
+        status: statusFilter,
+        top,
+      });
+      const filterLabel = [
+        agentFilter ? `agent=${agentFilter}` : null,
+        typeFilter ? `type=${typeFilter}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        topSpecified ? `top=${top}` : null,
+      ].filter(Boolean).join('  ');
+      console.log(`\nReview Coverage${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      console.log(`eligible=${reviewStats.eligible_tasks}  reviewed=${reviewStats.reviewed_tasks}  pending=${reviewStats.pending_reviews}  coverage=${formatRate(reviewStats.review_coverage)}`);
+      if (reviewStats.by_status.length) {
+        console.log('\npending by status:');
+        for (const bucket of reviewStats.by_status) {
+          console.log(`- ${bucket.status}: ${bucket.count}`);
+        }
+      }
+      if (reviewStats.by_agent.length) {
+        console.log('\npending by agent:');
+        console.log('agent           pending  completed  delivered  oldest');
+        console.log('─'.repeat(72));
+        for (const bucket of reviewStats.by_agent) {
+          console.log(`${bucket.agent.padEnd(15)} ${String(bucket.pending).padEnd(7)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)} ${bucket.oldest_updated_at || '-'}`);
+        }
+      }
+      if (reviewStats.by_type.length) {
+        console.log('\npending by type:');
+        console.log('type             pending  completed  delivered');
+        console.log('─'.repeat(54));
+        for (const bucket of reviewStats.by_type) {
+          console.log(`${bucket.type.padEnd(16)} ${String(bucket.pending).padEnd(7)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
     if (sub === 'agents' || sub === 'list') {
       const index = buildReputationIndex();
       const pendingByAgent = new Map();
@@ -4218,7 +4403,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf stats summary|agents|tasks|types|show ...');
+    console.error('用法: atf stats summary|agents|tasks|reviews|types|show ...');
     break;
   }
 

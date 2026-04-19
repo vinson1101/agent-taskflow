@@ -223,7 +223,7 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 - 已支持 `delivery / collaboration / task` 三类 review
 - 已支持 `credits rebuild / list / show`
 - 已支持 `reputation rebuild / list / show`
-- 已支持 `stats summary / agents / tasks / types / show`
+- 已支持 `stats summary / agents / tasks / reviews / types / show`
 - 已支持把任务、消息、回执、反思和 review 聚合成 `scores.json` reputation 索引
 - 已支持把“完成度 + review 反馈”派生为 `credits.json` 内部积分账本
 - 已支持任务级 `task_profile`，可记录 `type / difficulty / priority / tags`

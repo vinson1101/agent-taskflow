@@ -139,6 +139,8 @@ function main() {
   const statsSummary = runCli(['stats', 'summary'], env, options);
   const statsTasks = runCli(['stats', 'tasks'], env, options);
   const statsTasksFiltered = runCli(['stats', 'tasks', 'type=research', 'review=pending', 'limit=1'], env, options);
+  const statsTasksAgeFiltered = runCli(['stats', 'tasks', 'review=pending', 'max_age=0', 'limit=1'], env, options);
+  const statsTasksTooOld = runCli(['stats', 'tasks', 'review=pending', 'min_age=1'], env, options);
   const statsReviews = runCli(['stats', 'reviews'], env, options);
   const statsTypes = runCli(['stats', 'types'], env, options);
   const statsAgents = runCli(['stats', 'agents'], env, options);
@@ -147,6 +149,8 @@ function main() {
   const creditsShowPinchy = runCli(['credits', 'show', 'pinchymeow'], env, options);
   const reviewPending = runCli(['review', 'pending'], env, options);
   const reviewPendingFiltered = runCli(['review', 'pending', 'type=research', 'status=completed', 'limit=1'], env, options);
+  const reviewPendingAgeFiltered = runCli(['review', 'pending', 'max_age=0', 'limit=1'], env, options);
+  const reviewPendingTooOld = runCli(['review', 'pending', 'min_age=1'], env, options);
 
   assertIncludes(statsSummary, 'tasks: total=3', 'stats summary');
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
@@ -154,8 +158,12 @@ function main() {
   assertIncludes(statsSummary, 'oldest_pending_age=0d', 'stats summary');
   assertIncludes(statsTasks, pendingTaskId, 'stats tasks');
   assertIncludes(statsTasks, 'approved', 'stats tasks');
+  assertIncludes(statsTasks, 'age', 'stats tasks');
   assertIncludes(statsTasksFiltered, pendingTaskId, 'filtered stats tasks');
   assertIncludes(statsTasksFiltered, 'pending', 'filtered stats tasks');
+  assertIncludes(statsTasksAgeFiltered, pendingTaskId, 'age filtered stats tasks');
+  assertIncludes(statsTasksAgeFiltered, 'max_age=0', 'age filtered stats tasks');
+  assertIncludes(statsTasksTooOld, '暂无任务统计结果', 'too old stats tasks');
   assertIncludes(statsReviews, 'eligible=3  reviewed=2  pending=1', 'stats reviews');
   assertIncludes(statsReviews, '0-1d: 1', 'stats reviews');
   assertIncludes(statsReviews, 'f0x', 'stats reviews');
@@ -172,6 +180,9 @@ function main() {
   assertIncludes(reviewPending, 'age=0d', 'review pending');
   assertIncludes(reviewPendingFiltered, pendingTaskId, 'filtered review pending');
   assertIncludes(reviewPendingFiltered, 'status=completed', 'filtered review pending');
+  assertIncludes(reviewPendingAgeFiltered, pendingTaskId, 'age filtered review pending');
+  assertIncludes(reviewPendingAgeFiltered, 'max_age=0', 'age filtered review pending');
+  assertIncludes(reviewPendingTooOld, '暂无待评价任务', 'too old review pending');
 
   console.log('ATF Phase C Lite smoke passed.');
   console.log(`Smoke data: ${smokeRoot}`);

@@ -1964,6 +1964,21 @@ function getAgeBucketLabel(ageDays) {
   return '8d+';
 }
 
+function normalizeAgeFilterValue(value) {
+  if (isClearedValue(value)) return null;
+  const num = Number(value);
+  if (!Number.isInteger(num) || num < 0) return undefined;
+  return num;
+}
+
+function matchesAgeRange(ageDays, minAge = null, maxAge = null) {
+  if (minAge === null && maxAge === null) return true;
+  if (!Number.isInteger(ageDays) || ageDays < 0) return false;
+  if (minAge !== null && ageDays < minAge) return false;
+  if (maxAge !== null && ageDays > maxAge) return false;
+  return true;
+}
+
 function getEffectiveTaskReviewStatus(ctx) {
   if (!ctx) return 'unknown';
   if (ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered') return 'delivered';
@@ -2031,6 +2046,8 @@ function collectPendingReviewTasks(agentOrOptions = null, options = {}) {
   const agent = filters.agent || null;
   const typeFilter = normalizeTaskTypeValue(filters.type);
   const statusFilter = isClearedValue(filters.status) ? null : String(filters.status).trim().toLowerCase();
+  const minAge = Number.isInteger(filters.min_age) && filters.min_age >= 0 ? filters.min_age : null;
+  const maxAge = Number.isInteger(filters.max_age) && filters.max_age >= 0 ? filters.max_age : null;
   const limit = Number.isInteger(filters.limit) && filters.limit > 0 ? filters.limit : null;
 
   const pendingTasks = getAllTasks()
@@ -2061,6 +2078,7 @@ function collectPendingReviewTasks(agentOrOptions = null, options = {}) {
         existing_review_summary: buildTaskReviewSummary(taskId),
       };
     })
+    .filter(task => matchesAgeRange(task.age_days, minAge, maxAge))
     .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
 
   return limit ? pendingTasks.slice(0, limit) : pendingTasks;
@@ -2145,6 +2163,8 @@ function collectTaskStatsRows(options = {}) {
   const statusFilter = isClearedValue(options.status) ? null : String(options.status).trim().toLowerCase();
   const reviewFilterRaw = isClearedValue(options.review) ? null : String(options.review).trim().toLowerCase();
   const reviewFilter = reviewFilterRaw === 'na' ? 'n/a' : reviewFilterRaw;
+  const minAge = Number.isInteger(options.min_age) && options.min_age >= 0 ? options.min_age : null;
+  const maxAge = Number.isInteger(options.max_age) && options.max_age >= 0 ? options.max_age : null;
   const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
 
   const rows = getAllTasks()
@@ -2153,6 +2173,7 @@ function collectTaskStatsRows(options = {}) {
       const taskProfile = getTaskProfile(ctx);
       const reviewSummary = buildTaskReviewSummary(taskId);
       const completion = computeTaskCompletionCredits(ctx);
+      const updatedAt = ctx.updated_at || ctx.created_at || null;
       return {
         task_id: taskId,
         status: getEffectiveTaskReviewStatus(ctx),
@@ -2165,7 +2186,8 @@ function collectTaskStatsRows(options = {}) {
         avg_overall: reviewSummary?.avg_overall ?? null,
         review_count: reviewSummary?.total ?? 0,
         completion_credits: completion?.completion_credits ?? 0,
-        updated_at: ctx.updated_at || ctx.created_at || null,
+        updated_at: updatedAt,
+        age_days: computeAgeDays(updatedAt),
         description: ctx.description || '',
       };
     })
@@ -2173,6 +2195,7 @@ function collectTaskStatsRows(options = {}) {
       if (agentFilter && row.assigned_to !== agentFilter && row.dri !== agentFilter) return false;
       if (typeFilter && row.type !== typeFilter) return false;
       if (statusFilter && row.status !== statusFilter) return false;
+      if (!matchesAgeRange(row.age_days, minAge, maxAge)) return false;
       if (reviewFilter && reviewFilter !== 'all') {
         if (reviewFilter === 'reviewed') return ['approved', 'needs_revision', 'rejected', 'reviewed'].includes(row.feedback_state);
         return row.feedback_state === reviewFilter;
@@ -2756,7 +2779,7 @@ ATF CLI v2
   atf status <taskId>                    查看状态（+投递状态+DRI）
   atf stats summary                      查看整体完成/反馈统计
   atf stats agents                       查看 agent 完成度/反馈统计
-  atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N]  查看任务级统计
+  atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N]  查看任务级统计
   atf stats reviews [agent=x] [type=x] [status=completed|delivered] [top=N]  查看 review 覆盖率和 backlog 汇总
   atf stats types                        查看任务类型维度统计
   atf stats show <agent>                 查看单个 agent 完成度/反馈统计
@@ -2798,7 +2821,7 @@ ATF CLI v2
   atf reflect show <taskId> <reflectionId>               查看 Reflection
   atf review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...]
   atf review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...]
-  atf review pending [agent] [type=x] [status=completed|delivered] [limit=N]  查看待评价任务
+  atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]  查看待评价任务
   atf review show <taskId> <reviewId>                查看单条 Review
   atf credits rebuild                                重建 credits 积分索引
   atf credits list                                   查看内部积分概览
@@ -3967,6 +3990,8 @@ switch (cmd) {
       let agent = null;
       let typeFilter = null;
       let statusFilter = null;
+      let minAge = null;
+      let maxAge = null;
       let limit = null;
       let invalidArgs = false;
       for (const part of restArgs.filter(Boolean)) {
@@ -3976,6 +4001,26 @@ switch (cmd) {
         }
         if (part.startsWith('status=')) {
           statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('min_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('min_age='.length));
+          if (value === undefined) {
+            console.error('review pending min_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          minAge = value;
+          continue;
+        }
+        if (part.startsWith('max_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('max_age='.length));
+          if (value === undefined) {
+            console.error('review pending max_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          maxAge = value;
           continue;
         }
         if (part.startsWith('limit=')) {
@@ -3996,23 +4041,31 @@ switch (cmd) {
         break;
       }
       if (invalidArgs) {
-        console.error('用法: atf review pending [agent] [type=x] [status=completed|delivered] [limit=N]');
+        console.error('用法: atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]');
         break;
       }
       if (statusFilter && !['completed', 'delivered'].includes(statusFilter)) {
         console.error('review pending status 只支持 completed|delivered');
         break;
       }
+      if (minAge !== null && maxAge !== null && minAge > maxAge) {
+        console.error('review pending 要求 min_age <= max_age');
+        break;
+      }
       const pendingTasks = collectPendingReviewTasks({
         agent: agent || null,
         type: typeFilter,
         status: statusFilter,
+        min_age: minAge,
+        max_age: maxAge,
         limit,
       });
       const filterLabel = [
         agent ? `agent=${agent}` : null,
         typeFilter ? `type=${typeFilter}` : null,
         statusFilter ? `status=${statusFilter}` : null,
+        minAge !== null ? `min_age=${minAge}` : null,
+        maxAge !== null ? `max_age=${maxAge}` : null,
         limit ? `limit=${limit}` : null,
       ].filter(Boolean).join('  ');
       if (!pendingTasks.length) {
@@ -4272,6 +4325,8 @@ switch (cmd) {
       let typeFilter = null;
       let statusFilter = null;
       let reviewFilter = null;
+      let minAge = null;
+      let maxAge = null;
       let limit = null;
       let invalidArgs = false;
       for (const part of restArgs.filter(Boolean)) {
@@ -4291,6 +4346,26 @@ switch (cmd) {
           reviewFilter = String(part.substring('review='.length) || '').trim().toLowerCase();
           continue;
         }
+        if (part.startsWith('min_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('min_age='.length));
+          if (value === undefined) {
+            console.error('stats tasks min_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          minAge = value;
+          continue;
+        }
+        if (part.startsWith('max_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('max_age='.length));
+          if (value === undefined) {
+            console.error('stats tasks max_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          maxAge = value;
+          continue;
+        }
         if (part.startsWith('limit=')) {
           const value = Number(part.substring('limit='.length));
           if (!Number.isInteger(value) || value <= 0) {
@@ -4305,7 +4380,7 @@ switch (cmd) {
         break;
       }
       if (invalidArgs) {
-        console.error('用法: atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [limit=N]');
+        console.error('用法: atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N]');
         break;
       }
       if (statusFilter && !['created', 'assigned', 'confirmed', 'executing', 'paused', 'blocked', 'completed', 'delivered', 'cancelled', 'archived', 'unknown'].includes(statusFilter)) {
@@ -4316,11 +4391,17 @@ switch (cmd) {
         console.error('stats tasks review 只支持 all|pending|reviewed|approved|needs_revision|rejected|na');
         break;
       }
+      if (minAge !== null && maxAge !== null && minAge > maxAge) {
+        console.error('stats tasks 要求 min_age <= max_age');
+        break;
+      }
       const rows = collectTaskStatsRows({
         agent: agentFilter,
         type: typeFilter,
         status: statusFilter,
         review: reviewFilter,
+        min_age: minAge,
+        max_age: maxAge,
         limit,
       });
       const filterLabel = [
@@ -4328,6 +4409,8 @@ switch (cmd) {
         typeFilter ? `type=${typeFilter}` : null,
         statusFilter ? `status=${statusFilter}` : null,
         reviewFilter ? `review=${reviewFilter}` : null,
+        minAge !== null ? `min_age=${minAge}` : null,
+        maxAge !== null ? `max_age=${maxAge}` : null,
         limit ? `limit=${limit}` : null,
       ].filter(Boolean).join('  ');
       if (!rows.length) {
@@ -4335,10 +4418,10 @@ switch (cmd) {
         break;
       }
       console.log(`\nTask Stats (${rows.length}${filterLabel ? `  |  ${filterLabel}` : ''})\n`);
-      console.log('task     status      agent           type             feedback        avg   pts  updated');
-      console.log('─'.repeat(106));
+      console.log('task     status      agent           type             feedback        avg   pts  age  updated');
+      console.log('─'.repeat(112));
       for (const row of rows) {
-        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${row.updated_at || '-'}`);
+        console.log(`${row.task_id.padEnd(8)} ${row.status.padEnd(11)} ${row.assigned_to.padEnd(15)} ${row.type.padEnd(16)} ${row.feedback_state.padEnd(15)} ${String(row.avg_overall ?? '-').padEnd(5)} ${String(row.completion_credits).padEnd(4)} ${String(Number.isInteger(row.age_days) ? `${row.age_days}d` : '-').padEnd(4)} ${row.updated_at || '-'}`);
         console.log(`  ${row.description}`);
       }
       console.log('');

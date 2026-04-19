@@ -6,302 +6,188 @@
 
 ## 1. 当前结论
 
-当前仓库里：
+当前仓库里已经有：
 
-- 有完整的 CLI 协议层
-- 有 Trigger / Message / Reflection / Focus 对象层
-- 有 `trigger scan / scan-all`
-- 有 watcher 可直接消费的全局索引
+- 完整的 CLI 协议层
+- Trigger / Message / Reflection / Focus 对象层
+- `trigger scan / scan-all`
+- watcher 可直接消费的全局索引
+- 仓库内可见的 `workspace/bin/atf-watcher.cjs`
+- 最小 `Trigger Action Executor`
 
-当前仓库里没有：
+当前仓库里还没有：
 
-- 真正的 `workspace/bin/atf-watcher.cjs` 本体
-- 完整实时执行引擎
+- 常驻实时执行引擎
+- 更丰富的 Trigger Action Adapter（直达 session / bot / room）
+- 分布式 broker / relay / websocket 层
 
-所以推荐做法不是“等待 watcher 先实现”，而是：
+所以当前推荐的最小接法已经不是“手写 watcher 原型”，而是直接跑这条链：
 
-1. 用外部 `cron` 定时调用 `node atf-cli.js trigger scan-all`
-2. watcher 或 agent 进程读取全局 pending 索引
-3. agent 执行后调用 `trigger consume` / `trigger ignore`
-4. 需要沉淀时调用 `reflect from-fire`
+1. `trigger scan-all`
+2. `pending-trigger-fires.json` / `trigger-inboxes/*.json`
+3. `trigger execute-pending`
+4. `pending-task.json` / `trigger-executions/*.json`
+5. `reflect from-fire`
 
-补充：
+默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`，同时把 execution 记录写进 `trigger-executions/`。
 
-- 当前仓库内已经有最小 `Trigger Action Executor`
-- 可以直接用 `trigger execute` / `trigger execute-pending`
-- 默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`
+## 2. 仓库内可见的 watcher v1
 
-## 1.1 当前状态（2026-04-19）
+入口文件：
 
-服务器侧外部 `atf-watcher.cjs` 已完成一版最小接入，可视为 watcher v1.6。
+- `workspace/bin/atf-watcher.cjs`
 
-已验证：
+推荐调用：
 
-- 会先调用 `node atf-cli.js trigger scan-all`
-- 会读取 `pending-trigger-fires.json`
-- 会按 `owner_agent` 路由 fire
-- 会调用 `trigger consume`
-- 不会破坏旧的任务状态机、超时检测、DLQ 和 delivery 检测
-- Feishu 通知链路仍正常
+```bash
+node workspace/bin/atf-watcher.cjs --help
+node workspace/bin/atf-watcher.cjs --agent f0x --executor watcher-v1
+node workspace/bin/atf-watcher.cjs --agent f0x --dry-run
+npm run atf:watcher -- --agent f0x --executor watcher-v1
+```
 
-这意味着当前 ATF 的 Trigger fire 协议已经不只是“可定义”，而是已经能被 watcher 消费。
+当前支持的主要参数：
 
-## 2. 需要消费的文件
+- `--agent <name>` 只执行某个 agent 的 pending fires
+- `--executor <name>` execution record 里的执行者名字
+- `--mode <mode>` 强制执行模式，当前最常用是 `pending_task`
+- `--limit <n>` 限制本轮执行数量
+- `--at <ISO>` 用指定时间运行 scan
+- `--note <text>` 附加 execution note
+- `--no-scan` 只执行，不扫描
+- `--no-execute` 只扫描，不执行
+- `--dry-run` 只输出 summary，不实际执行
+- `--json` 输出 JSON summary
 
-最关键的两个文件：
+脚本默认行为：
 
-- `ATF_DATA_DIR/pending-trigger-fires.json`
-- `ATF_DATA_DIR/trigger-inboxes/<agent>.json`
-
-含义：
-
-- `pending-trigger-fires.json`
-  全局 pending fires 汇总，适合 watcher 总控脚本
-- `trigger-inboxes/<agent>.json`
-  单 agent 待处理 fires，适合某个 agent 自己轮询
-
-辅助文件：
-
-- `ATF_PENDING_DECISIONS_JSON`
-- `ATF_PENDING_DECISIONS_MD`
-
-这两个只和 `block / decide` 流程有关，不是 Trigger 主链的必需消费面。
+1. 调用 `node atf-cli.js trigger scan-all`
+2. 统计 pending 数量
+3. 调用 `node atf-cli.js trigger execute-pending`
+4. 输出本轮 summary
 
 ## 3. 推荐最小链路
 
-推荐把 watcher 拆成 3 个责任：
-
-### 3.1 扫描器
+### 3.1 扫描
 
 职责：
 
 - 定时执行 `trigger scan-all`
-- 只负责把 due trigger 转成 fire
+- 只负责把 due trigger 变成 fire
 
 命令：
 
 ```bash
 node atf-cli.js trigger scan-all
-```
-
-可选：
-
-```bash
 node atf-cli.js trigger scan-all f0x
 node atf-cli.js trigger scan-all at=2026-04-19T23:31:00+08:00
 ```
 
-### 3.2 路由器
+### 3.2 路由
 
 职责：
 
 - 读取 `pending-trigger-fires.json`
 - 或读取 `trigger-inboxes/<agent>.json`
-- 决定把哪条 fire 发给哪个 agent / session / heartbeat
+- 把 fire 路由到对应 agent / heartbeat
 
-它不需要解析任务目录，不需要重新算 due，不需要猜 owner。
+当前最简单的做法，是直接按 agent 跑：
 
-### 3.3 收敛器
+```bash
+node workspace/bin/atf-watcher.cjs --agent f0x --executor watcher-v1
+```
+
+### 3.3 执行与沉淀
 
 职责：
 
-- agent 执行后写回：
-  - `trigger consume`
-  - 或 `trigger ignore`
-- 需要记录经验时写：
-  - `reflect from-fire`
+- 执行 pending fire
+- 写入 `trigger-executions/*.json`
+- 把 fire 结算为 `consumed`
+- 需要时继续沉淀 `reflect from-fire`
 
 命令：
 
 ```bash
-node atf-cli.js trigger consume T-001 TGF-xxx f0x 已执行
-node atf-cli.js trigger ignore T-001 TGF-xxx pinchymeow 暂不处理
+node atf-cli.js trigger execute-pending f0x executor=watcher-v1 limit=20
 node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次触发有效
 ```
 
-## 4. 推荐 cron 频率
+## 4. 需要消费的文件
 
-因为你当前系统本来就依赖 heartbeat / cron，所以不要把扫描频率设计得太激进。
+最关键的文件：
 
-推荐分层：
+- `ATF_DATA_DIR/pending-trigger-fires.json`
+- `ATF_DATA_DIR/trigger-inboxes/<agent>.json`
+- `<taskDir>/pending-task.json`
+- `<taskDir>/trigger-executions/*.json`
 
-### 4.1 Trigger scan
+含义：
 
-如果只是最小运行：
+- `pending-trigger-fires.json`
+  全局 pending fire 汇总，适合 watcher 总控脚本
+- `trigger-inboxes/<agent>.json`
+  单 agent 待处理 fire 视图，适合 agent 自己轮询
+- `pending-task.json`
+  当前最小执行模式的落地交付物
+- `trigger-executions/*.json`
+  fire 的执行审计记录
 
-- 每 5 分钟一次
+## 5. 推荐 cron 频率
 
-如果任务更多、对时效更敏感：
+### 5.1 Trigger scan
 
-- 每 1 分钟一次
+建议：
+
+- 最小运行：每 5 分钟一次
+- 任务更多且更看重时效：每 1 分钟一次
 
 不建议：
 
-- 少于 30 秒一轮
+- 小于 30 秒一轮
 
-因为当前 ATF 不是实时事件系统，频率太高只会放大噪音和重复扫描压力。
+### 5.2 Agent watcher
 
-### 4.2 Agent inbox 消费
-
-如果 agent 自己通过 heartbeat 醒来：
+如果 agent 通过 heartbeat 醒来：
 
 - 跟 heartbeat 同步
 
-如果单独做 cron：
+如果单独跑 cron：
 
-- 每 5 到 15 分钟一次较稳妥
+- 每 5 到 15 分钟一轮比较稳妥
 
-### 4.3 Reflection / learnings promote
+### 5.3 Reflection / learnings promote
 
-推荐后置：
+建议后置：
 
 - Reflection 可以按事件触发
-- learnings promote 建议低频，比如每天 1 到 2 次
+- learnings promote 建议低频运行
 
-## 5. Linux cron 示例
+## 6. Linux cron 示例
 
-### 5.1 全局扫描
+### 6.1 全局 watcher
 
-每 5 分钟扫一次：
-
-```cron
-*/5 * * * * cd /root/.openclaw/workspace/agent-taskflow && node atf-cli.js trigger scan-all >> /tmp/atf-trigger-scan.log 2>&1
-```
-
-### 5.2 单 agent inbox 消费
-
-假设你有一个外部脚本 `consume-f0x.js`：
+每 5 分钟跑一次：
 
 ```cron
-*/10 * * * * cd /root/.openclaw/workspace/agent-taskflow && node consume-f0x.js >> /tmp/atf-f0x.log 2>&1
+*/5 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-watcher.cjs --executor watcher-v1 >> /tmp/atf-watcher.log 2>&1
 ```
 
-### 5.3 每晚复盘
+### 6.2 单 agent watcher
 
 ```cron
-30 23 * * * cd /root/.openclaw/workspace/agent-taskflow && node nightly-reflection.js >> /tmp/atf-nightly.log 2>&1
+*/10 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-watcher.cjs --agent f0x --executor watcher-v1 >> /tmp/atf-f0x.log 2>&1
 ```
 
-## 6. Watcher 最小伪代码
+### 6.3 只扫描不执行
 
-总控 watcher：
-
-```js
-run("node atf-cli.js trigger scan-all");
-const pending = readJson(`${ATF_DATA_DIR}/pending-trigger-fires.json`);
-for (const fire of pending.items) {
-  routeToAgent(fire.owner_agent, fire);
-}
+```cron
+*/5 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-watcher.cjs --no-execute >> /tmp/atf-scan.log 2>&1
 ```
 
-单 agent watcher：
+## 7. 本地 smoke 建议
 
-```js
-const inbox = readJson(`${ATF_DATA_DIR}/trigger-inboxes/f0x.json`);
-for (const fire of inbox.items) {
-  run(`node atf-cli.js trigger execute ${fire.task_id} ${fire.fire_id} executor=watcher-v1`);
-}
-```
-
-更简化的批量写法：
-
-```js
-run("node atf-cli.js trigger execute-pending f0x executor=watcher-v1 limit=20");
-```
-
-## 7. 推荐触发器写法
-
-### 7.1 interval
-
-适合：
-
-- 轮询
-- follow-up
-- 延迟复查
-
-示例：
-
-```bash
-node atf-cli.js trigger add T-001 f0x interval 5m
-node atf-cli.js trigger add T-001 f0x interval every:30m focus=FOC-xxx
-```
-
-### 7.2 cron
-
-适合：
-
-- 每日复盘
-- 每周巡检
-- 固定时间提醒
-
-当前支持的最小写法：
-
-```bash
-node atf-cli.js trigger add T-001 pinchymeow cron daily@23:30
-node atf-cli.js trigger add T-001 pinchymeow cron weekly@mon@10:00
-node atf-cli.js trigger add T-001 pinchymeow cron hourly@15
-node atf-cli.js trigger add T-001 pinchymeow cron "cron:*/10 * * * *"
-```
-
-### 7.3 事件型
-
-适合：
-
-- 收到消息后唤醒
-- 任务阻塞后唤醒
-- 状态变化后唤醒
-
-示例：
-
-```bash
-node atf-cli.js trigger add T-001 f0x on_message watch
-node atf-cli.js trigger add T-001 pinchymeow on_blocked watch
-node atf-cli.js trigger add T-001 pinchymeow on_status_change watch
-```
-
-## 8. 推荐集成顺序
-
-如果你现在要把外部 watcher 真接起来，顺序建议是：
-
-1. 先接 `trigger scan-all`
-2. 再接 `pending-trigger-fires.json`
-3. 再接 `trigger-inboxes/<agent>.json`
-4. 再接 `trigger execute-pending`
-5. 最后接 `reflect from-fire`
-
-不要一开始就做：
-
-- 复杂 broker
-- 跨节点 relay
-- 实时 websocket
-- 完整常驻执行引擎
-
-## 9. 幂等与注意事项
-
-### 9.1 不要重复消费同一 fire
-
-一个 `fire_id` 只应被结算一次：
-
-- `consume`
-- 或 `ignore`
-
-### 9.2 扫描不会重复生成 pending fire
-
-当前 `scan / scan-all` 会检查：
-
-- trigger 是否 `active`
-- 是否已 due
-- 是否已有 `pending_fire_id`
-
-所以在 fire 未结算前，不会为同一 trigger 重复生成新的 pending fire。
-
-### 9.3 归档会清掉 pending
-
-如果 focus 完成或 trigger 被归档，对应 pending fire 会被自动转为 `ignored`。
-
-### 9.4 本地验证建议先改路径
-
-如果你要在本机或仓库内做 smoke，不要直接写死系统目录，优先设置：
+不要直接写死系统目录，优先用隔离环境：
 
 ```powershell
 $env:ATF_TASKS_DIR = "D:\\tmp\\atf\\tasks"
@@ -309,15 +195,31 @@ $env:ATF_WORKSPACE_DIR = "D:\\tmp\\atf\\workspace"
 $env:ATF_DATA_DIR = "D:\\tmp\\atf\\data"
 ```
 
-## 10. 当前边界
+最小验证链：
 
-这份集成说明是针对当前版本的最小可用闭环，不代表已经有完整 watcher 平台。
+```bash
+node atf-cli.js trigger follow-up T-001 f0x 1s focus=FOC-xxx
+node workspace/bin/atf-watcher.cjs --agent f0x --executor watcher-v1
+node atf-cli.js trigger fires T-001
+node atf-cli.js trigger executions T-001
+```
+
+通过标准：
+
+- fire 被扫描出来
+- fire 被执行并结算为 `consumed`
+- `pending-task.json` 生成
+- `trigger-executions/*.json` 生成
+
+## 8. 当前边界
+
+这份文档描述的是当前版本的最小可用闭环，不代表已经有完整 watcher 平台。
 
 还没做的仍然包括：
 
-- 仓库内可见的 `atf-watcher.cjs` 源码快照
 - 更完整的 cron parser
-- 更丰富的 trigger action adapter（直接触达 agent session / bot / room，而不只是 `pending-task`）
+- 更丰富的 Trigger Action Adapter（直达 agent session / bot / room）
 - 多节点 / 多 gateway 分布式路由
+- 常驻实时 runtime
 
-但对你现在的目标来说，这已经足够把外部 cron / heartbeat 接起来。
+但对当前阶段来说，仓库里的 watcher v1 已经足够支撑下一轮 `scan-all -> execute-pending` 集成测试。

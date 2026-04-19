@@ -24,7 +24,7 @@
 | 文件 | 说明 |
 |------|------|
 | `atf-cli.js` | CLI 入口，所有命令 |
-| `workspace/bin/atf-watcher.cjs` | 由 cron 驱动的扫描脚本：状态监控 + 超时 DLQ + 通知 |
+| `workspace/bin/atf-watcher.cjs` | 仓库内可见的 watcher v1：`scan-all -> execute-pending` 批量执行脚本 |
 | `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
 | `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
 
@@ -107,6 +107,23 @@ node atf-cli.js dlq cancel <taskId>     # DLQ 取消
 
 ---
 
+## Watcher 入口
+
+```bash
+npm run atf:watcher -- --help
+npm run atf:watcher -- --agent f0x --executor watcher-v1
+npm run atf:watcher:dry -- --agent f0x
+```
+
+`workspace/bin/atf-watcher.cjs` 当前做两件事：
+
+1. 调用 `node atf-cli.js trigger scan-all`
+2. 调用 `node atf-cli.js trigger execute-pending`
+
+默认执行模式仍是 `pending_task`，也就是把 pending fire 落成任务目录下的 `pending-task.json`，同时写入 `trigger-executions/` 审计记录。
+
+---
+
 ## CLI 命令（未完成 / 实验性）
 
 > ⚠️ 以下命令今天加的，但设计过重，**暂不使用**，用 `update <status>` 代替
@@ -155,6 +172,7 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 - ✅ shared context 的 focus/thread/tag 绑定与过滤
 - ✅ reflect summary 任务级摘要
 - ✅ Trigger Action Executor 最小版（`execute / execute-pending / executions`）
+- ✅ 仓库内可见 watcher v1（`workspace/bin/atf-watcher.cjs`）
 - ✅ learnings-promote.cjs（→ MEMORY）
 - ✅ 岚遥机制（learnings/ 即时记录 + promote）
 

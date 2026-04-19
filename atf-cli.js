@@ -2416,16 +2416,36 @@ function buildRecentTaskWindow(options = {}) {
   });
   const statusCounts = new Map();
   const feedbackCounts = new Map();
+  const agentCounts = new Map();
   let selfReviewed = 0;
   let completed = 0;
   let delivered = 0;
 
   for (const row of rows) {
+    const agentKey = row.assigned_to || '-';
     statusCounts.set(row.status, (statusCounts.get(row.status) || 0) + 1);
     feedbackCounts.set(row.feedback_state, (feedbackCounts.get(row.feedback_state) || 0) + 1);
+    if (!agentCounts.has(agentKey)) {
+      agentCounts.set(agentKey, {
+        agent: agentKey,
+        tasks: 0,
+        completed: 0,
+        delivered: 0,
+        reviewed: 0,
+        pending: 0,
+        self_reviewed: 0,
+      });
+    }
+    const agentBucket = agentCounts.get(agentKey);
+    agentBucket.tasks += 1;
     if (row.self_review_count) selfReviewed += 1;
+    if (row.self_review_count) agentBucket.self_reviewed += 1;
     if (row.status === 'delivered') delivered += 1;
+    if (row.status === 'delivered') agentBucket.delivered += 1;
     if (row.status === 'completed') completed += 1;
+    if (row.status === 'completed') agentBucket.completed += 1;
+    if (row.feedback_state === 'pending') agentBucket.pending += 1;
+    if (['approved', 'needs_revision', 'rejected', 'reviewed'].includes(row.feedback_state)) agentBucket.reviewed += 1;
   }
 
   return {
@@ -2442,6 +2462,11 @@ function buildRecentTaskWindow(options = {}) {
     feedback_counts: [...feedbackCounts.entries()]
       .map(([state, count]) => ({ state, count }))
       .sort((a, b) => a.state.localeCompare(b.state)),
+    by_agent: [...agentCounts.values()]
+      .sort((a, b) => {
+        if (b.tasks !== a.tasks) return b.tasks - a.tasks;
+        return a.agent.localeCompare(b.agent);
+      }),
     rows: rows.slice(0, limit),
   };
 }
@@ -2473,6 +2498,141 @@ function buildStaleBacklogStats(options = {}) {
     pending: tasks.length,
     review_stats: reviewStats,
     tasks: tasks.slice(0, top),
+  };
+}
+
+function buildReviewBacklogStats(options = {}) {
+  const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 10;
+  const tasks = collectPendingReviewTasks({
+    agent: options.agent,
+    type: options.type,
+    status: options.status,
+    min_age: options.min_age,
+    max_age: options.max_age,
+  }).sort((a, b) => {
+    const ageA = Number.isInteger(a.age_days) ? a.age_days : -1;
+    const ageB = Number.isInteger(b.age_days) ? b.age_days : -1;
+    if (ageB !== ageA) return ageB - ageA;
+    return (a.updated_at || '').localeCompare(b.updated_at || '');
+  });
+
+  const byAgent = new Map();
+  const byType = new Map();
+  const byStatus = new Map();
+  const byAgeBucket = new Map();
+  let selfReviewedTasks = 0;
+  let oldestPendingAt = null;
+  let oldestPendingAgeDays = null;
+
+  for (const task of tasks) {
+    const agentKey = task.reviewee || '-';
+    const typeKey = task.task_type || 'untyped';
+    const statusKey = task.status || 'unknown';
+    const ageDays = Number.isInteger(task.age_days) ? task.age_days : null;
+    const ageBucketKey = getAgeBucketLabel(ageDays);
+
+    if (!byAgent.has(agentKey)) {
+      byAgent.set(agentKey, {
+        agent: agentKey,
+        pending: 0,
+        self_reviewed: 0,
+        completed: 0,
+        delivered: 0,
+        oldest_age_days: null,
+        oldest_updated_at: null,
+      });
+    }
+    if (!byType.has(typeKey)) {
+      byType.set(typeKey, {
+        type: typeKey,
+        pending: 0,
+        self_reviewed: 0,
+        completed: 0,
+        delivered: 0,
+      });
+    }
+
+    const agentBucket = byAgent.get(agentKey);
+    const typeBucket = byType.get(typeKey);
+
+    agentBucket.pending += 1;
+    typeBucket.pending += 1;
+    if (statusKey === 'delivered') {
+      agentBucket.delivered += 1;
+      typeBucket.delivered += 1;
+    } else if (statusKey === 'completed') {
+      agentBucket.completed += 1;
+      typeBucket.completed += 1;
+    }
+    if (task.self_review_count) {
+      selfReviewedTasks += 1;
+      agentBucket.self_reviewed += 1;
+      typeBucket.self_reviewed += 1;
+    }
+
+    byStatus.set(statusKey, (byStatus.get(statusKey) || 0) + 1);
+    byAgeBucket.set(ageBucketKey, (byAgeBucket.get(ageBucketKey) || 0) + 1);
+
+    if (task.updated_at && (!oldestPendingAt || task.updated_at < oldestPendingAt)) oldestPendingAt = task.updated_at;
+    if (ageDays !== null && (oldestPendingAgeDays === null || ageDays > oldestPendingAgeDays)) oldestPendingAgeDays = ageDays;
+    if (ageDays !== null && (agentBucket.oldest_age_days === null || ageDays > agentBucket.oldest_age_days)) agentBucket.oldest_age_days = ageDays;
+    if (task.updated_at && (!agentBucket.oldest_updated_at || task.updated_at < agentBucket.oldest_updated_at)) agentBucket.oldest_updated_at = task.updated_at;
+  }
+
+  return {
+    pending_tasks: tasks.length,
+    self_reviewed_tasks: selfReviewedTasks,
+    oldest_pending_at: oldestPendingAt,
+    oldest_pending_age_days: oldestPendingAgeDays,
+    by_agent: [...byAgent.values()]
+      .sort((a, b) => {
+        if (b.pending !== a.pending) return b.pending - a.pending;
+        const ageA = Number.isInteger(a.oldest_age_days) ? a.oldest_age_days : -1;
+        const ageB = Number.isInteger(b.oldest_age_days) ? b.oldest_age_days : -1;
+        if (ageB !== ageA) return ageB - ageA;
+        return a.agent.localeCompare(b.agent);
+      })
+      .slice(0, top),
+    by_type: [...byType.values()]
+      .sort((a, b) => {
+        if (b.pending !== a.pending) return b.pending - a.pending;
+        return a.type.localeCompare(b.type);
+      })
+      .slice(0, top),
+    by_status: [...byStatus.entries()]
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status)),
+    by_age_bucket: [...byAgeBucket.entries()]
+      .map(([bucket, count]) => ({ bucket, count }))
+      .sort((a, b) => {
+        const order = ['0-1d', '2-3d', '4-7d', '8d+', 'unknown'];
+        return order.indexOf(a.bucket) - order.indexOf(b.bucket);
+      }),
+    tasks: tasks.slice(0, top),
+  };
+}
+
+function buildOpsDigest(options = {}) {
+  const days = Number.isInteger(options.days) && options.days >= 0 ? options.days : 1;
+  const staleDays = Number.isInteger(options.stale_days) && options.stale_days >= 0 ? options.stale_days : 4;
+  const top = Number.isInteger(options.top) && options.top > 0 ? options.top : 5;
+  const tasks = getAllTasks();
+  const reviewCoverage = buildReviewCoverageStats({ top });
+  const recent = buildRecentTaskWindow({ days, limit: top * 2 });
+  const backlog = buildReviewBacklogStats({ min_age: staleDays, top });
+  const activeAgents = recent.by_agent.filter(bucket => bucket.tasks > 0).length;
+  const backlogAgents = backlog.by_agent.filter(bucket => bucket.pending > 0).length;
+
+  return {
+    days,
+    stale_days: staleDays,
+    top,
+    total_tasks: tasks.length,
+    recent,
+    review_coverage: reviewCoverage,
+    backlog,
+    active_agents: activeAgents,
+    backlog_agents: backlogAgents,
   };
 }
 
@@ -2913,6 +3073,7 @@ ATF CLI v2
   atf status <taskId>                    查看状态（+投递状态+DRI）
   atf stats summary                      查看整体完成/反馈统计
   atf stats agents                       查看 agent 完成度/反馈统计
+  atf stats digest [days=N] [stale_days=N] [top=N]  查看日常巡检摘要
   atf stats recent [days=N] [agent=x] [type=x] [status=x] [review=x] [limit=N]  查看最近窗口任务活动
   atf stats stale [days=N] [agent=x] [type=x] [status=completed|delivered] [top=N]  查看 stale review backlog
   atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N]  查看任务级统计
@@ -2958,6 +3119,7 @@ ATF CLI v2
   atf review add <taskId> <reviewer> <reviewee> <outcome> <总结> [type=x] [overall=4] [quality=4] [timeliness=4] [communication=4] [ownership=4] [focus=FOC-...] [thread=x] [trigger=TRG-...] [fire=TGF-...]
   atf review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...]
   atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]  查看待评价任务
+  atf review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看待评价 backlog 汇总
   atf review show <taskId> <reviewId>                查看单条 Review
   atf credits rebuild                                重建 credits 积分索引
   atf credits list                                   查看内部积分概览
@@ -4223,6 +4385,130 @@ switch (cmd) {
       break;
     }
 
+    if (sub === 'backlog') {
+      let agent = null;
+      let typeFilter = null;
+      let statusFilter = null;
+      let minAge = null;
+      let maxAge = null;
+      let top = 10;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('type=')) {
+          typeFilter = normalizeTaskTypeValue(part.substring('type='.length));
+          continue;
+        }
+        if (part.startsWith('status=')) {
+          statusFilter = String(part.substring('status='.length) || '').trim().toLowerCase();
+          continue;
+        }
+        if (part.startsWith('min_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('min_age='.length));
+          if (value === undefined) {
+            console.error('review backlog min_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          minAge = value;
+          continue;
+        }
+        if (part.startsWith('max_age=')) {
+          const value = normalizeAgeFilterValue(part.substring('max_age='.length));
+          if (value === undefined) {
+            console.error('review backlog max_age 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          maxAge = value;
+          continue;
+        }
+        if (part.startsWith('top=')) {
+          const value = Number(part.substring('top='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('review backlog top 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          top = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]');
+        break;
+      }
+      if (statusFilter && !['completed', 'delivered'].includes(statusFilter)) {
+        console.error('review backlog status 只支持 completed|delivered');
+        break;
+      }
+      if (minAge !== null && maxAge !== null && minAge > maxAge) {
+        console.error('review backlog 要求 min_age <= max_age');
+        break;
+      }
+
+      const backlog = buildReviewBacklogStats({
+        agent: agent || null,
+        type: typeFilter,
+        status: statusFilter,
+        min_age: minAge,
+        max_age: maxAge,
+        top,
+      });
+      const filterLabel = [
+        agent ? `agent=${agent}` : null,
+        typeFilter ? `type=${typeFilter}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        minAge !== null ? `min_age=${minAge}` : null,
+        maxAge !== null ? `max_age=${maxAge}` : null,
+        top ? `top=${top}` : null,
+      ].filter(Boolean).join('  ');
+      if (!backlog.pending_tasks) {
+        console.log(filterLabel ? `review backlog (${filterLabel}) 暂无待处理积压` : '当前暂无待处理 review backlog');
+        break;
+      }
+
+      console.log(`\nReview Backlog${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      console.log(`pending=${backlog.pending_tasks}  self_reviewed=${backlog.self_reviewed_tasks}${backlog.oldest_pending_age_days !== null ? `  oldest_age=${backlog.oldest_pending_age_days}d` : ''}`);
+      if (backlog.oldest_pending_at) console.log(`oldest_pending_at=${backlog.oldest_pending_at}`);
+      if (backlog.by_age_bucket.length) {
+        console.log('\nbacklog by age:');
+        for (const bucket of backlog.by_age_bucket) {
+          console.log(`- ${bucket.bucket}: ${bucket.count}`);
+        }
+      }
+      if (backlog.by_agent.length) {
+        console.log('\nbacklog by agent:');
+        console.log('agent           pending  self  completed  delivered  oldest_age  oldest');
+        console.log('-'.repeat(78));
+        for (const bucket of backlog.by_agent) {
+          console.log(`${bucket.agent.padEnd(15)} ${String(bucket.pending).padEnd(8)} ${String(bucket.self_reviewed).padEnd(5)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)} ${String(Number.isInteger(bucket.oldest_age_days) ? `${bucket.oldest_age_days}d` : '-').padEnd(11)} ${bucket.oldest_updated_at || '-'}`);
+        }
+      }
+      if (backlog.by_type.length) {
+        console.log('\nbacklog by type:');
+        console.log('type             pending  self  completed  delivered');
+        console.log('-'.repeat(54));
+        for (const bucket of backlog.by_type) {
+          console.log(`${bucket.type.padEnd(16)} ${String(bucket.pending).padEnd(8)} ${String(bucket.self_reviewed).padEnd(5)} ${String(bucket.completed).padEnd(10)} ${String(bucket.delivered).padEnd(10)}`);
+        }
+      }
+      if (backlog.tasks.length) {
+        console.log('\nbacklog tasks:');
+        for (const task of backlog.tasks) {
+          console.log(`[${task.task_id}] ${task.reviewee}  ${task.status}  ${task.updated_at}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}${task.self_review_count ? `  self_reviews=${task.self_review_count}` : ''}`);
+          console.log(`  ${task.description}`);
+        }
+      }
+      console.log('');
+      break;
+    }
+
     if (sub === 'list') {
       const [taskId, ...filterParts] = restArgs;
       if (!taskId) { console.error('用法: atf review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...]'); break; }
@@ -4277,7 +4563,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf review add|pending|list|show ...');
+    console.error('用法: atf review add|pending|backlog|list|show ...');
     break;
   }
 
@@ -4443,6 +4729,87 @@ switch (cmd) {
         }
       }
       if (oldestPendingAt) console.log(`\noldest pending review: ${oldestPendingAt}`);
+      console.log('');
+      break;
+    }
+
+    if (sub === 'digest') {
+      let days = 1;
+      let staleDays = 4;
+      let top = 5;
+      let invalidArgs = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('days=')) {
+          const value = normalizeAgeFilterValue(part.substring('days='.length));
+          if (value === undefined) {
+            console.error('stats digest days 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          days = value ?? 1;
+          continue;
+        }
+        if (part.startsWith('stale_days=')) {
+          const value = normalizeAgeFilterValue(part.substring('stale_days='.length));
+          if (value === undefined) {
+            console.error('stats digest stale_days 必须是非负整数');
+            invalidArgs = true;
+            break;
+          }
+          staleDays = value ?? 4;
+          continue;
+        }
+        if (part.startsWith('top=')) {
+          const value = Number(part.substring('top='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            console.error('stats digest top 必须是正整数');
+            invalidArgs = true;
+            break;
+          }
+          top = value;
+          continue;
+        }
+        invalidArgs = true;
+        break;
+      }
+      if (invalidArgs) {
+        console.error('用法: atf stats digest [days=N] [stale_days=N] [top=N]');
+        break;
+      }
+
+      const digest = buildOpsDigest({
+        days,
+        stale_days: staleDays,
+        top,
+      });
+      console.log(`\nATF Ops Digest  |  days=${digest.days}  stale_days=${digest.stale_days}  top=${digest.top}\n`);
+      console.log('overview:');
+      console.log(`- tasks=${digest.total_tasks}  review_eligible=${digest.review_coverage.eligible_tasks}  reviewed=${digest.review_coverage.reviewed_tasks}  self_reviewed=${digest.review_coverage.self_reviewed_tasks}  pending=${digest.review_coverage.pending_reviews}  stale=${digest.backlog.pending_tasks}`);
+      console.log(`- recent_tasks=${digest.recent.total}  completed=${digest.recent.completed}  delivered=${digest.recent.delivered}  reviewed=${digest.recent.reviewed}  pending=${digest.recent.pending}`);
+      console.log(`- external_review_coverage=${formatRate(digest.review_coverage.external_review_coverage)}  active_agents=${digest.active_agents}  backlog_agents=${digest.backlog_agents}${digest.backlog.oldest_pending_age_days !== null ? `  oldest_pending_age=${digest.backlog.oldest_pending_age_days}d` : ''}`);
+      if (digest.backlog.oldest_pending_at) console.log(`- oldest_pending_at=${digest.backlog.oldest_pending_at}`);
+
+      if (digest.recent.by_agent.length) {
+        console.log('\nrecent by agent:');
+        for (const bucket of digest.recent.by_agent.slice(0, digest.top)) {
+          console.log(`- ${bucket.agent}: tasks=${bucket.tasks}  completed=${bucket.completed}  delivered=${bucket.delivered}  reviewed=${bucket.reviewed}  pending=${bucket.pending}  self=${bucket.self_reviewed}`);
+        }
+      }
+
+      if (digest.backlog.by_agent.length) {
+        console.log('\nstale backlog by agent:');
+        for (const bucket of digest.backlog.by_agent) {
+          console.log(`- ${bucket.agent}: pending=${bucket.pending}  self=${bucket.self_reviewed}  completed=${bucket.completed}  delivered=${bucket.delivered}${Number.isInteger(bucket.oldest_age_days) ? `  oldest_age=${bucket.oldest_age_days}d` : ''}${bucket.oldest_updated_at ? `  oldest=${bucket.oldest_updated_at}` : ''}`);
+        }
+      }
+
+      if (digest.backlog.tasks.length) {
+        console.log('\noldest stale tasks:');
+        for (const task of digest.backlog.tasks) {
+          console.log(`- [${task.task_id}] ${task.reviewee}  ${task.status}${task.task_type ? `  type=${task.task_type}` : ''}${Number.isInteger(task.age_days) ? `  age=${task.age_days}d` : ''}${task.self_review_count ? `  self_reviews=${task.self_review_count}` : ''}`);
+          console.log(`  ${task.description}`);
+        }
+      }
       console.log('');
       break;
     }
@@ -4930,7 +5297,7 @@ switch (cmd) {
       break;
     }
 
-    console.error('用法: atf stats summary|agents|tasks|reviews|types|show ...');
+    console.error('用法: atf stats summary|digest|recent|stale|agents|tasks|reviews|types|show ...');
     break;
   }
 

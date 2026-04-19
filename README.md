@@ -61,6 +61,7 @@ node atf-cli.js nextnum                  # 下一个编号
 node atf-cli.js status <taskId>         # 查看状态
 node atf-cli.js stats summary            # 查看整体完成/反馈统计
 node atf-cli.js stats agents             # 查看 agent 完成度/反馈统计
+node atf-cli.js stats digest [days=N] [stale_days=N] [top=N] # 查看日常巡检摘要
 node atf-cli.js stats recent [days=N] [agent=x] [type=x] [status=x] [review=x] [limit=N] # 查看最近窗口任务活动
 node atf-cli.js stats stale [days=N] [agent=x] [type=x] [status=completed|delivered] [top=N] # 查看 stale review backlog
 node atf-cli.js stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N] # 查看任务级统计
@@ -76,6 +77,7 @@ node atf-cli.js update <taskId> <status> # 更新状态（pause/assigned/complet
 node atf-cli.js fan-out <taskId> <a1,a2> # fan-out 分发
 node atf-cli.js delivered <taskId>       # 标记已送达（Vinson 确认）
 node atf-cli.js dri <taskId> [agent]     # 设置/查看 DRI
+node atf-cli.js review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N] # 查看待评价 backlog 汇总
 node atf-cli.js focus add <taskId> <owner> <title>            # 创建 Focus Item
 node atf-cli.js focus list <taskId> [owner]                   # 列出 Focus Items
 node atf-cli.js focus show <taskId> <focusId>                 # 查看 Focus Item

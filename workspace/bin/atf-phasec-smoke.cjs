@@ -174,6 +174,7 @@ function main() {
   setTaskUpdatedAt(staleTaskId, env, staleUpdatedAt);
 
   const statsSummary = runCli(['stats', 'summary'], env, options);
+  const statsDigest = runCli(['stats', 'digest'], env, options);
   const statsRecent = runCli(['stats', 'recent'], env, options);
   const statsRecentF0x = runCli(['stats', 'recent', 'days=1', 'agent=f0x', 'limit=5'], env, options);
   const statsStale = runCli(['stats', 'stale'], env, options);
@@ -195,6 +196,8 @@ function main() {
   const reviewPendingFiltered = runCli(['review', 'pending', 'type=research', 'status=completed', 'limit=1'], env, options);
   const reviewPendingAgeFiltered = runCli(['review', 'pending', 'max_age=0', 'limit=1'], env, options);
   const reviewPendingTooOld = runCli(['review', 'pending', 'min_age=6'], env, options);
+  const reviewBacklog = runCli(['review', 'backlog'], env, options);
+  const reviewBacklogStale = runCli(['review', 'backlog', 'min_age=4', 'top=5'], env, options);
 
   assertIncludes(statsSummary, 'tasks: total=4', 'stats summary');
   assertIncludes(statsSummary, 'reviewed=2', 'stats summary');
@@ -202,6 +205,10 @@ function main() {
   assertIncludes(statsSummary, 'pending_reviews=2', 'stats summary');
   assertIncludes(statsSummary, 'stale_pending_reviews=1', 'stats summary');
   assertIncludes(statsSummary, 'oldest_pending_age=5d', 'stats summary');
+  assertIncludes(statsDigest, 'review_eligible=4  reviewed=2  self_reviewed=1  pending=2  stale=1', 'stats digest');
+  assertIncludes(statsDigest, 'recent_tasks=3  completed=2  delivered=1  reviewed=2  pending=1', 'stats digest');
+  assertIncludes(statsDigest, 'f0x: tasks=2', 'stats digest');
+  assertIncludes(statsDigest, staleTaskId, 'stats digest');
   assertIncludes(statsRecent, 'tasks=3  completed=2  delivered=1  reviewed=2  pending=1  self_reviewed=1', 'stats recent');
   assertIncludes(statsRecent, pendingTaskId, 'stats recent');
   assertNotIncludes(statsRecent, staleTaskId, 'stats recent');
@@ -250,6 +257,11 @@ function main() {
   assertIncludes(reviewPendingAgeFiltered, pendingTaskId, 'age filtered review pending');
   assertIncludes(reviewPendingAgeFiltered, 'max_age=0', 'age filtered review pending');
   assertIncludes(reviewPendingTooOld, '暂无待评价任务', 'too old review pending');
+  assertIncludes(reviewBacklog, 'pending=2  self_reviewed=1  oldest_age=5d', 'review backlog');
+  assertIncludes(reviewBacklog, 'f0x', 'review backlog');
+  assertIncludes(reviewBacklog, staleTaskId, 'review backlog');
+  assertIncludes(reviewBacklogStale, 'pending=1  self_reviewed=0  oldest_age=5d', 'review backlog stale');
+  assertIncludes(reviewBacklogStale, staleTaskId, 'review backlog stale');
 
   console.log('ATF Phase C Lite smoke passed.');
   console.log(`Smoke data: ${smokeRoot}`);

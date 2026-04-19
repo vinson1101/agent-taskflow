@@ -67,12 +67,16 @@ Phase A/B 已经让 ATF 具备了任务、消息、Trigger、Reflection 和 watc
   直接看任务级完成度、反馈状态和 completion credits，可按 agent / type / status / review / age 过滤
 - `stats recent`
   用最近窗口看内部任务活动，便于日常快速判断“今天谁在交付、谁还没进 review”
+- `stats digest`
+  把最近窗口、review coverage 和 stale backlog 压成一条日常巡检摘要
 - `stats stale`
   直接切出 stale review backlog，默认聚焦 4 天以上的 pending reviews，适合日常清积压
 - `stats reviews`
   直接看 review coverage，以及待评价 backlog 在 agent / type / status / age 上的汇总
   自评会单独留痕，但不计入外部 review coverage，也不会消除 pending review
   同时支持按 age 过滤，便于日常只看 stale backlog
+- `review backlog`
+  直接按 agent / type / age 汇总 pending reviews，并列出最需要补 review 的任务
 
 ### 2. Reputation Index
 

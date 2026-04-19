@@ -176,6 +176,8 @@ ATF 的价值已经不只是“记录任务”，而是：
 - 已支持按 backlog age 做 review 巡检，`stats summary / stats reviews / review pending` 均可直接看到最老积压或 age_days
 - 已支持记录 self review，但 self review 不会消除 pending backlog，也不会计入外部 coverage
 - 已支持直接筛出 stale review backlog，`stats summary` 会给 `stale_pending_reviews`，`stats reviews` 支持按 age 过滤
+- 已支持 `stats digest` 汇总最近活动、review 覆盖率和 stale backlog，方便日常 first look
+- 已支持 `review backlog` 直接按 agent / type / age 汇总待评价积压，并列出最该清的任务
 - 已支持在 `status / assign` 中直接读取 review / reputation / credits 摘要
 - 已支持 `assign recommend` 结合任务画像给内部指派提供排序参考
 

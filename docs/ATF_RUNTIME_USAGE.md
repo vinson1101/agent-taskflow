@@ -382,6 +382,8 @@ node atf-cli.js review pending
 node atf-cli.js review pending f0x
 node atf-cli.js review pending type=research status=completed limit=5
 node atf-cli.js review pending status=completed min_age=4 limit=20
+node atf-cli.js review backlog
+node atf-cli.js review backlog f0x min_age=4 top=10
 node atf-cli.js review show T-001 REV-xxx
 ```
 
@@ -406,6 +408,8 @@ node atf-cli.js credits show f0x
 ```bash
 node atf-cli.js stats summary
 node atf-cli.js stats agents
+node atf-cli.js stats digest
+node atf-cli.js stats digest days=1 stale_days=4 top=5
 node atf-cli.js stats recent
 node atf-cli.js stats recent days=1 agent=f0x limit=10
 node atf-cli.js stats stale
@@ -446,6 +450,7 @@ node atf-cli.js assign recommend T-001 top=5
 - `task_profile` 当前只做内部任务画像，支持 `type / difficulty / priority / tags`
 - `status` 会直接显示任务画像、review 摘要，以及 assignee 的 reputation / credits 摘要
 - `stats` 是更直接的内部统计入口，优先服务完成度和反馈查看
+- `stats digest` 会把最近窗口、review 覆盖率和 stale backlog 压成一条巡检摘要，适合日常 first look
 - `stats recent` 用于看最近 1 天或最近 N 天的任务活动窗口，可按 agent / type / status / review 过滤
 - `stats stale` 用于直接切出 4 天以上的 pending review backlog，默认按最老任务优先展示
 - `stats tasks` 用于直接看任务级完成度、反馈状态和完成度积分
@@ -461,6 +466,7 @@ node atf-cli.js assign recommend T-001 top=5
 - `review pending` 用于找出 `completed / delivered` 但还没有形成 `task / delivery review` 的任务
 - `review pending` 支持 `type=` / `status=` / `limit=` 过滤，并直接显示 `age=Xd`
 - `review pending` 支持 `min_age=` / `max_age=`，便于只看 4 天以上或最近 1 天内的 backlog
+- `review backlog` 会把 pending reviews 直接按 agent / type / age 汇总，并列出最该清的 backlog 任务
 - 更重的身份、激励、结算设计会放到未来商用化阶段
 
 ## 7. 全局索引

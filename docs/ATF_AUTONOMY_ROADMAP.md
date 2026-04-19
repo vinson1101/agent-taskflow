@@ -231,6 +231,8 @@ ATF 需要把“复盘”从分散的记事提升为任务对象的一部分。
 - 已支持 backlog aging 巡检，能直接看最老 pending review 和 age bucket
 - 已支持 self review 留痕，但 self review 不会冲掉外部 review backlog / coverage
 - 已支持 `stats reviews min_age=...` 聚焦 stale backlog，`stats summary` 直接暴露 stale count
+- 已支持 `stats digest` 生成日常巡检摘要，把 recent / coverage / stale backlog 压成一条视图
+- 已支持 `review backlog` 直接按 agent / type / age 汇总待评价积压，便于清 backlog
 - 已支持 `assign recommend` 读取任务画像并给内部调度提供排序建议
 
 当前收敛原则：

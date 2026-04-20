@@ -177,7 +177,12 @@ function main() {
   const actionWatcherHelp = runScript(actionWatcherPath, ['--help'], env, options);
   const launcherHelp = runScript(launcherPath, ['--help'], env, options);
   assertIncludes(watcherHelp, 'pending_task|message|room|noop', 'watcher help');
+  assertIncludes(watcherHelp, '--room <name>', 'watcher help');
+  assertIncludes(watcherHelp, '--thread <id>', 'watcher help');
+  assertIncludes(watcherHelp, '--to <agent>', 'watcher help');
   assertIncludes(actionWatcherHelp, 'message|pending_task|noop', 'action watcher help');
+  assertIncludes(actionWatcherHelp, '--thread <id>', 'action watcher help');
+  assertIncludes(actionWatcherHelp, '--to <agent>', 'action watcher help');
   assertIncludes(launcherHelp, 'manual|noop|sessions_spawn', 'launcher help');
 
   const invalidWatcherMode = runExpectedFailure(watcherPath, ['--mode', 'invalid-mode'], env);
@@ -193,10 +198,11 @@ function main() {
   const taskDir = resolveTaskDir(taskId, env);
   fs.rmSync(path.join(taskDir, 'pending-task.json'), { force: true });
 
-  runCli(['trigger', 'follow-up', taskId, 'pinchymeow', '1s', 'thread=room:design'], env, options);
+  runCli(['trigger', 'follow-up', taskId, 'pinchymeow', '1s'], env, options);
   const watcherSummary = JSON.parse(runTriggerWatcher([
     '--agent', 'pinchymeow',
     '--mode', 'room',
+    '--room', 'design',
     '--executor', 'watcher-smoke',
     '--at', new Date(Date.now() + (2 * 60 * 1000)).toISOString(),
     '--json',

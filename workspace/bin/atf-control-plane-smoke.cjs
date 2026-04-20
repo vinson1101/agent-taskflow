@@ -1,0 +1,283 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const util = require('util');
+const vm = require('vm');
+const { createRequire } = require('module');
+
+const repoRoot = path.resolve(__dirname, '..', '..');
+const cliPath = path.join(repoRoot, 'atf-cli.js');
+const controlPlanePath = path.join(repoRoot, 'workspace', 'bin', 'atf-control-plane.cjs');
+const smokeRoot = path.join(repoRoot, '.tmp-atf-control-plane-smoke');
+
+function parseArgs(argv) {
+  return {
+    cleanup: argv.includes('--cleanup'),
+    quiet: argv.includes('--quiet'),
+  };
+}
+
+function safeResetDir(target) {
+  if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
+  fs.mkdirSync(target, { recursive: true });
+}
+
+function executeScript(scriptPath, args, env) {
+  const source = fs.readFileSync(scriptPath, 'utf8');
+  const stdout = [];
+  const stderr = [];
+  const exitSignal = { code: 0 };
+  const scriptRequire = createRequire(scriptPath);
+  const scriptProcess = {
+    ...process,
+    argv: [process.execPath, scriptPath, ...args],
+    env: {
+      ...process.env,
+      ...env,
+    },
+    cwd: () => repoRoot,
+    exit(code = 0) {
+      exitSignal.code = code;
+      throw exitSignal;
+    },
+  };
+
+  const context = {
+    require: scriptRequire,
+    module: { exports: {} },
+    exports: {},
+    __dirname: path.dirname(scriptPath),
+    __filename: scriptPath,
+    process: scriptProcess,
+    console: {
+      log: (...parts) => stdout.push(util.format(...parts)),
+      error: (...parts) => stderr.push(util.format(...parts)),
+    },
+    Buffer,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+  };
+
+  try {
+    vm.runInNewContext(source, context, { filename: scriptPath });
+  } catch (error) {
+    if (error !== exitSignal) {
+      return {
+        stdout: stdout.join('\n').trim(),
+        stderr: stderr.join('\n').trim(),
+        exitCode: exitSignal.code || 1,
+        error: error.message || String(error),
+      };
+    }
+  }
+
+  return {
+    stdout: stdout.join('\n').trim(),
+    stderr: stderr.join('\n').trim(),
+    exitCode: exitSignal.code,
+    error: null,
+  };
+}
+
+function runScript(scriptPath, args, env, options = {}) {
+  const result = executeScript(scriptPath, args, env);
+  if (result.exitCode !== 0 || result.stderr) {
+    const message = [
+      `node ${path.basename(scriptPath)} ${args.join(' ')}`,
+      result.stdout ? `stdout:\n${result.stdout}` : null,
+      result.stderr ? `stderr:\n${result.stderr}` : null,
+      result.error ? `error:\n${result.error}` : null,
+      result.exitCode ? `exit=${result.exitCode}` : null,
+    ].filter(Boolean).join('\n');
+    throw new Error(message);
+  }
+
+  if (!options.quiet && result.stdout) {
+    console.log(`$ node ${path.basename(scriptPath)} ${args.join(' ')}`);
+    console.log(result.stdout);
+    console.log('');
+  }
+
+  return result.stdout;
+}
+
+function runExpectedFailure(scriptPath, args, env) {
+  const result = executeScript(scriptPath, args, env);
+  if (result.exitCode === 0 && !result.stderr && !result.error) {
+    throw new Error(`expected failure: node ${path.basename(scriptPath)} ${args.join(' ')}`);
+  }
+  return [result.stdout, result.stderr, result.error].filter(Boolean).join('\n');
+}
+
+function runCli(args, env, options = {}) {
+  return runScript(cliPath, args, env, options);
+}
+
+function runControlPlane(args, env, options = {}) {
+  return runScript(controlPlanePath, args, env, options);
+}
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function writeJson(filePath, data) {
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function extractTaskId(output) {
+  const match = output.match(/T-\d+/);
+  if (!match) throw new Error(`task id not found in output:\n${output}`);
+  return match[0];
+}
+
+function assertIncludes(output, fragment, label) {
+  if (!output.includes(fragment)) {
+    throw new Error(`${label} missing fragment: ${fragment}\n--- output ---\n${output}`);
+  }
+}
+
+function resolveTaskDir(taskId, env) {
+  const entries = fs.readdirSync(env.ATF_TASKS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const ctxFile = path.join(env.ATF_TASKS_DIR, entry.name, 'ctx.json');
+    if (!fs.existsSync(ctxFile)) continue;
+    const ctx = readJson(ctxFile);
+    if (ctx.task_id === taskId || ctx.short_id === taskId) {
+      return path.join(env.ATF_TASKS_DIR, entry.name);
+    }
+  }
+  throw new Error(`task dir not found for ${taskId}`);
+}
+
+function setTaskUpdatedAt(taskId, env, updatedAt, createdAt = updatedAt) {
+  const taskDir = resolveTaskDir(taskId, env);
+  for (const fileName of ['ctx.json', 'latest.json']) {
+    const filePath = path.join(taskDir, fileName);
+    if (!fs.existsSync(filePath)) continue;
+    const ctx = readJson(filePath);
+    ctx.updated_at = updatedAt;
+    ctx.created_at = createdAt;
+    writeJson(filePath, ctx);
+  }
+}
+
+function readJsonCollection(dirPath) {
+  if (!fs.existsSync(dirPath)) return [];
+  return fs.readdirSync(dirPath)
+    .filter(name => name.endsWith('.json'))
+    .map(name => readJson(path.join(dirPath, name)));
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+  safeResetDir(smokeRoot);
+
+  const env = {
+    ATF_TASKS_DIR: path.join(smokeRoot, 'tasks'),
+    ATF_WORKSPACE_DIR: path.join(smokeRoot, 'workspace'),
+    ATF_DATA_DIR: path.join(smokeRoot, 'data'),
+    ATF_WORKSPACE_F0X: path.join(smokeRoot, 'workspace-f0x'),
+  };
+
+  for (const dir of Object.values(env)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const quietIdle = executeScript(controlPlanePath, ['--quiet-idle'], env);
+  if (quietIdle.exitCode !== 0) throw new Error(`expected quiet idle control-plane exit=0, got ${quietIdle.exitCode}`);
+  if (quietIdle.stdout || quietIdle.stderr) throw new Error('expected quiet idle control-plane to print nothing');
+
+  const controlPlaneHelp = runScript(controlPlanePath, ['--help'], env, options);
+  assertIncludes(controlPlaneHelp, '--trigger-mode <mode>', 'control-plane help');
+  assertIncludes(controlPlaneHelp, '--trigger-room <name>', 'control-plane help');
+  assertIncludes(controlPlaneHelp, '--action-mode <mode>', 'control-plane help');
+  assertIncludes(controlPlaneHelp, '--action-thread <id>', 'control-plane help');
+
+  const invalidTriggerMode = runExpectedFailure(controlPlanePath, ['--trigger-mode', 'invalid-mode'], env);
+  const invalidActionMode = runExpectedFailure(controlPlanePath, ['--action-mode', 'invalid-mode'], env);
+  const invalidLauncherMode = runExpectedFailure(controlPlanePath, ['--launcher-mode', 'invalid-mode'], env);
+  assertIncludes(invalidTriggerMode, 'invalid --trigger-mode: invalid-mode. expected one of pending_task|message|room|noop', 'invalid trigger mode');
+  assertIncludes(invalidActionMode, 'invalid --action-mode: invalid-mode. expected one of message|pending_task|noop', 'invalid action mode');
+  assertIncludes(invalidLauncherMode, 'invalid --launcher-mode: invalid-mode. expected one of manual|noop|sessions_spawn', 'invalid launcher mode');
+
+  runCli(['agent', 'register', 'f0x', `workspace=${env.ATF_WORKSPACE_F0X}`], env, options);
+
+  const triggerTaskOutput = runCli(['create', 'Control plane trigger demo', 'type=ops', 'difficulty=1', 'priority=low'], env, options);
+  const triggerTaskId = extractTaskId(triggerTaskOutput);
+  runCli(['assign', triggerTaskId, 'f0x'], env, options);
+  fs.rmSync(path.join(resolveTaskDir(triggerTaskId, env), 'pending-task.json'), { force: true });
+  runCli(['trigger', 'follow-up', triggerTaskId, 'f0x', '1s'], env, options);
+
+  const staleTaskOutput = runCli(['create', 'Control plane stale review demo', 'type=ops', 'difficulty=2', 'priority=normal'], env, options);
+  const staleTaskId = extractTaskId(staleTaskOutput);
+  runCli(['assign', staleTaskId, 'f0x'], env, options);
+  runCli(['update', staleTaskId, 'completed'], env, options);
+  setTaskUpdatedAt(staleTaskId, env, new Date(Date.now() - (5 * 24 * 60 * 60 * 1000)).toISOString());
+  fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
+
+  const summary = JSON.parse(runControlPlane([
+    '--agent', 'f0x',
+    '--trigger-executor', 'control-plane-smoke',
+    '--trigger-mode', 'room',
+    '--trigger-room', 'design',
+    '--trigger-at', new Date(Date.now() + (2 * 60 * 1000)).toISOString(),
+    '--action-executor', 'control-plane-smoke',
+    '--action-mode', 'pending_task',
+    '--launcher-dispatcher', 'control-plane-smoke',
+    '--launcher-mode', 'noop',
+    '--min-confidence', '0',
+    '--cooldown-minutes', '0',
+    '--lease-minutes', '5',
+    '--json',
+  ], env, options));
+
+  if (summary.status !== 'completed') throw new Error(`expected control-plane status completed, got ${summary.status}`);
+  if (!summary.activity.trigger) throw new Error('expected trigger activity in control-plane summary');
+  if (!summary.activity.action) throw new Error('expected action activity in control-plane summary');
+  if (!summary.activity.launcher) throw new Error('expected launcher activity in control-plane summary');
+  if (summary.idle) throw new Error('expected non-idle control-plane summary');
+  if ((summary.trigger?.executed || 0) !== 1) throw new Error(`expected trigger executed=1, got ${summary.trigger?.executed}`);
+  if ((summary.action?.executed || 0) !== 1) throw new Error(`expected action executed=1, got ${summary.action?.executed}`);
+  if ((summary.launcher?.created || 0) !== 1) throw new Error(`expected launcher created=1, got ${summary.launcher?.created}`);
+  if ((summary.launcher?.leased || 0) !== 1) throw new Error(`expected launcher leased=1, got ${summary.launcher?.leased}`);
+
+  const triggerTaskDir = resolveTaskDir(triggerTaskId, env);
+  const triggerMessages = readJsonCollection(path.join(triggerTaskDir, 'messages'));
+  const roomMessage = triggerMessages.find(message => message.adapter_mode === 'room');
+  if (!roomMessage) throw new Error('expected trigger watcher to write a room message');
+  if (roomMessage.to_agent !== 'room:design') throw new Error(`expected room target room:design, got ${roomMessage.to_agent}`);
+  if (fs.existsSync(path.join(triggerTaskDir, 'pending-task.json'))) {
+    throw new Error('room trigger execution should not write taskDir/pending-task.json');
+  }
+
+  const actionPendingTask = readJson(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'));
+  if (actionPendingTask.kind !== 'stale_review_follow_up') {
+    throw new Error(`expected action pending-task kind stale_review_follow_up, got ${actionPendingTask.kind}`);
+  }
+  if (actionPendingTask.task_id !== staleTaskId) {
+    throw new Error(`expected action pending-task task_id ${staleTaskId}, got ${actionPendingTask.task_id}`);
+  }
+
+  const launchStatus = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  if (launchStatus.counts.leased !== 1) throw new Error(`expected leased launch count=1, got ${launchStatus.counts.leased}`);
+
+  console.log('ATF control-plane smoke passed.');
+
+  if (options.cleanup) {
+    fs.rmSync(smokeRoot, { recursive: true, force: true });
+    console.log('Smoke directory removed.');
+  }
+}
+
+try {
+  main();
+} catch (error) {
+  console.error('ATF control-plane smoke failed.');
+  console.error(error.message || String(error));
+  process.exit(1);
+}

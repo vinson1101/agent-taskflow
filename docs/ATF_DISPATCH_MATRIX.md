@@ -26,7 +26,7 @@ ATF 当前最容易被误读的地方，不是“有没有这些能力”，而�
 | 链路 | 底层 capability | wrapper / 对外入口 | 默认 mode | 主要执行产物 | 失败/跳过语义 | 审计落点 | 下一步由谁消费 |
 |------|------|------|------|------|------|------|------|
 | Trigger executor | `pending_task / message / room / noop` | `atf trigger execute` / `execute-pending`；`workspace/bin/atf-watcher.cjs` 透传调用 | `pending_task` | `<taskDir>/pending-task.json` 或 `<taskDir>/messages/*.json` | `failed` / `skipped`；`room` 缺参时 fire 保持 `pending` | `<taskDir>/trigger-executions/*.json` | task 级 signal 由 agent / control-plane 后续消费 |
-| Watcher wrapper | 调 `trigger scan-all -> trigger execute-pending` | `workspace/bin/atf-watcher.cjs` | 不额外改写默认值；透传到底层 trigger executor | summary 输出；实际产物由 trigger executor 决定 | wrapper 自身不做本地 mode 白名单校验；底层失败会写 execution/audit | watcher stdout / JSON summary；task 级 `trigger-executions` | control-plane、巡检脚本、人工排障 |
+| Watcher wrapper | 调 `trigger scan-all -> trigger execute-pending`；支持 `to / thread / room` 透传 | `workspace/bin/atf-watcher.cjs` | 不额外改写默认值；透传到底层 trigger executor | summary 输出；实际产物由 trigger executor 决定 | wrapper 会先做本地 mode 白名单校验；底层失败仍会写 execution/audit | watcher stdout / JSON summary；task 级 `trigger-executions` | control-plane、巡检脚本、人工排障 |
 | Action executor | `message / pending_task / noop` | `atf action execute` / `execute-pending`；`workspace/bin/atf-action-watcher.cjs` | 无隐式强制；常见是 `message` 或 `pending_task` | `<taskDir>/messages/*.json` 或 `<agentWorkspace>/pending-task.json` | 先 `preflight`，后 `postflight`；未通过时标记 `skipped`，不会盲目 dispatch | action record 自身的 `execution / verification`；`ATF_DATA_DIR/action-watcher-runs/*` | agent workspace signal、任务线程、巡检状态 |
 | Launch dispatch | `manual / noop / sessions_spawn` | `atf launch dispatch` / `dispatch-pending`；`workspace/bin/atf-launcher.cjs` | `manual` 或 wrapper 指定值；control-plane 默认 `sessions_spawn` | `ATF_DATA_DIR/launch-dispatch-payloads/<launchId>.json` + `ATF_LAUNCH_*` env | request 可变成 `failed / leased / archived`；source 缺失时归档 | launch request history；`ATF_DATA_DIR/launcher-runs/*` | runtime bridge / backend / real session launcher |
 
@@ -69,7 +69,8 @@ ATF 当前最容易被误读的地方，不是“有没有这些能力”，而�
 关键点：
 
 - wrapper 不是第二套执行器，只是对 trigger scan/execute 的封装
-- wrapper 的 `--mode` 本质上是透传给底层 CLI
+- wrapper 的 `--mode` 会先做本地白名单校验，再透传给底层 CLI
+- wrapper 也可以把 `--to / --thread / --room` 显式透传给 trigger executor
 - 真实执行产物和失败语义由 trigger executor 决定，不由 wrapper 决定
 
 直接证据：

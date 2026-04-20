@@ -291,7 +291,10 @@ npm run atf:action:watcher:dry -- --agent f0x --mode pending_task
 npm run atf:launcher -- --agent f0x --mode noop
 npm run atf:launcher:dry -- --agent f0x
 npm run atf:control-plane -- --quiet-idle
+npm run atf:control-plane -- --agent f0x --trigger-mode room --trigger-room design --action-mode pending_task --launcher-mode noop
 npm run atf:control-plane:dry -- --json
+npm run atf:watcher:smoke -- --cleanup --quiet
+npm run atf:control-plane:smoke -- --cleanup --quiet
 ```
 
 `workspace/bin/atf-watcher.cjs` 当前做两件事：
@@ -300,6 +303,8 @@ npm run atf:control-plane:dry -- --json
 2. 调用 `node atf-cli.js trigger execute-pending`
 
 默认执行模式仍是 `pending_task`，也就是把 pending fire 落成任务目录下的 `pending-task.json`，同时写入 `trigger-executions/` 审计记录。
+
+wrapper 现在也会先校验本地 `--mode`，并支持把 `--to / --thread / --room` 显式透传到底层 trigger executor。
 
 当前已经支持 4 种 adapter / mode：
 
@@ -344,6 +349,7 @@ npm run atf:control-plane:dry -- --json
 - 默认只放行 `max_risk=medium` 以内的动作
 - 支持 `--min-confidence`
 - 支持 `--dry-run --json` 先看执行计划，再决定是否真正 dispatch
+- 支持 `--to / --thread`，在 `message` 模式下显式覆盖投递目标
 
 推荐先这样做生产环境试跑：
 
@@ -411,6 +417,11 @@ node atf-cli.js launch launcher-status
 3. `atf-launcher.cjs`
 
 并且支持 `--quiet-idle`，在整条链都 idle 时不输出，避免空跑汇报。
+如果要显式控制统一入口的投递方式，现在也可以直接传：
+
+- `--trigger-mode / --trigger-to / --trigger-thread / --trigger-room / --trigger-at`
+- `--action-mode / --action-to / --action-thread`
+- `--launcher-mode`
 
 `sessions_spawn` bridge 最小示例：
 

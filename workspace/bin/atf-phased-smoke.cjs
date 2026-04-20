@@ -354,7 +354,8 @@ function main() {
   if (watcherDryRunAudit.run_id !== watcherDryRun.run_id) throw new Error('expected watcher dry-run audit to match run_id');
   if (watcherDryRunAudit.schema !== 'atf.action-watcher-run.v1') throw new Error(`expected watcher audit schema, got ${watcherDryRunAudit.schema}`);
 
-  const executePinchy = JSON.parse(runWatcher(['--agent', 'pinchymeow', '--mode', 'message', '--executor', 'phase-d-smoke', '--min-confidence', '0.9', '--no-scan', '--json'], env, options));
+  const overrideThreadId = 'THR-phase-d-smoke';
+  const executePinchy = JSON.parse(runWatcher(['--agent', 'pinchymeow', '--mode', 'message', '--to', 'pinchymeow', '--thread', overrideThreadId, '--executor', 'phase-d-smoke', '--min-confidence', '0.9', '--no-scan', '--json'], env, options));
   const pinchyMessageInbox = runCli(['msg', 'inbox', 'pinchymeow'], env, options);
   const closedPendingAction = pendingActions.items.find(item => item.task_id === closedTaskId && item.kind === 'pending_reply_follow_up');
   const blockerPendingAction = pendingActions.items.find(item => item.task_id === blockerTaskId && item.kind === 'pending_reply_follow_up');
@@ -363,6 +364,12 @@ function main() {
   const closedTaskMessages = fs.readdirSync(path.join(resolveTaskDir(closedTaskId, env), 'messages'))
     .map(file => readJson(path.join(resolveTaskDir(closedTaskId, env), 'messages', file)));
   const closedActionMessages = closedTaskMessages.filter(message => message.source_type === 'action');
+  const blockerTaskMessages = fs.readdirSync(path.join(resolveTaskDir(blockerTaskId, env), 'messages'))
+    .map(file => readJson(path.join(resolveTaskDir(blockerTaskId, env), 'messages', file)));
+  const blockerActionMessage = blockerTaskMessages.find(message =>
+    message.source_type === 'action'
+    && message.action_id === blockerPendingAction.action_id
+  );
 
   if (executePinchy.executed !== 1) throw new Error(`expected pinchy watcher executed=1, got ${executePinchy.executed}`);
   if (executePinchy.skipped !== 1) throw new Error(`expected pinchy watcher skipped=1, got ${executePinchy.skipped}`);
@@ -371,6 +378,9 @@ function main() {
   assertIncludes(pinchyMessageInbox, blockerTaskId, 'pinchymeow message inbox');
   if (pinchyMessageInbox.includes(decisionTaskId)) throw new Error('decision follow-up should not be dispatched in the first guarded watcher run');
   if (closedActionMessages.length !== 0) throw new Error(`expected no action-generated messages for ${closedTaskId}, got ${closedActionMessages.length}`);
+  if (!blockerActionMessage) throw new Error('expected blocker action to generate a message');
+  if (blockerActionMessage.to_agent !== 'pinchymeow') throw new Error(`expected blocker action message to_agent=pinchymeow, got ${blockerActionMessage.to_agent}`);
+  if (blockerActionMessage.thread_id !== overrideThreadId) throw new Error(`expected blocker action message thread_id=${overrideThreadId}, got ${blockerActionMessage.thread_id}`);
   if (closedPendingActionFile.status !== 'skipped') throw new Error(`expected closed action to be skipped, got ${closedPendingActionFile.status}`);
   if (closedPendingActionFile.verification?.preflight?.ok !== false) throw new Error('expected closed action preflight to fail');
   if (closedPendingActionFile.verification?.preflight?.code !== 'reply_received') throw new Error(`expected reply_received preflight code, got ${closedPendingActionFile.verification?.preflight?.code}`);

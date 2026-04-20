@@ -127,6 +127,7 @@ Phase D 新增两个 watcher / cron 友好的全局索引：
 ```bash
 node workspace/bin/atf-action-watcher.cjs --help
 node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message
+node workspace/bin/atf-action-watcher.cjs --agent pinchymeow --mode message --to huntmind --thread THR-release
 node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task
 ```
 
@@ -141,6 +142,8 @@ node workspace/bin/atf-action-watcher.cjs --agent f0x --mode pending_task
 - 默认不执行 `requires_confirmation=true` 的动作
 - `--dry-run --json`
   - 直接输出这轮会执行哪些动作、哪些会被过滤、过滤原因是什么
+- `--to <agent>` / `--thread <id>`
+  - 在 `message` 模式下显式覆盖目标 agent 或 thread id
 
 推荐的生产测试顺序：
 

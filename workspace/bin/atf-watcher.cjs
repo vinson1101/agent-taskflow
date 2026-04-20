@@ -55,6 +55,9 @@ function parseArgs(argv) {
     agent: null,
     executor: 'atf-watcher',
     mode: null,
+    toAgent: null,
+    threadId: null,
+    roomId: null,
     limit: null,
     at: null,
     note: null,
@@ -69,6 +72,9 @@ function parseArgs(argv) {
     if (arg === '--agent') options.agent = argv[++i] || null;
     else if (arg === '--executor') options.executor = argv[++i] || options.executor;
     else if (arg === '--mode') options.mode = parseModeOption('--mode', argv[++i]);
+    else if (arg === '--to') options.toAgent = argv[++i] || null;
+    else if (arg === '--thread') options.threadId = argv[++i] || null;
+    else if (arg === '--room') options.roomId = argv[++i] || null;
     else if (arg === '--limit') {
       const value = Number(argv[++i]);
       options.limit = Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
@@ -95,6 +101,9 @@ Options:
   --agent <name>       Only execute fires for one agent
   --executor <name>    Execution actor name written into records
   --mode <mode>        Force execution mode (${WATCHER_EXECUTION_MODES.join('|')})
+  --to <agent>         Override target agent for message mode
+  --thread <id>        Override thread id passed to trigger execution
+  --room <name>        Override room id passed to room mode execution
   --limit <n>          Max number of fires to execute
   --at <ISO>           Scan using a specific timestamp
   --note <text>        Extra execution note
@@ -191,6 +200,9 @@ function buildExecuteArgs(options) {
   if (options.agent) args.push(options.agent);
   if (options.executor) args.push(`executor=${options.executor}`);
   if (options.mode) args.push(`mode=${options.mode}`);
+  if (options.toAgent) args.push(`to=${options.toAgent}`);
+  if (options.threadId) args.push(`thread=${options.threadId}`);
+  if (options.roomId) args.push(`room=${options.roomId}`);
   if (options.limit) args.push(`limit=${options.limit}`);
   if (options.note) args.push(`note=${options.note}`);
   return args;

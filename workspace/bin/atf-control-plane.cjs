@@ -8,6 +8,25 @@ const vm = require('vm');
 const { createRequire } = require('module');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
+const TRIGGER_EXECUTION_MODES = ['pending_task', 'message', 'room', 'noop'];
+const ACTION_EXECUTION_MODES = ['message', 'pending_task', 'noop'];
+const LAUNCH_DISPATCH_MODES = ['manual', 'noop', 'sessions_spawn'];
+const TRIGGER_EXECUTION_MODE_SET = new Set(TRIGGER_EXECUTION_MODES);
+const ACTION_EXECUTION_MODE_SET = new Set(ACTION_EXECUTION_MODES);
+const LAUNCH_DISPATCH_MODE_SET = new Set(LAUNCH_DISPATCH_MODES);
+
+function normalizeMode(value) {
+  return String(value || '').trim().toLowerCase().replace(/-/g, '_');
+}
+
+function parseModeOption(flag, rawValue, validModes, validModeSet) {
+  const normalized = normalizeMode(rawValue);
+  if (!normalized) throw new Error(`${flag} requires a value`);
+  if (!validModeSet.has(normalized)) {
+    throw new Error(`invalid ${flag}: ${rawValue}. expected one of ${validModes.join('|')}`);
+  }
+  return normalized;
+}
 
 function generateRunId() {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
@@ -21,7 +40,15 @@ function parseArgs(argv) {
     action: true,
     launcher: true,
     triggerExecutor: 'atf-watcher',
+    triggerMode: null,
+    triggerToAgent: null,
+    triggerThreadId: null,
+    triggerRoomId: null,
+    triggerAt: null,
     actionExecutor: 'action-watcher',
+    actionMode: null,
+    actionToAgent: null,
+    actionThreadId: null,
     launcherDispatcher: 'host-launcher',
     launcherMode: 'sessions_spawn',
     staleDays: 4,
@@ -44,9 +71,17 @@ function parseArgs(argv) {
     else if (arg === '--no-action') options.action = false;
     else if (arg === '--no-launcher') options.launcher = false;
     else if (arg === '--trigger-executor') options.triggerExecutor = argv[++i] || options.triggerExecutor;
+    else if (arg === '--trigger-mode') options.triggerMode = parseModeOption('--trigger-mode', argv[++i], TRIGGER_EXECUTION_MODES, TRIGGER_EXECUTION_MODE_SET);
+    else if (arg === '--trigger-to') options.triggerToAgent = argv[++i] || null;
+    else if (arg === '--trigger-thread') options.triggerThreadId = argv[++i] || null;
+    else if (arg === '--trigger-room') options.triggerRoomId = argv[++i] || null;
+    else if (arg === '--trigger-at') options.triggerAt = argv[++i] || null;
     else if (arg === '--action-executor') options.actionExecutor = argv[++i] || options.actionExecutor;
+    else if (arg === '--action-mode') options.actionMode = parseModeOption('--action-mode', argv[++i], ACTION_EXECUTION_MODES, ACTION_EXECUTION_MODE_SET);
+    else if (arg === '--action-to') options.actionToAgent = argv[++i] || null;
+    else if (arg === '--action-thread') options.actionThreadId = argv[++i] || null;
     else if (arg === '--launcher-dispatcher') options.launcherDispatcher = argv[++i] || options.launcherDispatcher;
-    else if (arg === '--launcher-mode') options.launcherMode = argv[++i] || options.launcherMode;
+    else if (arg === '--launcher-mode') options.launcherMode = parseModeOption('--launcher-mode', argv[++i], LAUNCH_DISPATCH_MODES, LAUNCH_DISPATCH_MODE_SET);
     else if (arg === '--stale-days') {
       const value = Number(argv[++i]);
       if (Number.isInteger(value) && value >= 0) options.staleDays = value;
@@ -91,9 +126,17 @@ Options:
   --no-action                  Skip action watcher
   --no-launcher                Skip launcher
   --trigger-executor <name>    Execution actor for trigger fires
+  --trigger-mode <mode>        Trigger execution mode (${TRIGGER_EXECUTION_MODES.join('|')})
+  --trigger-to <agent>         Override trigger message target agent
+  --trigger-thread <id>        Override trigger delivery thread id
+  --trigger-room <name>        Override trigger room target
+  --trigger-at <ISO>           Trigger scan timestamp
   --action-executor <name>     Execution actor for action watcher
+  --action-mode <mode>         Action execution mode (${ACTION_EXECUTION_MODES.join('|')})
+  --action-to <agent>          Override action message target agent
+  --action-thread <id>         Override action delivery thread id
   --launcher-dispatcher <name> Dispatcher name for launcher
-  --launcher-mode <mode>       Launcher dispatch mode (manual|noop|sessions_spawn)
+  --launcher-mode <mode>       Launcher dispatch mode (${LAUNCH_DISPATCH_MODES.join('|')})
   --stale-days <n>             Action watcher stale review threshold
   --message-hours <n>          Action watcher reply threshold
   --decision-hours <n>         Action watcher decision threshold
@@ -179,6 +222,11 @@ function buildTriggerArgs(options) {
   const args = ['--json'];
   if (options.agent) args.push('--agent', options.agent);
   if (options.triggerExecutor) args.push('--executor', options.triggerExecutor);
+  if (options.triggerMode) args.push('--mode', options.triggerMode);
+  if (options.triggerToAgent) args.push('--to', options.triggerToAgent);
+  if (options.triggerThreadId) args.push('--thread', options.triggerThreadId);
+  if (options.triggerRoomId) args.push('--room', options.triggerRoomId);
+  if (options.triggerAt) args.push('--at', options.triggerAt);
   if (options.dryRun) args.push('--dry-run');
   return args;
 }
@@ -187,6 +235,9 @@ function buildActionArgs(options) {
   const args = ['--json'];
   if (options.agent) args.push('--agent', options.agent);
   if (options.actionExecutor) args.push('--executor', options.actionExecutor);
+  if (options.actionMode) args.push('--mode', options.actionMode);
+  if (options.actionToAgent) args.push('--to', options.actionToAgent);
+  if (options.actionThreadId) args.push('--thread', options.actionThreadId);
   args.push('--stale-days', String(options.staleDays));
   args.push('--message-hours', String(options.messageHours));
   args.push('--decision-hours', String(options.decisionHours));

@@ -83,6 +83,9 @@ npm run atf:watcher -- --agent f0x --executor watcher-v1
 - `--agent <name>` 只执行某个 agent 的 pending fires；目标 agent 需要已注册
 - `--executor <name>` execution record 里的执行者名字
 - `--mode <mode>` 强制执行模式，支持 `pending_task|message|room|noop`
+- `--to <agent>` 在 `message` 模式下显式覆盖目标 agent
+- `--thread <id>` 显式覆盖 delivery thread id
+- `--room <name>` 在 `room` 模式下显式覆盖目标 room
 - `--limit <n>` 限制本轮执行数量
 - `--at <ISO>` 用指定时间运行 scan
 - `--note <text>` 附加 execution note
@@ -232,6 +235,12 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 
 并且在整条链都 idle 时静默，不做无意义汇报。
 
+如果你想在统一入口里显式控制三条链的投递方式，可以直接传：
+
+- `--trigger-mode / --trigger-to / --trigger-thread / --trigger-room / --trigger-at`
+- `--action-mode / --action-to / --action-thread`
+- `--launcher-mode`
+
 ### 6.2 单 agent watcher
 
 ```cron
@@ -366,6 +375,8 @@ node atf-cli.js trigger follow-up T-001 f0x 1s focus=FOC-xxx
 node workspace/bin/atf-watcher.cjs --agent f0x --executor watcher-v1
 node atf-cli.js trigger fires T-001
 node atf-cli.js trigger executions T-001
+npm run atf:watcher:smoke -- --cleanup --quiet
+npm run atf:control-plane:smoke -- --cleanup --quiet
 ```
 
 通过标准：

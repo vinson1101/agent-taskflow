@@ -108,6 +108,8 @@ function parseArgs(argv) {
     agent: null,
     executor: 'action-watcher',
     mode: null,
+    toAgent: null,
+    threadId: null,
     limit: null,
     note: null,
     staleDays: 4,
@@ -129,6 +131,8 @@ function parseArgs(argv) {
     if (arg === '--agent') options.agent = argv[++i] || null;
     else if (arg === '--executor') options.executor = argv[++i] || options.executor;
     else if (arg === '--mode') options.mode = parseModeOption('--mode', argv[++i]);
+    else if (arg === '--to') options.toAgent = argv[++i] || null;
+    else if (arg === '--thread') options.threadId = argv[++i] || null;
     else if (arg === '--limit') {
       const value = Number(argv[++i]);
       options.limit = Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
@@ -174,6 +178,8 @@ Options:
   --agent <name>          Only plan and execute actions for one agent
   --executor <name>       Execution actor name written into action records
   --mode <mode>           Force execution mode (${ACTION_WATCHER_EXECUTION_MODES.join('|')})
+  --to <agent>            Override target agent for message mode
+  --thread <id>           Override thread id passed to action execution
   --limit <n>             Max number of actions to execute
   --note <text>           Extra execution note
   --stale-days <n>        Threshold for stale review follow-up
@@ -494,6 +500,8 @@ function buildExecuteArgs(action, options) {
   const args = ['action', 'execute', action.task_id, action.action_id];
   if (options.executor) args.push(`executor=${options.executor}`);
   if (options.mode) args.push(`mode=${options.mode}`);
+  if (options.toAgent) args.push(`to=${options.toAgent}`);
+  if (options.threadId) args.push(`thread=${options.threadId}`);
   if (options.note) args.push(`note=${options.note}`);
   return args;
 }

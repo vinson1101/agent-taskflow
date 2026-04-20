@@ -246,6 +246,15 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 - `ATF_DATA_DIR/control-plane-runs/<runId>.json`
 - `ATF_DATA_DIR/control-plane-runs/latest.json`
 
+上线后直接看：
+
+```bash
+node atf-cli.js control-plane runs limit=10
+node atf-cli.js control-plane run-show latest
+node atf-cli.js control-plane status
+node atf-cli.js control-plane status f0x warn_after_minutes=20
+```
+
 ### 6.2 单 agent watcher
 
 ```cron

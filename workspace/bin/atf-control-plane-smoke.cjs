@@ -271,6 +271,30 @@ function main() {
   const launchStatus = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
   if (launchStatus.counts.leased !== 1) throw new Error(`expected leased launch count=1, got ${launchStatus.counts.leased}`);
 
+  const controlPlaneRuns = runCli(['control-plane', 'runs', 'f0x', 'limit=5'], env, options);
+  const controlPlaneRunShow = JSON.parse(runCli(['control-plane', 'run-show', 'latest'], env, options));
+  const controlPlaneStatus = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
+  assertIncludes(controlPlaneRuns, summary.run_id, 'control-plane runs');
+  assertIncludes(controlPlaneRuns, 'trigger_executed=1', 'control-plane runs');
+  if (controlPlaneRunShow.run_id !== summary.run_id) throw new Error(`expected control-plane run-show latest ${summary.run_id}, got ${controlPlaneRunShow.run_id}`);
+  if (controlPlaneRunShow.audit_path !== summary.audit_path) throw new Error('expected control-plane run-show audit_path to match');
+  if (controlPlaneStatus.latest_run?.run_id !== summary.run_id) throw new Error(`expected control-plane status latest run ${summary.run_id}, got ${controlPlaneStatus.latest_run?.run_id}`);
+  if (controlPlaneStatus.recent_runs.total !== 1) throw new Error(`expected control-plane recent run total=1, got ${controlPlaneStatus.recent_runs.total}`);
+  if (controlPlaneStatus.trigger_queue.total !== 0) throw new Error(`expected control-plane trigger queue total=0, got ${controlPlaneStatus.trigger_queue.total}`);
+  if (controlPlaneStatus.action_watcher.pending_actions.total !== 0) throw new Error(`expected control-plane action pending total=0, got ${controlPlaneStatus.action_watcher.pending_actions.total}`);
+  if (controlPlaneStatus.launcher.launch_queue.counts.leased !== 1) throw new Error(`expected control-plane launcher leased=1, got ${controlPlaneStatus.launcher.launch_queue.counts.leased}`);
+  if (controlPlaneStatus.status !== 'active') throw new Error(`expected control-plane status active, got ${controlPlaneStatus.status}`);
+  if (controlPlaneStatus.code !== 'pending_control_work') throw new Error(`expected control-plane code pending_control_work, got ${controlPlaneStatus.code}`);
+
+  const staleIso = new Date(Date.now() - (65 * 60 * 1000)).toISOString();
+  controlPlaneAudit.started_at = staleIso;
+  controlPlaneAudit.completed_at = staleIso;
+  writeJson(summary.audit_path, controlPlaneAudit);
+  writeJson(path.join(path.dirname(summary.audit_path), 'latest.json'), controlPlaneAudit);
+  const controlPlaneStatusStale = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
+  if (controlPlaneStatusStale.status !== 'stale') throw new Error(`expected stale control-plane status, got ${controlPlaneStatusStale.status}`);
+  if (controlPlaneStatusStale.code !== 'latest_run_stale') throw new Error(`expected control-plane stale code latest_run_stale, got ${controlPlaneStatusStale.code}`);
+
   console.log('ATF control-plane smoke passed.');
 
   if (options.cleanup) {

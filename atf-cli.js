@@ -34,6 +34,8 @@ const ACTION_WATCHER_RUNS_DIR = `${DATA_DIR}/action-watcher-runs`;
 const ACTION_WATCHER_LATEST_FILE = `${ACTION_WATCHER_RUNS_DIR}/latest.json`;
 const LAUNCHER_RUNS_DIR = `${DATA_DIR}/launcher-runs`;
 const LAUNCHER_LATEST_FILE = `${LAUNCHER_RUNS_DIR}/latest.json`;
+const CONTROL_PLANE_RUNS_DIR = `${DATA_DIR}/control-plane-runs`;
+const CONTROL_PLANE_LATEST_FILE = `${CONTROL_PLANE_RUNS_DIR}/latest.json`;
 const LAUNCH_REQUESTS_DIR = `${DATA_DIR}/agent-launch-requests`;
 const LAUNCH_INBOX_DIR = `${DATA_DIR}/launch-inboxes`;
 const PENDING_LAUNCH_REQUESTS_FILE = `${DATA_DIR}/pending-launch-requests.json`;
@@ -75,6 +77,7 @@ const ACTION_STATUSES = new Set(['pending', 'executed', 'skipped', 'archived']);
 const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
 const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCHER_RUN_STATUSES = new Set(['completed', 'failed']);
+const CONTROL_PLANE_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCH_REQUEST_STATUSES = new Set(['pending', 'leased', 'failed', 'archived']);
 const LAUNCH_DISPATCH_MODES = new Set(['manual', 'noop', 'sessions_spawn']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
@@ -3008,6 +3011,36 @@ function readLauncherRun(runId) {
   return loadJson(launcherRunPath(runId));
 }
 
+function ensureControlPlaneRunsDir() {
+  if (!fs.existsSync(CONTROL_PLANE_RUNS_DIR)) fs.mkdirSync(CONTROL_PLANE_RUNS_DIR, { recursive: true });
+}
+
+function controlPlaneRunPath(runId) {
+  ensureControlPlaneRunsDir();
+  return `${CONTROL_PLANE_RUNS_DIR}/${runId}.json`;
+}
+
+function readControlPlaneRuns(options = {}) {
+  if (!fs.existsSync(CONTROL_PLANE_RUNS_DIR)) return [];
+  const status = options.status || null;
+  const agent = options.agent || null;
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : null;
+  const runs = fs.readdirSync(CONTROL_PLANE_RUNS_DIR)
+    .filter(file => file.endsWith('.json') && file !== 'latest.json')
+    .map(file => loadJson(path.join(CONTROL_PLANE_RUNS_DIR, file)))
+    .filter(Boolean)
+    .filter(run => !status || run.status === status)
+    .filter(run => !agent || run.agent === agent)
+    .sort((a, b) => (b.completed_at || b.started_at || b.created_at || '').localeCompare(a.completed_at || a.started_at || a.created_at || ''));
+  return limit ? runs.slice(0, limit) : runs;
+}
+
+function readControlPlaneRun(runId) {
+  if (!runId) return null;
+  if (runId === 'latest') return loadJson(CONTROL_PLANE_LATEST_FILE);
+  return loadJson(controlPlaneRunPath(runId));
+}
+
 function ensureLaunchRequestsDir() {
   if (!fs.existsSync(LAUNCH_REQUESTS_DIR)) fs.mkdirSync(LAUNCH_REQUESTS_DIR, { recursive: true });
 }
@@ -3420,6 +3453,121 @@ function buildLauncherWatcherStatus(options = {}) {
       failed: failedRuns,
     },
     launch_queue: queueStatus,
+  };
+}
+
+function buildTriggerQueueStatus(options = {}) {
+  const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
+  const source = agent
+    ? loadJson(triggerInboxPath(agent))
+    : loadJson(PENDING_TRIGGER_FIRES_FILE);
+  const items = Array.isArray(source?.items)
+    ? source.items.filter(fire => fire && fire.status === 'pending')
+    : [];
+  const oldestFire = items
+    .filter(fire => fire.fired_at)
+    .sort((a, b) => (a.fired_at || '').localeCompare(b.fired_at || ''))[0] || null;
+  const oldestAgeMinutes = oldestFire?.fired_at ? computeAgeMinutes(oldestFire.fired_at) : null;
+  const byAgent = items.reduce((rows, fire) => {
+    const owner = fire.owner_agent || 'unknown';
+    rows[owner] = (rows[owner] || 0) + 1;
+    return rows;
+  }, {});
+  const byType = items.reduce((rows, fire) => {
+    const type = fire.trigger_type || 'unknown';
+    rows[type] = (rows[type] || 0) + 1;
+    return rows;
+  }, {});
+  return {
+    total: items.length,
+    oldest_age_minutes: oldestAgeMinutes,
+    by_agent: byAgent,
+    by_type: byType,
+  };
+}
+
+function buildControlPlaneStatus(options = {}) {
+  const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const recentLimit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 10;
+  const recentRuns = readControlPlaneRuns({ agent, limit: recentLimit });
+  const latestRun = recentRuns[0] || (!agent ? readControlPlaneRun('latest') : null);
+  const latestAt = latestRun?.completed_at || latestRun?.started_at || latestRun?.created_at || null;
+  const latestAgeMinutes = latestAt ? computeAgeMinutes(latestAt) : null;
+  const completedRuns = recentRuns.filter(run => run.status === 'completed').length;
+  const failedRuns = recentRuns.filter(run => run.status === 'failed').length;
+  const triggerQueue = buildTriggerQueueStatus({ agent });
+  const actionWatcher = buildActionWatcherStatus({
+    agent,
+    warn_after_minutes: warnAfterMinutes,
+    limit: recentLimit,
+  });
+  const launcher = buildLauncherWatcherStatus({
+    agent,
+    warn_after_minutes: warnAfterMinutes,
+    limit: recentLimit,
+  });
+
+  let status = 'ok';
+  let code = 'healthy';
+  if (!latestRun) {
+    status = 'never_run';
+    code = 'no_runs_recorded';
+  } else if (latestRun.status === 'failed') {
+    status = 'failed';
+    code = 'latest_run_failed';
+  } else if (Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
+    status = 'stale';
+    code = 'latest_run_stale';
+  } else if (actionWatcher.status === 'failed' || launcher.status === 'failed') {
+    status = 'attention';
+    code = 'downstream_failed';
+  } else if (actionWatcher.status === 'stale' || launcher.status === 'stale') {
+    status = 'attention';
+    code = 'downstream_stale';
+  } else if (triggerQueue.total > 0 || actionWatcher.pending_actions.total > 0 || launcher.launch_queue.counts.pending > 0 || launcher.launch_queue.counts.leased > 0) {
+    status = 'active';
+    code = 'pending_control_work';
+  } else if (latestRun?.idle) {
+    status = 'idle';
+    code = 'no_pending_control_work';
+  }
+
+  return {
+    schema: 'atf.control-plane-status.v1',
+    status,
+    code,
+    scope: {
+      agent,
+      warn_after_minutes: warnAfterMinutes,
+      recent_runs_limit: recentLimit,
+    },
+    generated_at: new Date().toISOString(),
+    latest_run: latestRun ? {
+      run_id: latestRun.run_id || null,
+      status: latestRun.status || null,
+      started_at: latestRun.started_at || null,
+      completed_at: latestRun.completed_at || null,
+      age_minutes: latestAgeMinutes,
+      dry_run: Boolean(latestRun.dry_run),
+      idle: Boolean(latestRun.idle),
+      trigger_active: Boolean(latestRun.activity?.trigger),
+      action_active: Boolean(latestRun.activity?.action),
+      launcher_active: Boolean(latestRun.activity?.launcher),
+      trigger_executed: latestRun.trigger?.executed ?? 0,
+      action_executed: latestRun.action?.executed ?? 0,
+      launcher_leased: latestRun.launcher?.leased ?? 0,
+    } : null,
+    recent_runs: {
+      total: recentRuns.length,
+      completed: completedRuns,
+      failed: failedRuns,
+    },
+    trigger_queue: triggerQueue,
+    action_watcher: actionWatcher,
+    launcher,
   };
 }
 
@@ -5672,6 +5820,9 @@ ATF CLI v2
   atf launch runs [agent] [status=completed|failed] [limit=N]     查看 launcher 运行审计
   atf launch run-show <runId|latest>                              查看单次 launcher 运行明细
   atf launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json]  查看 launcher 健康状态
+  atf control-plane runs [agent] [status=completed|failed] [limit=N]          查看 control-plane 运行审计
+  atf control-plane run-show <runId|latest>                                    查看单次 control-plane 运行明细
+  atf control-plane status [agent] [warn_after_minutes=N] [limit=N] [json]    查看 control-plane 健康状态
   atf agent list                                     查看注册 agent 列表
   atf agent audit [top=N]                            审计未知/脏 agent 引用
   atf agent remap <from> <to> [apply=true]          重映射错误 agent 名（默认 dry-run）
@@ -8078,6 +8229,158 @@ switch (cmd) {
     }
 
     console.error('用法: atf launch scan|list|inbox|show|dispatch|dispatch-pending|status|runs|run-show|launcher-status ...');
+    break;
+  }
+
+  // =============================================================
+  // control-plane 命令 - 统一控制面运行审计 / 状态
+  // =============================================================
+  case 'control-plane': {
+    const [sub, ...restArgs] = args;
+
+    if (sub === 'runs') {
+      let agent = null;
+      let statusFilter = null;
+      let limit = 10;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part.startsWith('status=')) {
+          statusFilter = part.substring('status='.length);
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf control-plane runs [agent] [status=completed|failed] [limit=N]');
+        break;
+      }
+      if (statusFilter && !CONTROL_PLANE_RUN_STATUSES.has(statusFilter)) {
+        console.error(`control-plane run status: ${[...CONTROL_PLANE_RUN_STATUSES].join('|')}`);
+        break;
+      }
+      const runs = readControlPlaneRuns({
+        agent,
+        status: statusFilter,
+        limit,
+      });
+      const filterLabel = [
+        agent ? `agent=${agent}` : null,
+        statusFilter ? `status=${statusFilter}` : null,
+        limit ? `limit=${limit}` : null,
+      ].filter(Boolean).join('  ');
+      if (!runs.length) {
+        console.log(filterLabel ? `control-plane runs (${filterLabel}) 暂无记录` : '当前暂无 control-plane 运行记录');
+        break;
+      }
+      console.log(`\nControl Plane Runs${filterLabel ? `  |  ${filterLabel}` : ''}\n`);
+      for (const run of runs) {
+        console.log(`${run.run_id}  ${run.status}  ${run.completed_at || run.started_at || '-'}`);
+        console.log(`  agent=${run.agent || 'all'}  dry_run=${Boolean(run.dry_run)}  idle=${Boolean(run.idle)}  trigger_active=${Boolean(run.activity?.trigger)}  action_active=${Boolean(run.activity?.action)}  launcher_active=${Boolean(run.activity?.launcher)}  duration_ms=${run.duration_ms ?? '-'}`);
+        console.log(`  trigger_executed=${run.trigger?.executed ?? 0}  action_executed=${run.action?.executed ?? 0}  launcher_leased=${run.launcher?.leased ?? 0}`);
+      }
+      console.log('');
+      break;
+    }
+
+    if (sub === 'run-show') {
+      const [runId] = restArgs;
+      if (!runId) {
+        console.error('用法: atf control-plane run-show <runId|latest>');
+        break;
+      }
+      const run = readControlPlaneRun(runId);
+      if (!run) {
+        console.error(`未找到 control-plane run: ${runId}`);
+        break;
+      }
+      console.log(JSON.stringify(run, null, 2));
+      break;
+    }
+
+    if (sub === 'status') {
+      let agent = null;
+      let warnAfterMinutes = 30;
+      let limit = 10;
+      let json = false;
+      let invalid = false;
+      for (const part of restArgs.filter(Boolean)) {
+        if (part === 'json') {
+          json = true;
+          continue;
+        }
+        if (part.startsWith('warn_after_minutes=')) {
+          const value = Number(part.substring('warn_after_minutes='.length));
+          if (!Number.isInteger(value) || value < 0) {
+            invalid = true;
+            break;
+          }
+          warnAfterMinutes = value;
+          continue;
+        }
+        if (part.startsWith('limit=')) {
+          const value = Number(part.substring('limit='.length));
+          if (!Number.isInteger(value) || value <= 0) {
+            invalid = true;
+            break;
+          }
+          limit = value;
+          continue;
+        }
+        if (!agent) {
+          agent = part;
+          continue;
+        }
+        invalid = true;
+        break;
+      }
+      if (invalid) {
+        console.error('用法: atf control-plane status [agent] [warn_after_minutes=N] [limit=N] [json]');
+        break;
+      }
+      const status = buildControlPlaneStatus({
+        agent,
+        warn_after_minutes: warnAfterMinutes,
+        limit,
+      });
+      if (json) {
+        console.log(JSON.stringify(status, null, 2));
+        break;
+      }
+      console.log('\nControl Plane Status\n');
+      console.log(`status=${status.status}  code=${status.code}  scope=${status.scope.agent || 'all'}  warn_after=${status.scope.warn_after_minutes}m`);
+      if (!status.latest_run) {
+        console.log('latest_run=none');
+      } else {
+        console.log(`latest_run=${status.latest_run.run_id}  ${status.latest_run.status}  age=${status.latest_run.age_minutes ?? '-'}m  completed_at=${status.latest_run.completed_at || status.latest_run.started_at || '-'}`);
+        console.log(`latest_effect=idle:${status.latest_run.idle}  trigger_active:${status.latest_run.trigger_active}  action_active:${status.latest_run.action_active}  launcher_active:${status.latest_run.launcher_active}  trigger_executed:${status.latest_run.trigger_executed}  action_executed:${status.latest_run.action_executed}  launcher_leased:${status.latest_run.launcher_leased}  dry_run=${status.latest_run.dry_run}`);
+      }
+      console.log(`recent_runs=total:${status.recent_runs.total}  completed:${status.recent_runs.completed}  failed:${status.recent_runs.failed}`);
+      console.log(`trigger_queue=total:${status.trigger_queue.total}${status.trigger_queue.oldest_age_minutes !== null ? `  oldest=${status.trigger_queue.oldest_age_minutes}m` : ''}`);
+      const triggerByAgent = Object.entries(status.trigger_queue.by_agent).filter(([, count]) => count > 0);
+      if (triggerByAgent.length) {
+        console.log(`trigger_by_agent=${triggerByAgent.map(([name, count]) => `${name}=${count}`).join('  ')}`);
+      }
+      console.log(`action_watcher=status:${status.action_watcher.status}  code:${status.action_watcher.code}  pending:${status.action_watcher.pending_actions.total}`);
+      console.log(`launcher=status:${status.launcher.status}  code:${status.launcher.code}  pending:${status.launcher.launch_queue.counts.pending}  leased:${status.launcher.launch_queue.counts.leased}`);
+      console.log('');
+      break;
+    }
+
+    console.error('用法: atf control-plane runs|run-show|status ...');
     break;
   }
 

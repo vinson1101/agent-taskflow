@@ -249,6 +249,9 @@ node atf-cli.js launch status [agent] [warn_after_minutes=N] [json] # 查看 lau
 node atf-cli.js launch runs [agent] [status=completed|failed] [limit=N] # 查看 launcher 运行审计
 node atf-cli.js launch run-show <runId|latest>             # 查看单次 launcher 运行明细
 node atf-cli.js launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json] # 查看 launcher 健康状态
+node atf-cli.js control-plane runs [agent] [status=completed|failed] [limit=N] # 查看 control-plane 运行审计
+node atf-cli.js control-plane run-show <runId|latest>      # 查看单次 control-plane 运行明细
+node atf-cli.js control-plane status [agent] [warn_after_minutes=N] [limit=N] [json] # 查看 control-plane 健康状态
 node atf-cli.js credits rebuild                               # 重建内部积分索引（完成度 + 反馈）
 node atf-cli.js credits list                                  # 查看 agent 积分概览
 node atf-cli.js credits show <agent>                          # 查看单个 agent 积分账本
@@ -427,6 +430,15 @@ node atf-cli.js launch launcher-status
 
 - `data/control-plane-runs/<runId>.json`
 - `data/control-plane-runs/latest.json`
+
+巡检时直接看：
+
+```bash
+node atf-cli.js control-plane runs limit=10
+node atf-cli.js control-plane run-show latest
+node atf-cli.js control-plane status
+node atf-cli.js control-plane status f0x warn_after_minutes=20
+```
 
 `sessions_spawn` bridge 最小示例：
 

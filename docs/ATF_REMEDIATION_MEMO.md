@@ -168,12 +168,49 @@ ATF 当前已经可以被稳定描述为：
 
 - 身份与治理先硬化
 
+#### P2-4 控制面升级 / 升级策略
+
+包括：
+
+- 对重复 `launch_writeback_follow_up` 的 launch 做更强升级，而不只是继续 message follow-up
+- 对重复 `launch_resolution_follow_up` 但仍无 resolved evidence 的任务，显式打成 `attention / escalation_required`
+- 把升级条件、冷却窗口和升级落点写成可审查规则，而不是临时脚本判断
+
+交付物：
+
+- control-plane 升级策略文档
+- `attention / escalation_required` 读侧或等价状态投影
+- 至少一条升级链路的本地 smoke
+
+完成标准：
+
+- 团队不需要盯 `launch status` 才知道哪类闭环已进入异常升级状态
+
+#### P2-5 任务证据治理
+
+包括：
+
+- 明确哪些证据只表示 `acknowledged`
+- 明确哪些证据可计入 `resolved`
+- 明确谁有权限产生可被系统承认的 resolved evidence
+- 把 reviewer / acceptance policy 从约定升级成协议化规则
+
+交付物：
+
+- evidence / acceptance policy 文档
+- `resolved evidence` 的最小规则表
+
+完成标准：
+
+- 不再把“launch 已关闭”和“任务已完成”混成同一层语义
+
 ## 3. 本轮明确不做
 
 - 不新增一批抽象对象
 - 不顺手发起大规模 CLI / 目录重构
 - 不把内部控制面包装成“通用自治网络”
 - 不把 `worker 必须回写` 写成已被系统强制验证的硬一致保证
+- 不继续沿 `launch / writeback / post_launch` 这条线做低收益细修，除非发现新的真实缺陷
 
 ## 4. 一句话结论
 

@@ -201,12 +201,25 @@ ATF 的价值已经不只是“记录任务”，而是：
 
 **Phase D / 主动运营动作层**
 
-重点不是继续补对象定义，而是把当前已有的 `Focus / Trigger / Message / Reflection / review` 信号推进成：
+当前这条线已经不只是概念定义，已形成最小可运行闭环：
+
+- `launch` 已可追踪 `unresolved / acknowledged / resolved`
+- `launch` 已可在第一次可信 writeback 出现时即时归档，不再依赖下一次 scan
+- `writeback.follow_up` 已可处理“dispatch 后长期没有任何 ATF writeback”
+- `writeback.post_launch` 已可继续跟踪 launch 归档之后是否出现 resolved evidence
+- `post_launch.follow_up` 已可处理“已 acknowledged，但长期没有 resolved evidence”
+
+这一层当前可以先收口。下一阶段重点不是继续细修 `launch / writeback / post_launch` 本身，而是把当前已有的 `Focus / Trigger / Message / Reflection / review` 信号推进成：
 
 - stale backlog follow-up
 - pending review reminder
 - digest / cleanup 执行层
 - 基于 trigger / message / reflection 的任务自推进动作
+
+收口后已记录的下一批待办：
+
+- 控制面升级 / 升级策略：对重复 `launch_writeback_follow_up` 或 `launch_resolution_follow_up` 的任务，显式打成 `attention / escalation_required`
+- 任务证据治理：明确哪些证据只表示 `acknowledged`，哪些证据可计入 `resolved`，以及谁有权限产生可被系统承认的 resolved evidence
 
 当前仍未完成的部分：
 

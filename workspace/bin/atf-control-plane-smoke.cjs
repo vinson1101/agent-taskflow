@@ -270,6 +270,7 @@ function main() {
 
   const launchStatus = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
   if (launchStatus.counts.leased !== 1) throw new Error(`expected leased launch count=1, got ${launchStatus.counts.leased}`);
+  if (launchStatus.writeback?.active_counts?.pending !== 1) throw new Error(`expected launch writeback pending=1, got ${launchStatus.writeback?.active_counts?.pending}`);
 
   const controlPlaneRuns = runCli(['control-plane', 'runs', 'f0x', 'limit=5'], env, options);
   const controlPlaneRunShow = JSON.parse(runCli(['control-plane', 'run-show', 'latest'], env, options));
@@ -283,8 +284,17 @@ function main() {
   if (controlPlaneStatus.trigger_queue.total !== 0) throw new Error(`expected control-plane trigger queue total=0, got ${controlPlaneStatus.trigger_queue.total}`);
   if (controlPlaneStatus.action_watcher.pending_actions.total !== 0) throw new Error(`expected control-plane action pending total=0, got ${controlPlaneStatus.action_watcher.pending_actions.total}`);
   if (controlPlaneStatus.launcher.launch_queue.counts.leased !== 1) throw new Error(`expected control-plane launcher leased=1, got ${controlPlaneStatus.launcher.launch_queue.counts.leased}`);
+  if (controlPlaneStatus.writeback?.active_counts?.pending !== 1) throw new Error(`expected control-plane writeback pending=1, got ${controlPlaneStatus.writeback?.active_counts?.pending}`);
   if (controlPlaneStatus.status !== 'active') throw new Error(`expected control-plane status active, got ${controlPlaneStatus.status}`);
   if (controlPlaneStatus.code !== 'pending_control_work') throw new Error(`expected control-plane code pending_control_work, got ${controlPlaneStatus.code}`);
+
+  runCli(['update', triggerTaskId, 'completed', 'by=f0x'], env, options);
+  runCli(['delivered', triggerTaskId, 'by=f0x'], env, options);
+  const triggerHistory = readJson(path.join(triggerTaskDir, 'notifications', 'history.json'));
+  const latestStatusChange = [...triggerHistory].reverse().find(event => event.event === 'status_change');
+  const latestDelivered = [...triggerHistory].reverse().find(event => event.event === 'delivered');
+  if (latestStatusChange?.by !== 'f0x') throw new Error(`expected status_change by=f0x, got ${latestStatusChange?.by}`);
+  if (latestDelivered?.by !== 'f0x') throw new Error(`expected delivered by=f0x, got ${latestDelivered?.by}`);
 
   const staleIso = new Date(Date.now() - (65 * 60 * 1000)).toISOString();
   controlPlaneAudit.started_at = staleIso;

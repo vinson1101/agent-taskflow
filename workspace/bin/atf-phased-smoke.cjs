@@ -493,6 +493,8 @@ function main() {
   if (launcherWatcherStatus.latest_run?.run_id !== launcherRun.run_id) throw new Error(`expected launcher watcher latest run ${launcherRun.run_id}, got ${launcherWatcherStatus.latest_run?.run_id}`);
   if (launcherWatcherStatus.recent_runs.total !== 2) throw new Error(`expected launcher watcher recent run total=2, got ${launcherWatcherStatus.recent_runs.total}`);
   if (launcherWatcherStatus.launch_queue.counts.leased !== 1) throw new Error(`expected launcher watcher leased count=1, got ${launcherWatcherStatus.launch_queue.counts.leased}`);
+  if (launchStatusLeased.writeback?.active_counts?.pending !== 1) throw new Error(`expected launch writeback pending=1, got ${launchStatusLeased.writeback?.active_counts?.pending}`);
+  if (launchStatusLeased.writeback?.latest?.status !== 'pending') throw new Error(`expected latest launch writeback pending, got ${launchStatusLeased.writeback?.latest?.status}`);
 
   setLaunchRequestTimestamps(env, firstLaunchRequest.launch_id, new Date(Date.now() - (10 * 60 * 1000)).toISOString(), new Date(Date.now() - (4 * 60 * 1000)).toISOString());
   const launchScanAfterLeaseExpiry = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
@@ -545,6 +547,9 @@ function main() {
   assertIncludes(launchScanAfterReviewWriteback, 'archived=1', 'launch scan after review writeback');
   if (launchStatusAfterReviewWriteback.counts.pending !== 0) throw new Error(`expected no pending launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.pending}`);
   if (launchStatusAfterReviewWriteback.counts.leased !== 0) throw new Error(`expected no leased launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.leased}`);
+  if ((launchStatusAfterReviewWriteback.writeback?.total_counts?.confirmed || 0) < 1) {
+    throw new Error(`expected confirmed launch writeback after review, got ${launchStatusAfterReviewWriteback.writeback?.total_counts?.confirmed}`);
+  }
 
   fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
   const launchScanAfterSourceClear = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);

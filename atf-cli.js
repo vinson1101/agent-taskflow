@@ -188,6 +188,16 @@ function appendNotificationHistory(taskId, event) {
   saveJson(historyPath, history.slice(-50));
 }
 
+function notificationHistoryPath(taskId) {
+  return `${taskDirPath(taskId)}/notifications/history.json`;
+}
+
+function readTaskNotificationHistory(taskId) {
+  return (loadJson(notificationHistoryPath(taskId)) || [])
+    .filter(Boolean)
+    .sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+}
+
 function roundNumber(value, digits = 2) {
   if (!Number.isFinite(value)) return null;
   const factor = 10 ** digits;
@@ -2247,6 +2257,13 @@ function parseIsoTimestamp(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function isTimestampAfter(value, reference) {
+  const date = parseIsoTimestamp(value);
+  const referenceDate = parseIsoTimestamp(reference);
+  if (!date || !referenceDate) return false;
+  return date.getTime() > referenceDate.getTime();
+}
+
 function computeAgeDays(value, referenceTime = null) {
   const date = value instanceof Date ? value : parseIsoTimestamp(value);
   const reference = referenceTime instanceof Date ? referenceTime : new Date();
@@ -3527,6 +3544,9 @@ function buildControlPlaneStatus(options = {}) {
   } else if (actionWatcher.status === 'stale' || launcher.status === 'stale') {
     status = 'attention';
     code = 'downstream_stale';
+  } else if (launcher.launch_queue.writeback?.active_counts?.stale > 0 || launcher.launch_queue.writeback?.active_counts?.missing_task > 0) {
+    status = 'attention';
+    code = 'writeback_stale';
   } else if (triggerQueue.total > 0 || actionWatcher.pending_actions.total > 0 || launcher.launch_queue.counts.pending > 0 || launcher.launch_queue.counts.leased > 0) {
     status = 'active';
     code = 'pending_control_work';
@@ -3568,6 +3588,7 @@ function buildControlPlaneStatus(options = {}) {
     trigger_queue: triggerQueue,
     action_watcher: actionWatcher,
     launcher,
+    writeback: launcher.launch_queue.writeback || null,
   };
 }
 
@@ -3919,6 +3940,7 @@ function dispatchLaunchRequest(request, options = {}) {
   result.dispatch_mode = mode;
   result.dispatched_at = now;
   result.lease_expires_at = leaseExpiresAt;
+  result.writeback = buildLaunchWritebackBaseline(result, now, leaseExpiresAt);
   result.dispatch = {
     dispatcher,
     mode,
@@ -3939,6 +3961,202 @@ function dispatchLaunchRequest(request, options = {}) {
   return result;
 }
 
+function buildLaunchWritebackBaseline(request, trackedAt, dueAt = null) {
+  const taskId = request?.payload?.task_id || null;
+  if (request?.source_type !== 'pending_task' || !taskId) return null;
+  const ctx = readCtx(taskId);
+  const history = readTaskNotificationHistory(taskId);
+  const messages = readTaskMessages(taskId);
+  const receipts = readTaskReceipts(taskId);
+  const reviews = readTaskReviews(taskId);
+  return {
+    required: true,
+    tracked_at: trackedAt || new Date().toISOString(),
+    due_at: dueAt || null,
+    agent: request.agent || null,
+    task_id: taskId,
+    action_id: request.payload?.action_id || null,
+    kind: request.payload?.kind || null,
+    reviewee: request.payload?.reviewee || null,
+    baseline: {
+      task_status: ctx?.status || null,
+      task_updated_at: ctx?.updated_at || null,
+      notification_events: history.length,
+      message_count: messages.length,
+      receipt_count: receipts.length,
+      review_count: reviews.length,
+    },
+  };
+}
+
+function evaluateLaunchWriteback(request, options = {}) {
+  const writeback = request?.writeback || null;
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  if (!request?.dispatched_at || !writeback?.required || !writeback.task_id) {
+    return {
+      tracked: false,
+      request_status: request?.status || null,
+      status: 'not_required',
+      code: 'not_tracked',
+      age_minutes: request?.dispatched_at ? computeAgeMinutes(request.dispatched_at) : null,
+      evidence: null,
+    };
+  }
+
+  const dispatchedAt = request.dispatched_at;
+  const taskId = writeback.task_id;
+  const agent = writeback.agent || request.agent || null;
+  const actionKind = writeback.kind || request.payload?.kind || null;
+  const reviewee = writeback.reviewee || request.payload?.reviewee || null;
+  const ctx = readCtx(taskId);
+  const recentEvents = readTaskNotificationHistory(taskId).filter(event => isTimestampAfter(event.at, dispatchedAt));
+  const recentMessages = readTaskMessages(taskId).filter(message => isTimestampAfter(message.created_at, dispatchedAt));
+  const recentReviews = readTaskReviews(taskId).filter(review => isTimestampAfter(review.created_at, dispatchedAt));
+  const baseline = writeback.baseline || {};
+  const ageMinutes = computeAgeMinutes(dispatchedAt);
+  const active = request.status !== 'archived';
+  let evidence = null;
+
+  const statusChange = recentEvents.find(event => event.event === 'status_change' && event.by && event.by === agent);
+  if (statusChange) {
+    evidence = {
+      type: 'status_change',
+      confidence: 'confirmed',
+      at: statusChange.at,
+      by: statusChange.by,
+      status: statusChange.status || null,
+    };
+  }
+
+  const deliveredEvent = recentEvents.find(event => event.event === 'delivered' && event.by && event.by === agent);
+  if (!evidence && deliveredEvent) {
+    evidence = {
+      type: 'delivered',
+      confidence: 'confirmed',
+      at: deliveredEvent.at,
+      by: deliveredEvent.by,
+    };
+  }
+
+  const agentMessage = recentMessages.find(message => message.from_agent === agent);
+  if (!evidence && agentMessage) {
+    evidence = {
+      type: 'message_sent',
+      confidence: 'confirmed',
+      at: agentMessage.created_at,
+      by: agentMessage.from_agent,
+      message_id: agentMessage.message_id,
+      thread_id: agentMessage.thread_id || null,
+    };
+  }
+
+  if (!evidence && actionKind === 'stale_review_follow_up') {
+    const externalReview = recentReviews.find(review => !isSelfReview(review) && (!reviewee || review.reviewee === reviewee));
+    if (externalReview) {
+      evidence = {
+        type: 'review_added',
+        confidence: 'confirmed',
+        at: externalReview.created_at,
+        by: externalReview.reviewer,
+        review_id: externalReview.review_id,
+        reviewee: externalReview.reviewee,
+      };
+    }
+  }
+
+  if (!evidence) {
+    const agentReview = recentReviews.find(review => review.reviewer === agent);
+    if (agentReview) {
+      evidence = {
+        type: 'review_added',
+        confidence: 'confirmed',
+        at: agentReview.created_at,
+        by: agentReview.reviewer,
+        review_id: agentReview.review_id,
+        reviewee: agentReview.reviewee,
+      };
+    }
+  }
+
+  if (!evidence && ctx && isTimestampAfter(ctx.updated_at, baseline.task_updated_at || dispatchedAt) && ctx.status !== baseline.task_status) {
+    evidence = {
+      type: 'task_updated',
+      confidence: 'inferred',
+      at: ctx.updated_at,
+      by: null,
+      status: ctx.status || null,
+    };
+  }
+
+  let status = 'pending';
+  let code = 'awaiting_writeback';
+  if (!ctx) {
+    status = 'missing_task';
+    code = 'missing_task_ctx';
+  } else if (evidence?.confidence === 'confirmed') {
+    status = 'confirmed';
+    code = evidence.type;
+  } else if (evidence?.confidence === 'inferred') {
+    status = 'inferred';
+    code = evidence.type;
+  } else if (Number.isInteger(ageMinutes) && ageMinutes > warnAfterMinutes) {
+    status = 'stale';
+    code = 'writeback_overdue';
+  }
+
+  return {
+    tracked: true,
+    launch_id: request.launch_id,
+    dispatched_at: dispatchedAt,
+    agent,
+    task_id: taskId,
+    action_id: writeback.action_id || null,
+    kind: actionKind,
+    request_status: request.status || null,
+    active,
+    status,
+    code,
+    age_minutes: ageMinutes,
+    due_at: writeback.due_at || request.lease_expires_at || null,
+    evidence,
+  };
+}
+
+function summarizeLaunchWritebacks(requests, options = {}) {
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const evaluations = requests
+    .filter(request => request?.dispatched_at && request?.writeback?.required)
+    .map(request => evaluateLaunchWriteback(request, { warn_after_minutes: warnAfterMinutes }))
+    .sort((a, b) => (b.dispatched_at || '').localeCompare(a.dispatched_at || ''));
+
+  const emptyCounts = () => ({
+    pending: 0,
+    confirmed: 0,
+    inferred: 0,
+    stale: 0,
+    missing_task: 0,
+  });
+  const totalCounts = emptyCounts();
+  const activeCounts = emptyCounts();
+
+  for (const item of evaluations) {
+    if (totalCounts[item.status] !== undefined) totalCounts[item.status] += 1;
+    if (item.active && activeCounts[item.status] !== undefined) activeCounts[item.status] += 1;
+  }
+
+  return {
+    tracked: evaluations.length,
+    warn_after_minutes: warnAfterMinutes,
+    total_counts: totalCounts,
+    active_counts: activeCounts,
+    latest: evaluations[0] || null,
+  };
+}
+
 function buildLaunchStatus(options = {}) {
   const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
   const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
@@ -3952,6 +4170,9 @@ function buildLaunchStatus(options = {}) {
   const leasedCount = requests.filter(request => request.status === 'leased').length;
   const failedCount = requests.filter(request => request.status === 'failed').length;
   const latestAgeMinutes = latestDispatch?.dispatched_at ? computeAgeMinutes(latestDispatch.dispatched_at) : null;
+  const writeback = summarizeLaunchWritebacks(requests, {
+    warn_after_minutes: warnAfterMinutes,
+  });
 
   let status = 'idle';
   let code = 'no_pending_launches';
@@ -3961,6 +4182,9 @@ function buildLaunchStatus(options = {}) {
   } else if (failedCount > 0) {
     status = 'attention';
     code = 'launch_failures_present';
+  } else if (writeback.active_counts.stale > 0 || writeback.active_counts.missing_task > 0) {
+    status = 'attention';
+    code = 'writeback_stale';
   } else if (leasedCount > 0 && Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
     status = 'stale';
     code = 'lease_stale';
@@ -3997,6 +4221,7 @@ function buildLaunchStatus(options = {}) {
       failed: failedCount,
       archived: requests.filter(request => request.status === 'archived').length,
     },
+    writeback,
     by_agent: requests.reduce((rows, request) => {
       if (request.status !== 'pending') return rows;
       rows[request.agent] = (rows[request.agent] || 0) + 1;
@@ -5763,9 +5988,9 @@ ATF CLI v2
   atf profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag=x] [tags=a,b]  更新任务画像
   atf assign <taskId> <agent> [--confirm-timeout=40m] [--final-timeout=2h]  指派
   atf assign recommend <taskId> [top=N]  查看内部指派建议
-  atf update <taskId> <status>           更新状态
+atf update <taskId> <status> [by=agent] 更新状态
   atf fan-out <taskId> <agent1,agent2>   fan-out 分发
-  atf delivered <taskId>                 手动标记已送达
+atf delivered <taskId> [by=agent]      手动标记已送达
   atf dri <taskId> [agent]              设置/查看 DRI（唯一责任人）
   atf ctx <taskId>                       查看 ctx.json
   atf nextnum                            下一个编号
@@ -5816,7 +6041,7 @@ ATF CLI v2
   atf launch show <launchId>                                      查看单条 launch request
   atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]
   atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]
-  atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch queue / lease 状态
+atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch queue / lease / writeback 状态
   atf launch runs [agent] [status=completed|failed] [limit=N]     查看 launcher 运行审计
   atf launch run-show <runId|latest>                              查看单次 launcher 运行明细
   atf launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json]  查看 launcher 健康状态
@@ -5886,6 +6111,15 @@ switch (cmd) {
   case 'ctx': {
     const taskId = args[0];
     if (!taskId) { console.error('用法: atf ctx <taskId>'); break; }
+    /*
+      console.error('用法: atf delivered <taskId> [by=agent]');
+      break;
+    }
+      console.error('用法: atf delivered <taskId> [by=agent]');
+      break;
+    }
+    if (!taskId) { console.error('用法: atf ctx <taskId>'); break; }
+    */
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
     console.log(JSON.stringify(ctx, null, 2));
@@ -6030,6 +6264,10 @@ switch (cmd) {
 
   case 'update': {
     const [taskId, status] = args;
+    if (args.slice(2).some(part => typeof part === 'string' && !part.startsWith('by='))) {
+      console.error('用法: atf update <taskId> <status> [by=agent]');
+      break;
+    }
     if (!taskId || !status) { console.error('用法: atf update <taskId> <status>'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
@@ -6038,7 +6276,7 @@ switch (cmd) {
     ctx.status = status; writeCtx(taskId, ctx);
     buildReputationIndex();
     buildCreditsIndex();
-    appendNotificationHistory(taskId, { event: 'status_change', from: previousStatus, status, at: now });
+    appendNotificationHistory(taskId, { event: 'status_change', from: previousStatus, status, by: (args.find(part => typeof part === 'string' && part.startsWith('by=')) || '').replace(/^by=/, '') || null, at: now });
     const firedTriggers = fireMatchingTriggers(
       taskId,
       trigger => {
@@ -8165,6 +8403,9 @@ switch (cmd) {
       }
       console.log(`recent_runs=total:${status.recent_runs.total}  completed:${status.recent_runs.completed}  failed:${status.recent_runs.failed}`);
       console.log(`launch_queue=status:${status.launch_queue.status}  code:${status.launch_queue.code}  total:${status.launch_queue.counts.total}  pending:${status.launch_queue.counts.pending}  leased:${status.launch_queue.counts.leased}`);
+      if (status.launch_queue.writeback?.tracked) {
+        console.log(`writeback=tracked:${status.launch_queue.writeback.tracked}  active_pending:${status.launch_queue.writeback.active_counts.pending}  active_stale:${status.launch_queue.writeback.active_counts.stale}  confirmed:${status.launch_queue.writeback.total_counts.confirmed}  inferred:${status.launch_queue.writeback.total_counts.inferred}`);
+      }
       const pendingByAgent = Object.entries(status.launch_queue.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
         console.log(`pending_by_agent=${pendingByAgent.map(([name, count]) => `${name}=${count}`).join('  ')}`);
@@ -8220,6 +8461,12 @@ switch (cmd) {
         console.log('latest_dispatch=none');
       }
       console.log(`counts=total:${status.counts.total}  pending:${status.counts.pending}  leased:${status.counts.leased}  failed:${status.counts.failed}  archived:${status.counts.archived}`);
+      if (status.writeback?.tracked) {
+        console.log(`writeback=tracked:${status.writeback.tracked}  active_pending:${status.writeback.active_counts.pending}  active_stale:${status.writeback.active_counts.stale}  confirmed:${status.writeback.total_counts.confirmed}  inferred:${status.writeback.total_counts.inferred}`);
+        if (status.writeback.latest) {
+          console.log(`latest_writeback=${status.writeback.latest.launch_id}  task=${status.writeback.latest.task_id}  ${status.writeback.latest.status}  age=${status.writeback.latest.age_minutes ?? '-'}m  code=${status.writeback.latest.code}`);
+        }
+      }
       const pendingByAgent = Object.entries(status.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
         console.log(`pending_by_agent=${pendingByAgent.map(([name, count]) => `${name}=${count}`).join('  ')}`);
@@ -8376,6 +8623,9 @@ switch (cmd) {
       }
       console.log(`action_watcher=status:${status.action_watcher.status}  code:${status.action_watcher.code}  pending:${status.action_watcher.pending_actions.total}`);
       console.log(`launcher=status:${status.launcher.status}  code:${status.launcher.code}  pending:${status.launcher.launch_queue.counts.pending}  leased:${status.launcher.launch_queue.counts.leased}`);
+      if (status.writeback?.tracked) {
+        console.log(`writeback=tracked:${status.writeback.tracked}  active_pending:${status.writeback.active_counts.pending}  active_stale:${status.writeback.active_counts.stale}  confirmed:${status.writeback.total_counts.confirmed}  inferred:${status.writeback.total_counts.inferred}`);
+      }
       console.log('');
       break;
     }
@@ -9754,6 +10004,10 @@ ${body}\n`;
 
   // ── 标记已送达（completed ≠ delivered）────────────────────
   case 'delivered': {
+    if (args.slice(1).some(part => typeof part === 'string' && !part.startsWith('by='))) {
+      console.error('用法: atf delivered <taskId> [by=agent]');
+      break;
+    }
     const taskId = args[0];
     if (!taskId) { console.error('用法: atf delivered <taskId>'); break; }
     const ctx = readCtx(taskId);
@@ -9764,8 +10018,9 @@ ${body}\n`;
     writeCtx(taskId, ctx);
     buildReputationIndex();
     buildCreditsIndex();
-    const hf = `${TASKS_DIR}/${taskId}/notifications/history.json`;
-    const h = loadJson(hf)||[]; h.push({event:'delivered',at:new Date().toISOString()}); saveJson(hf,h.slice(-50));
+    const hf = notificationHistoryPath(taskId);
+    const deliveryActor = (args.find(part => typeof part === 'string' && part.startsWith('by=')) || '').replace(/^by=/, '') || null;
+    const h = loadJson(hf)||[]; h.push({event:'delivered',by:deliveryActor,at:new Date().toISOString()}); saveJson(hf,h.slice(-50));
     console.log(`✅ ${taskId} → delivered`);
     break;
   }

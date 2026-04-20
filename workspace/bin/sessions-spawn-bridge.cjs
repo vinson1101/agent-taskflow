@@ -89,6 +89,7 @@ function buildWritebackInstructions(payload) {
   const pendingTaskPath = payload.payload?.pending_task_path || payload.source_path || 'pending-task.json';
   const lines = [
     'ATF writeback is mandatory. Logs or local notes do not count as completion.',
+    `When you change task status via ATF CLI, include by=${agent} so ATF can attribute the writeback.`,
   ];
 
   if (actionKind === 'stale_review_follow_up' && taskId !== '-') {
@@ -101,7 +102,7 @@ function buildWritebackInstructions(payload) {
       lines.push('If approval is not appropriate, use needs_revision or rejected instead of approved.');
     }
   } else if (actionKind === 'decision_follow_up' && taskId !== '-') {
-    lines.push(`Write the decision back into ATF for ${taskId}; if the task is blocked, use: node atf-cli.js update ${taskId} blocked`);
+    lines.push(`Write the decision back into ATF for ${taskId}; if the task is blocked, use: node atf-cli.js update ${taskId} blocked by=${agent}`);
   } else if (actionKind === 'pending_reply_follow_up') {
     lines.push(`Reply through the ATF message flow for ${taskId}; do not stop at local notes or logs.`);
   } else if (taskId !== '-') {

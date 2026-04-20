@@ -194,9 +194,9 @@ node atf-cli.js profile set <taskId> [type=x] [difficulty=1-5] [priority=x] [tag
 node atf-cli.js ctx <taskId>             # 查看 ctx.json
 node atf-cli.js assign <taskId> <agent>  # 指派（写 pending-task.json）
 node atf-cli.js assign recommend <taskId> [top=N] # 查看内部指派建议
-node atf-cli.js update <taskId> <status> # 更新状态（pause/assigned/completed等）
+node atf-cli.js update <taskId> <status> [by=agent] # 更新状态（pause/assigned/completed等）
 node atf-cli.js fan-out <taskId> <a1,a2> # fan-out 分发
-node atf-cli.js delivered <taskId>       # 标记已送达（Vinson 确认）
+node atf-cli.js delivered <taskId> [by=agent] # 标记已送达（Vinson 确认）
 node atf-cli.js dri <taskId> [agent]     # 设置/查看 DRI
 node atf-cli.js review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N] # 查看待评价 backlog 汇总
 node atf-cli.js agent list             # 查看注册 agent 列表
@@ -245,7 +245,7 @@ node atf-cli.js launch inbox <agent> [limit=N]               # 查看 agent 待 
 node atf-cli.js launch show <launchId>                       # 查看单条 launch request
 node atf-cli.js launch dispatch <launchId> [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x] # dispatch 单条 launch request
 node atf-cli.js launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x] # 批量 dispatch launch request
-node atf-cli.js launch status [agent] [warn_after_minutes=N] [json] # 查看 launch queue / lease 状态
+node atf-cli.js launch status [agent] [warn_after_minutes=N] [json] # 查看 launch queue / lease / writeback 状态
 node atf-cli.js launch runs [agent] [status=completed|failed] [limit=N] # 查看 launcher 运行审计
 node atf-cli.js launch run-show <runId|latest>             # 查看单次 launcher 运行明细
 node atf-cli.js launch launcher-status [agent] [warn_after_minutes=N] [limit=N] [json] # 查看 launcher 健康状态
@@ -404,7 +404,7 @@ node atf-cli.js launch run-show latest
 node atf-cli.js launch launcher-status
 ```
 
-`launch status` 关注 queue 本身的 `pending / leased / archived` 分布；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
+`launch status` 现在除了 queue 本身的 `pending / leased / archived` 分布，也会汇总 `writeback` 的 `pending / confirmed / inferred / stale`；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
 
 现在推荐的正式运行方式不是三条独立 cron，而是：
 

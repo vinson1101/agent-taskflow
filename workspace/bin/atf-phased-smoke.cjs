@@ -590,6 +590,12 @@ function main() {
   if (launchStatusAfterReviewWriteback.writeback?.latest?.resolution !== 'resolved') {
     throw new Error(`expected latest launch writeback resolved, got ${launchStatusAfterReviewWriteback.writeback?.latest?.resolution}`);
   }
+  if ((launchStatusAfterReviewWriteback.writeback?.post_launch?.total_resolution_counts?.resolved || 0) < 1) {
+    throw new Error(`expected resolved post-launch evidence after review, got ${launchStatusAfterReviewWriteback.writeback?.post_launch?.total_resolution_counts?.resolved}`);
+  }
+  if (launchStatusAfterReviewWriteback.writeback?.post_launch?.latest?.resolution !== 'resolved') {
+    throw new Error(`expected latest post-launch resolution resolved, got ${launchStatusAfterReviewWriteback.writeback?.post_launch?.latest?.resolution}`);
+  }
 
   fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
   const launchScanAfterSourceClear = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);

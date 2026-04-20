@@ -301,6 +301,15 @@ function main() {
   if (launchStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged !== 0) throw new Error(`expected no active acknowledged writebacks after immediate archive, got ${launchStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged}`);
   if (controlPlaneStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged !== 0) throw new Error(`expected control-plane active acknowledged writeback=0 after immediate archive, got ${controlPlaneStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged}`);
   if (controlPlaneStatusAcknowledged.launcher?.launch_queue?.counts?.leased !== 0) throw new Error(`expected control-plane launcher leased=0 after immediate archive, got ${controlPlaneStatusAcknowledged.launcher?.launch_queue?.counts?.leased}`);
+  if (launchStatusAcknowledged.writeback?.post_launch?.latest?.resolution !== 'acknowledged') throw new Error(`expected latest post-launch resolution acknowledged, got ${launchStatusAcknowledged.writeback?.post_launch?.latest?.resolution}`);
+
+  runCli(['review', 'add', staleTaskId, 'huntmind', 'f0x', 'approved', 'smoke-post-launch', 'type=task', 'overall=4'], env, options);
+  const launchStatusResolvedAfterArchive = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  const controlPlaneStatusResolvedAfterArchive = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
+  if ((launchStatusResolvedAfterArchive.writeback?.post_launch?.total_resolution_counts?.resolved || 0) < 1) throw new Error(`expected post-launch resolved count >= 1, got ${launchStatusResolvedAfterArchive.writeback?.post_launch?.total_resolution_counts?.resolved}`);
+  if (launchStatusResolvedAfterArchive.writeback?.post_launch?.latest?.resolution !== 'resolved') throw new Error(`expected latest post-launch resolution resolved, got ${launchStatusResolvedAfterArchive.writeback?.post_launch?.latest?.resolution}`);
+  if (controlPlaneStatusResolvedAfterArchive.writeback?.post_launch?.latest?.resolution !== 'resolved') throw new Error(`expected control-plane latest post-launch resolution resolved, got ${controlPlaneStatusResolvedAfterArchive.writeback?.post_launch?.latest?.resolution}`);
+  if (launchStatusResolvedAfterArchive.writeback?.latest?.resolution !== 'acknowledged') throw new Error(`expected launch closure resolution to remain acknowledged, got ${launchStatusResolvedAfterArchive.writeback?.latest?.resolution}`);
 
   runCli(['update', triggerTaskId, 'completed', 'by=f0x'], env, options);
   runCli(['delivered', triggerTaskId, 'by=f0x'], env, options);

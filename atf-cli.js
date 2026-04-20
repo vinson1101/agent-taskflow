@@ -4452,6 +4452,205 @@ function summarizeLaunchWritebackFollowUps(requests) {
   };
 }
 
+function evaluateLaunchPostLaunchEvidence(request, options = {}) {
+  const writeback = request?.writeback || null;
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  if (!request?.dispatched_at || !writeback?.required || !writeback.task_id) {
+    return {
+      tracked: false,
+      request_status: request?.status || null,
+      status: 'not_required',
+      code: 'not_tracked',
+      age_minutes: request?.dispatched_at ? computeAgeMinutes(request.dispatched_at) : null,
+      evidence: null,
+    };
+  }
+
+  const dispatchedAt = request.dispatched_at;
+  const taskId = writeback.task_id;
+  const agent = writeback.agent || request.agent || null;
+  const actionKind = writeback.kind || request.payload?.kind || null;
+  const reviewee = writeback.reviewee || request.payload?.reviewee || null;
+  const ctx = readCtx(taskId);
+  const recentEvents = readTaskNotificationHistory(taskId).filter(event => isTimestampAfter(event.at, dispatchedAt));
+  const recentMessages = readTaskMessages(taskId).filter(message => isTimestampAfter(message.created_at, dispatchedAt));
+  const recentReviews = readTaskReviews(taskId).filter(review => isTimestampAfter(review.created_at, dispatchedAt));
+  const baseline = writeback.baseline || {};
+  const ageMinutes = computeAgeMinutes(dispatchedAt);
+  const active = request.status !== 'archived';
+  const candidates = [];
+
+  for (const event of recentEvents) {
+    if (event.event === 'status_change' && event.by && event.by === agent) {
+      candidates.push({
+        type: 'status_change',
+        confidence: 'confirmed',
+        at: event.at,
+        by: event.by,
+        status: event.status || null,
+      });
+    }
+    if (event.event === 'delivered') {
+      candidates.push({
+        type: 'delivered',
+        confidence: event.by ? 'confirmed' : 'inferred',
+        at: event.at,
+        by: event.by || null,
+      });
+    }
+  }
+
+  for (const message of recentMessages) {
+    if (message.from_agent !== agent) continue;
+    candidates.push({
+      type: 'message_sent',
+      confidence: 'confirmed',
+      at: message.created_at,
+      by: message.from_agent,
+      message_id: message.message_id,
+      thread_id: message.thread_id || null,
+    });
+  }
+
+  for (const review of recentReviews) {
+    candidates.push({
+      type: 'review_added',
+      confidence: 'confirmed',
+      at: review.created_at,
+      by: review.reviewer,
+      review_id: review.review_id,
+      reviewee: review.reviewee,
+      self_review: Boolean(review.self_review),
+    });
+  }
+
+  if (ctx && isTimestampAfter(ctx.updated_at, baseline.task_updated_at || dispatchedAt) && ctx.status !== baseline.task_status) {
+    candidates.push({
+      type: 'task_updated',
+      confidence: 'inferred',
+      at: ctx.updated_at,
+      by: null,
+      status: ctx.status || null,
+    });
+  }
+
+  const ranked = candidates
+    .map(evidence => {
+      const resolutionInfo = deriveWritebackResolution(actionKind, evidence, ctx?.status || null, {
+        reviewee,
+        agent,
+      });
+      const resolutionRank = resolutionInfo.resolution === 'resolved'
+        ? 2
+        : resolutionInfo.resolution === 'acknowledged'
+          ? 1
+          : 0;
+      const confidenceRank = evidence.confidence === 'confirmed'
+        ? 2
+        : evidence.confidence === 'inferred'
+          ? 1
+          : 0;
+      return {
+        evidence,
+        resolution: resolutionInfo.resolution,
+        resolution_code: resolutionInfo.resolution_code,
+        resolution_rank: resolutionRank,
+        confidence_rank: confidenceRank,
+      };
+    })
+    .sort((a, b) =>
+      b.resolution_rank - a.resolution_rank
+      || b.confidence_rank - a.confidence_rank
+      || (b.evidence.at || '').localeCompare(a.evidence.at || '')
+    );
+
+  const strongest = ranked[0] || null;
+  let status = 'pending';
+  let code = 'awaiting_post_launch_evidence';
+  if (!ctx) {
+    status = 'missing_task';
+    code = 'missing_task_ctx';
+  } else if (strongest?.evidence?.confidence === 'confirmed') {
+    status = 'confirmed';
+    code = strongest.evidence.type;
+  } else if (strongest?.evidence?.confidence === 'inferred') {
+    status = 'inferred';
+    code = strongest.evidence.type;
+  } else if (Number.isInteger(ageMinutes) && ageMinutes > warnAfterMinutes) {
+    status = 'stale';
+    code = 'post_launch_evidence_overdue';
+  }
+
+  return {
+    tracked: true,
+    launch_id: request.launch_id,
+    dispatched_at: dispatchedAt,
+    agent,
+    task_id: taskId,
+    action_id: writeback.action_id || null,
+    kind: actionKind,
+    request_status: request.status || null,
+    active,
+    status,
+    code,
+    resolution: strongest?.resolution || 'unresolved',
+    resolution_code: strongest?.resolution_code || 'no_post_launch_evidence',
+    age_minutes: ageMinutes,
+    due_at: writeback.due_at || request.lease_expires_at || null,
+    evidence: strongest?.evidence || null,
+    evidence_count: ranked.length,
+  };
+}
+
+function summarizeLaunchPostLaunchEvidence(requests, options = {}) {
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const evaluations = requests
+    .filter(request => request?.dispatched_at && request?.writeback?.required)
+    .map(request => evaluateLaunchPostLaunchEvidence(request, { warn_after_minutes: warnAfterMinutes }))
+    .sort((a, b) =>
+      (b.evidence?.at || b.dispatched_at || '').localeCompare(a.evidence?.at || a.dispatched_at || '')
+    );
+
+  const emptyCounts = () => ({
+    pending: 0,
+    confirmed: 0,
+    inferred: 0,
+    stale: 0,
+    missing_task: 0,
+  });
+  const totalCounts = emptyCounts();
+  const activeCounts = emptyCounts();
+  const emptyResolutionCounts = () => ({
+    unresolved: 0,
+    acknowledged: 0,
+    resolved: 0,
+  });
+  const totalResolutionCounts = emptyResolutionCounts();
+  const activeResolutionCounts = emptyResolutionCounts();
+
+  for (const item of evaluations) {
+    if (totalCounts[item.status] !== undefined) totalCounts[item.status] += 1;
+    if (item.active && activeCounts[item.status] !== undefined) activeCounts[item.status] += 1;
+    if (totalResolutionCounts[item.resolution] !== undefined) totalResolutionCounts[item.resolution] += 1;
+    if (item.active && activeResolutionCounts[item.resolution] !== undefined) activeResolutionCounts[item.resolution] += 1;
+  }
+
+  return {
+    tracked: evaluations.length,
+    warn_after_minutes: warnAfterMinutes,
+    total_counts: totalCounts,
+    active_counts: activeCounts,
+    total_resolution_counts: totalResolutionCounts,
+    active_resolution_counts: activeResolutionCounts,
+    latest: evaluations[0] || null,
+    by_launch: evaluations,
+  };
+}
+
 function buildLaunchStatus(options = {}) {
   const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
   const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
@@ -4469,6 +4668,9 @@ function buildLaunchStatus(options = {}) {
     warn_after_minutes: warnAfterMinutes,
   });
   writeback.follow_up = summarizeLaunchWritebackFollowUps(requests);
+  writeback.post_launch = summarizeLaunchPostLaunchEvidence(requests, {
+    warn_after_minutes: warnAfterMinutes,
+  });
 
   let status = 'idle';
   let code = 'no_pending_launches';
@@ -8862,6 +9064,12 @@ switch (cmd) {
             console.log(`latest_writeback_follow_up=${status.launch_queue.writeback.follow_up.latest.launch_id}  action=${status.launch_queue.writeback.follow_up.latest.action_id}  ${status.launch_queue.writeback.follow_up.latest.status}  try=${status.launch_queue.writeback.follow_up.latest.attempt}  at=${status.launch_queue.writeback.follow_up.latest.at || '-'}  postflight=${status.launch_queue.writeback.follow_up.latest.postflight_code || '-'}`);
           }
         }
+        if (status.launch_queue.writeback.post_launch?.tracked) {
+          console.log(`post_launch=tracked:${status.launch_queue.writeback.post_launch.tracked}  resolved:${status.launch_queue.writeback.post_launch.total_resolution_counts.resolved}  acknowledged:${status.launch_queue.writeback.post_launch.total_resolution_counts.acknowledged}  unresolved:${status.launch_queue.writeback.post_launch.total_resolution_counts.unresolved}`);
+          if (status.launch_queue.writeback.post_launch.latest) {
+            console.log(`latest_post_launch=${status.launch_queue.writeback.post_launch.latest.launch_id}  task=${status.launch_queue.writeback.post_launch.latest.task_id}  ${status.launch_queue.writeback.post_launch.latest.status}/${status.launch_queue.writeback.post_launch.latest.resolution}  at=${status.launch_queue.writeback.post_launch.latest.evidence?.at || status.launch_queue.writeback.post_launch.latest.dispatched_at || '-'}  code=${status.launch_queue.writeback.post_launch.latest.resolution_code}`);
+          }
+        }
       }
       const pendingByAgent = Object.entries(status.launch_queue.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
@@ -8928,6 +9136,12 @@ switch (cmd) {
           console.log(`writeback_follow_up=launches:${status.writeback.follow_up.total_launches}  active_launches:${status.writeback.follow_up.active_launches}  total:${status.writeback.follow_up.total_actions}  pending:${status.writeback.follow_up.total_by_status.pending}  executed:${status.writeback.follow_up.total_by_status.executed}`);
           if (status.writeback.follow_up.latest) {
             console.log(`latest_writeback_follow_up=${status.writeback.follow_up.latest.launch_id}  action=${status.writeback.follow_up.latest.action_id}  ${status.writeback.follow_up.latest.status}  try=${status.writeback.follow_up.latest.attempt}  at=${status.writeback.follow_up.latest.at || '-'}  postflight=${status.writeback.follow_up.latest.postflight_code || '-'}`);
+          }
+        }
+        if (status.writeback.post_launch?.tracked) {
+          console.log(`post_launch=tracked:${status.writeback.post_launch.tracked}  resolved:${status.writeback.post_launch.total_resolution_counts.resolved}  acknowledged:${status.writeback.post_launch.total_resolution_counts.acknowledged}  unresolved:${status.writeback.post_launch.total_resolution_counts.unresolved}`);
+          if (status.writeback.post_launch.latest) {
+            console.log(`latest_post_launch=${status.writeback.post_launch.latest.launch_id}  task=${status.writeback.post_launch.latest.task_id}  ${status.writeback.post_launch.latest.status}/${status.writeback.post_launch.latest.resolution}  at=${status.writeback.post_launch.latest.evidence?.at || status.writeback.post_launch.latest.dispatched_at || '-'}  code=${status.writeback.post_launch.latest.resolution_code}`);
           }
         }
       }
@@ -9094,6 +9308,12 @@ switch (cmd) {
           console.log(`writeback_follow_up=launches:${status.writeback.follow_up.total_launches}  active_launches:${status.writeback.follow_up.active_launches}  total:${status.writeback.follow_up.total_actions}  pending:${status.writeback.follow_up.total_by_status.pending}  executed:${status.writeback.follow_up.total_by_status.executed}`);
           if (status.writeback.follow_up.latest) {
             console.log(`latest_writeback_follow_up=${status.writeback.follow_up.latest.launch_id}  action=${status.writeback.follow_up.latest.action_id}  ${status.writeback.follow_up.latest.status}  try=${status.writeback.follow_up.latest.attempt}  at=${status.writeback.follow_up.latest.at || '-'}  postflight=${status.writeback.follow_up.latest.postflight_code || '-'}`);
+          }
+        }
+        if (status.writeback.post_launch?.tracked) {
+          console.log(`post_launch=tracked:${status.writeback.post_launch.tracked}  resolved:${status.writeback.post_launch.total_resolution_counts.resolved}  acknowledged:${status.writeback.post_launch.total_resolution_counts.acknowledged}  unresolved:${status.writeback.post_launch.total_resolution_counts.unresolved}`);
+          if (status.writeback.post_launch.latest) {
+            console.log(`latest_post_launch=${status.writeback.post_launch.latest.launch_id}  task=${status.writeback.post_launch.latest.task_id}  ${status.writeback.post_launch.latest.status}/${status.writeback.post_launch.latest.resolution}  at=${status.writeback.post_launch.latest.evidence?.at || status.writeback.post_launch.latest.dispatched_at || '-'}  code=${status.writeback.post_launch.latest.resolution_code}`);
           }
         }
       }

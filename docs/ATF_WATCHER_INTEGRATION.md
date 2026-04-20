@@ -241,6 +241,11 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 - `--action-mode / --action-to / --action-thread`
 - `--launcher-mode`
 
+每次 control-plane 运行也会把摘要落到：
+
+- `ATF_DATA_DIR/control-plane-runs/<runId>.json`
+- `ATF_DATA_DIR/control-plane-runs/latest.json`
+
 ### 6.2 单 agent watcher
 
 ```cron

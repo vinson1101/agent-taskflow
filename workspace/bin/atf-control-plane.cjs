@@ -33,6 +33,48 @@ function generateRunId() {
   return `CPR-${stamp}-${randomBytes(3).toString('hex')}`;
 }
 
+function defaultWorkspaceDir() {
+  const openClawRoot = process.env.ATF_ROOT || '/root/.openclaw';
+  return process.env.ATF_WORKSPACE_DIR || path.join(openClawRoot, 'workspace');
+}
+
+function defaultDataDir() {
+  return process.env.ATF_DATA_DIR || path.join(defaultWorkspaceDir(), 'agent-taskflow', 'data');
+}
+
+function controlPlaneRunsDir() {
+  return path.join(defaultDataDir(), 'control-plane-runs');
+}
+
+function controlPlaneRunPath(runId) {
+  return path.join(controlPlaneRunsDir(), `${runId}.json`);
+}
+
+function controlPlaneLatestPath() {
+  return path.join(controlPlaneRunsDir(), 'latest.json');
+}
+
+function ensureDir(target) {
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+}
+
+function writeJson(filePath, data) {
+  ensureDir(path.dirname(filePath));
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function persistSummary(summary) {
+  const auditPath = controlPlaneRunPath(summary.run_id);
+  const payload = {
+    schema: 'atf.control-plane-run.v1',
+    ...summary,
+    audit_path: summary.audit_path || auditPath,
+  };
+  writeJson(auditPath, payload);
+  writeJson(controlPlaneLatestPath(), payload);
+  return auditPath;
+}
+
 function parseArgs(argv) {
   const options = {
     agent: null,
@@ -298,6 +340,8 @@ function printTextSummary(summary) {
   if (summary.trigger) console.log(`  trigger: executed=${summary.trigger.executed} pending_after=${summary.trigger.pendingAfterExecute}`);
   if (summary.action) console.log(`  action: created=${summary.action.created} executed=${summary.action.executed} pending_after=${summary.action.pendingAfterExecute} failed=${summary.action.failed}`);
   if (summary.launcher) console.log(`  launcher: created=${summary.launcher.created} leased=${summary.launcher.leased} pending_after=${summary.launcher.pendingAfterDispatch} status=${summary.launcher.status}`);
+  if (summary.audit_path) console.log(`  audit path: ${summary.audit_path}`);
+  if (summary.audit_write_error) console.log(`  audit write error: ${summary.audit_write_error}`);
   if (summary.errors.length) {
     console.log('  errors:');
     for (const error of summary.errors) console.log(`    - ${error.component}: ${error.message}`);
@@ -338,6 +382,8 @@ function main() {
     },
     idle: true,
     errors: [],
+    audit_path: null,
+    audit_write_error: null,
   };
 
   const steps = [
@@ -377,6 +423,12 @@ function main() {
   summary.idle = !summary.activity.trigger && !summary.activity.action && !summary.activity.launcher && summary.errors.length === 0;
   summary.completed_at = new Date().toISOString();
   summary.duration_ms = Date.now() - startedMs;
+
+  try {
+    summary.audit_path = persistSummary(summary);
+  } catch (error) {
+    summary.audit_write_error = error.message;
+  }
 
   if (!(options.quietIdle && summary.idle)) {
     if (options.json) console.log(JSON.stringify(summary, null, 2));

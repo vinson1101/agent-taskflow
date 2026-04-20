@@ -26,7 +26,7 @@ ATF 当前不是“纯 task repo 系统”，而是：
 | `truth` | canonical record；描述任务事实、协作对象和正式协议对象 | `ctx.json`、`focus-items/`、`triggers/`、`trigger-fires/`、`messages/`、`receipts/`、`reflections/`、`reviews/`、`actions/`、`shared-context.json` | 不应直接删除；需要从备份、VCS 或其他外部恢复 |
 | `queue` | 待处理、待分发、待唤醒的运行期信号与队列 | `<taskDir>/pending-task.json`、`<agentWorkspace>/pending-task.json`、`ATF_DATA_DIR/pending-trigger-fires.json`、`trigger-inboxes/`、`pending-actions.json`、`action-inboxes/`、`pending-launch-requests.json`、`launch-inboxes/`、`launch-dispatch-payloads/` | 一般可以通过重扫、重建索引或重新 dispatch 恢复；但 in-flight payload 丢失会影响当前这次唤醒 |
 | `projection` | 从 truth / queue 派生的可重建摘要、统计或画像视图 | `ATF_DATA_DIR/scores.json`、`ATF_DATA_DIR/credits.json`、CLI `status / stats / assign recommend` 输出、watcher status 摘要 | 允许重建；不应当作唯一真相 |
-| `audit` | 执行、扫描、dispatch、follow-up 的留痕与取证材料 | `trigger-executions/`、`ATF_DATA_DIR/action-watcher-runs/`、`ATF_DATA_DIR/launcher-runs/`、launch request history | 丢失不应改变任务真相，但会损失巡检和追溯能力 |
+| `audit` | 执行、扫描、dispatch、follow-up 的留痕与取证材料 | `trigger-executions/`、`ATF_DATA_DIR/action-watcher-runs/`、`ATF_DATA_DIR/launcher-runs/`、`ATF_DATA_DIR/control-plane-runs/`、launch request history | 丢失不应改变任务真相，但会损失巡检和追溯能力 |
 
 ## 3. 三条标准链路术语
 

@@ -423,6 +423,11 @@ node atf-cli.js launch launcher-status
 - `--action-mode / --action-to / --action-thread`
 - `--launcher-mode`
 
+每次 control-plane 运行也会把摘要落到：
+
+- `data/control-plane-runs/<runId>.json`
+- `data/control-plane-runs/latest.json`
+
 `sessions_spawn` bridge 最小示例：
 
 ```bash

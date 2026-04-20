@@ -237,6 +237,11 @@ function main() {
   ], env, options));
 
   if (summary.status !== 'completed') throw new Error(`expected control-plane status completed, got ${summary.status}`);
+  if (!summary.audit_path) throw new Error('expected control-plane summary to include audit_path');
+  if (!fs.existsSync(summary.audit_path)) throw new Error('expected control-plane audit file to exist');
+  const controlPlaneAudit = readJson(summary.audit_path);
+  if (controlPlaneAudit.run_id !== summary.run_id) throw new Error('expected control-plane audit run_id to match');
+  if (controlPlaneAudit.schema !== 'atf.control-plane-run.v1') throw new Error(`expected control-plane audit schema, got ${controlPlaneAudit.schema}`);
   if (!summary.activity.trigger) throw new Error('expected trigger activity in control-plane summary');
   if (!summary.activity.action) throw new Error('expected action activity in control-plane summary');
   if (!summary.activity.launcher) throw new Error('expected launcher activity in control-plane summary');

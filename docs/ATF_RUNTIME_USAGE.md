@@ -547,7 +547,8 @@ bridge command 最少可以这样接：
 
 ```bash
 export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
-export ATF_SESSIONS_SPAWN_BACKEND_CMD='node /root/.openclaw/workspace/host/bin/real-sessions-spawn-backend.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_MODULE='/root/.openclaw/workspace/agent-taskflow/workspace/bin/real-sessions-spawn-backend.cjs'
+export ATF_REAL_SESSIONS_SPAWN_MODE='stub'
 node workspace/bin/atf-launcher.cjs --mode sessions_spawn --dispatcher host-launcher
 ```
 
@@ -566,7 +567,18 @@ repo 内置 bridge 还会补：
 - `ATF_LAUNCH_PROMPT`
 - `ATF_LAUNCH_PROMPT_PATH`
 
-并要求至少配置一个 backend：
+repo 内 backend 还支持：
+
+- `ATF_REAL_SESSIONS_SPAWN_MODE=stub`
+- `ATF_REAL_SESSIONS_SPAWN_CMD`
+- `ATF_REAL_SESSIONS_SPAWN_MODULE`
+
+也就是推荐分两步：
+
+1. 先用 repo 内 backend + `stub` 验证 launcher 真 dispatch 到 sessions_spawn adapter
+2. 再把 repo 内 backend 接到你真实的 runtime command / module
+
+bridge 至少要求配置一个 backend：
 
 - `ATF_SESSIONS_SPAWN_BACKEND_CMD`
 - `ATF_SESSIONS_SPAWN_BACKEND_MODULE`

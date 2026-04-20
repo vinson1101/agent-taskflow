@@ -245,7 +245,8 @@ node atf-cli.js action watcher-status
 
 ```bash
 export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
-export ATF_SESSIONS_SPAWN_BACKEND_CMD='node /root/.openclaw/workspace/host/bin/real-sessions-spawn-backend.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_MODULE='/root/.openclaw/workspace/agent-taskflow/workspace/bin/real-sessions-spawn-backend.cjs'
+export ATF_REAL_SESSIONS_SPAWN_MODE='stub'
 node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode sessions_spawn
 ```
 
@@ -256,6 +257,13 @@ ATF 不直接假设某个特定 runtime。`sessions_spawn` 只是约定：
 - repo 内置 bridge 还会生成 `ATF_LAUNCH_PROMPT / ATF_LAUNCH_PROMPT_PATH`
 - bridge command 返回 `exit 0` 视为已接受 launch
 - 非零退出码会把 launch request 标成 `failed`
+
+推荐接法：
+
+1. `ATF_LAUNCH_SESSIONS_SPAWN_CMD` 固定指向 repo 内 `sessions-spawn-bridge.cjs`
+2. `ATF_SESSIONS_SPAWN_BACKEND_MODULE` 先指向 repo 内 `real-sessions-spawn-backend.cjs`
+3. 用 `ATF_REAL_SESSIONS_SPAWN_MODE=stub` 先验证链路
+4. 真正上线时，再把 repo 内 backend 继续接到真实 runtime command / module
 
 上线后直接看：
 

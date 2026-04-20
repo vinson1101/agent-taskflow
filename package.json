@@ -1,7 +1,7 @@
 {
   "name": "AgentTaskFlow",
   "version": "1.0.0",
-  "description": "Task management skill with USDC payment integration for OpenClaw",
+  "description": "Async multi-agent coordination kernel and control plane for OpenClaw",
   "author": "PinchyMeow",
   "main": "index.js",
   "scripts": {
@@ -20,9 +20,11 @@
   },
   "keywords": [
     "openclaw",
-    "task",
-    "payment",
-    "usdc"
+    "taskflow",
+    "multi-agent",
+    "coordination",
+    "control-plane",
+    "orchestration"
   ],
   "dependencies": {
     "ethers": "^6.16.0",

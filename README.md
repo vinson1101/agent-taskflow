@@ -1,8 +1,54 @@
-# AgentTaskFlow (ATF) - 任务分配与协作系统
+# AgentTaskFlow (ATF)
 
-> 基于 OpenClaw 的多 Agent 任务管理框架。统一任务仓库 + CLI + Watcher。
+> OpenClaw 上的异步多 Agent 协作控制层。它提供任务协议、协作对象、主动动作和统一控制面，让多个 agent 能在共享任务仓库上稳定协作。
 
-**状态：运行中（v2，2026-04-11 重构）**
+**状态：Phase A / B / C / D 主干已完成，当前进入 merge / rollout / ops 观察阶段。**
+
+## 项目简介
+
+ATF 不是“又一个任务管理器”，也不是一个独立的 Agent 平台。
+
+它的定位更准确地说是：
+
+**面向 OpenClaw 多 Agent 场景的协议层、控制层和运行保障层。**
+
+ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作里更难、也更长期的问题：
+
+- 任务如何被明确派发
+- 谁对结果负责
+- 协作上下文如何沉淀
+- 超时、阻塞和遗漏如何被发现
+- follow-up、review 和唤醒动作如何形成闭环
+- 历史表现如何沉淀为组织能力
+
+它把这些问题收敛成一组可落地的本地协议对象和控制面能力，而不是交给 prompt 或人工流程去隐式兜底。
+
+## 当前定位
+
+当前 ATF 的产品定位是：
+
+**OpenClaw 上的异步多 Agent 协作内核**
+
+它由四层能力组成：
+
+1. **任务协议层**：任务 schema、状态机、DRI、超时、DLQ、交付确认
+2. **协作对象层**：`focus / trigger / message / reflection / shared context`
+3. **反馈与评估层**：`review / credits / reputation / backlog`
+4. **主动执行层**：`action / launcher / sessions_spawn / control-plane`
+
+这四层共同组成一个“可审计、可恢复、可逐步自治”的异步协作系统。
+
+## 非目标
+
+为了避免方向漂移，当前阶段 ATF 明确不是：
+
+- 实时聊天系统
+- 即时多 Agent 讨论平台
+- 支付优先产品
+- 完整的 Agent 市场
+- 重型多租户平台
+
+这些方向未来可能成立，但不应主导当前主线。
 
 ## 指导文档
 
@@ -38,15 +84,28 @@
 
 ---
 
-## 架构
+## 系统结构
 
 ```
-atf create "描述"  → ctx.json + pending-task.json
-atf assign T-X f0x → ctx.assigned_to + pending-task.json
-F0x scan          → 发现 pending-task.json → 查 ctx.status → 执行
-F0x               → atf update T-X completed
-Watcher(cron scan) → 检测 completed / timeout → 通知 / 催办 / DLQ
+Task Protocol
+  └─ ctx / status / DRI / delivery / DLQ
+
+Collaboration Objects
+  └─ focus / trigger / message / reflection / shared context
+
+Feedback & Evaluation
+  └─ review / credits / reputation / backlog
+
+Execution & Control Plane
+  └─ action / launcher / sessions_spawn / control-plane
 ```
+
+ATF 的运行方式不是实时事件总线，而是：
+
+- 共享任务仓库保存事实和状态
+- agent 在自己的 workspace 上消费 `pending-task.json` / 消息 / launch 请求
+- watcher / control-plane 负责扫描、补漏、催办、唤醒和审计
+- 所有关键动作最终都要回写到 ATF，而不是停留在日志里
 
 **状态机：**
 ```

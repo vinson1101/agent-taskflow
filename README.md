@@ -29,6 +29,7 @@
 | `workspace/bin/atf-watcher.cjs` | 仓库内可见的 watcher v1：`scan-all -> execute-pending` 批量执行脚本 |
 | `workspace/bin/atf-action-watcher.cjs` | 仓库内可见的 action watcher：`action scan -> action execute-pending` |
 | `workspace/bin/atf-launcher.cjs` | 仓库内可见的 launcher：`launch scan -> launch dispatch-pending` |
+| `workspace/bin/sessions-spawn-bridge.cjs` | repo 内置的 sessions spawn bridge：读取 launch payload，再转发给真实 backend |
 | `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
 | `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
 
@@ -280,7 +281,8 @@ node atf-cli.js launch launcher-status
 `sessions_spawn` bridge 最小示例：
 
 ```bash
-export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/host/bin/sessions-spawn-bridge.cjs'
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_CMD='node /root/.openclaw/workspace/host/bin/real-sessions-spawn-backend.cjs'
 node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode sessions_spawn
 ```
 
@@ -293,6 +295,16 @@ bridge command 会收到这些输入：
 - `ATF_LAUNCH_TASK_ID`
 - `ATF_LAUNCH_ACTION_ID`
 - `ATF_LAUNCH_GUIDANCE`
+
+repo 内置 bridge 另外还会生成：
+
+- `ATF_LAUNCH_PROMPT`
+- `ATF_LAUNCH_PROMPT_PATH`
+
+也就是：
+
+- `ATF_LAUNCH_SESSIONS_SPAWN_CMD` 指向 repo 内 bridge
+- `ATF_SESSIONS_SPAWN_BACKEND_CMD` 或 `ATF_SESSIONS_SPAWN_BACKEND_MODULE` 指向你真正的 host/runtime
 
 同时 `ATF_DATA_DIR/launch-dispatch-payloads/<launchId>.json` 会保留完整 payload，便于审计和外部 bridge 读入上下文。
 

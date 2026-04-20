@@ -244,7 +244,8 @@ node atf-cli.js action watcher-status
 如果服务器上已经有 bridge command，可以这样切：
 
 ```bash
-export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/host/bin/sessions-spawn-bridge.cjs'
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_CMD='node /root/.openclaw/workspace/host/bin/real-sessions-spawn-backend.cjs'
 node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode sessions_spawn
 ```
 
@@ -252,6 +253,7 @@ ATF 不直接假设某个特定 runtime。`sessions_spawn` 只是约定：
 
 - bridge command 从 `ATF_LAUNCH_PAYLOAD_PATH` 读取完整 payload
 - `ATF_LAUNCH_AGENT / TASK_ID / ACTION_ID / GUIDANCE` 会作为环境变量提供
+- repo 内置 bridge 还会生成 `ATF_LAUNCH_PROMPT / ATF_LAUNCH_PROMPT_PATH`
 - bridge command 返回 `exit 0` 视为已接受 launch
 - 非零退出码会把 launch request 标成 `failed`
 

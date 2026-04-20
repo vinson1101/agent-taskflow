@@ -55,6 +55,28 @@ function defaultEventsDir(payloadPath) {
   return path.join(path.dirname(path.dirname(payloadPath)), 'sessions-spawn-events');
 }
 
+function parseJsonMaybe(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+}
+
+function summarizeAcceptedResult(result, fallback = {}) {
+  const objectResult = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
+  return {
+    accepted: typeof objectResult?.accepted === 'boolean' ? objectResult.accepted : true,
+    session_key: typeof objectResult?.session_key === 'string' ? objectResult.session_key : null,
+    agent: objectResult?.agent || fallback.agent || null,
+    task_id: objectResult?.task_id || fallback.task_id || null,
+    action_id: objectResult?.action_id || fallback.action_id || null,
+  };
+}
+
 function printHelp() {
   console.log(`ATF Real Sessions Spawn Backend
 
@@ -159,12 +181,22 @@ function executeModule(payload, context, moduleRef) {
   if (!handler) {
     throw new Error(`ATF_REAL_SESSIONS_SPAWN_MODULE must export a function: ${modulePath}`);
   }
+  const backendResult = handler(payload, context);
+  const summary = summarizeAcceptedResult(backendResult, {
+    agent: context.env.ATF_LAUNCH_AGENT,
+    task_id: context.env.ATF_LAUNCH_TASK_ID,
+    action_id: context.env.ATF_LAUNCH_ACTION_ID,
+  });
   return {
     ok: true,
-    accepted: true,
+    accepted: summary.accepted,
     mode: 'module',
     module: modulePath,
-    backend_result: handler(payload, context),
+    session_key: summary.session_key,
+    agent: summary.agent,
+    task_id: summary.task_id,
+    action_id: summary.action_id,
+    backend_result: backendResult,
   };
 }
 
@@ -189,20 +221,28 @@ function executeCommand(payload, context, commandRef) {
   if ((child.status ?? 0) !== 0) {
     throw new Error(`backend command exited with status ${child.status}${trimText(child.stderr) ? ` | stderr: ${trimText(child.stderr)}` : ''}`);
   }
+  const parsedStdout = parseJsonMaybe(child.stdout);
+  const summary = summarizeAcceptedResult(parsedStdout, {
+    agent: context.env.ATF_LAUNCH_AGENT,
+    task_id: context.env.ATF_LAUNCH_TASK_ID,
+    action_id: context.env.ATF_LAUNCH_ACTION_ID,
+  });
   return {
     ok: true,
-    accepted: true,
+    accepted: summary.accepted,
     mode: 'command',
     command: commandRef,
     executable: command,
     args,
     cwd,
     timeout_ms: timeoutMs,
+    session_key: summary.session_key,
+    agent: summary.agent,
+    task_id: summary.task_id,
+    action_id: summary.action_id,
+    backend_result: parsedStdout,
     stdout: trimText(child.stdout),
     stderr: trimText(child.stderr),
-    agent: context.env.ATF_LAUNCH_AGENT,
-    task_id: context.env.ATF_LAUNCH_TASK_ID,
-    action_id: context.env.ATF_LAUNCH_ACTION_ID,
   };
 }
 

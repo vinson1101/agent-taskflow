@@ -31,6 +31,7 @@
 | `workspace/bin/atf-launcher.cjs` | 仓库内可见的 launcher：`launch scan -> launch dispatch-pending` |
 | `workspace/bin/sessions-spawn-bridge.cjs` | repo 内置的 sessions spawn bridge：读取 launch payload，再转发给真实 backend |
 | `workspace/bin/real-sessions-spawn-backend.cjs` | repo 内置的 backend：支持 `stub` 验证，或继续转发给真实 runtime |
+| `workspace/bin/real-sessions-spawn-runtime-template.cjs` | 真实 runtime backend 模板：复制后填入实际 `sessions_spawn` 调用 |
 | `workspace/bin/learnings-promote.cjs` | learnings → MEMORY promote |
 | `/root/.openclaw/atf-tasks/` | 统一任务仓库（50 个任务） |
 
@@ -309,8 +310,24 @@ repo 内置 bridge 另外还会生成：
 - `ATF_SESSIONS_SPAWN_BACKEND_MODULE` 可以先指向 repo 内 backend
 - `ATF_REAL_SESSIONS_SPAWN_MODE=stub` 用来先验证链路
 - 真正接 runtime 时，再在 backend 下配置 `ATF_REAL_SESSIONS_SPAWN_CMD` 或 `ATF_REAL_SESSIONS_SPAWN_MODULE`
+- 推荐优先用 `ATF_REAL_SESSIONS_SPAWN_MODULE`，这样真实 backend 返回的 `session_key` 会直接落到 backend 事件里
+- 可直接从 `workspace/bin/real-sessions-spawn-runtime-template.cjs` 复制一份到 host/runtime 侧实现
 
 同时 `ATF_DATA_DIR/launch-dispatch-payloads/<launchId>.json` 会保留完整 payload，便于审计和外部 bridge 读入上下文。
+
+真实 runtime canary 切换最小步骤：
+
+```bash
+cp workspace/bin/real-sessions-spawn-runtime-template.cjs /root/.openclaw/workspace/host/bin/real-sessions-spawn-runtime.cjs
+# 编辑上面的文件，实现 spawnRuntimeSession()
+
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_MODULE='/root/.openclaw/workspace/agent-taskflow/workspace/bin/real-sessions-spawn-backend.cjs'
+export ATF_REAL_SESSIONS_SPAWN_MODULE='/root/.openclaw/workspace/host/bin/real-sessions-spawn-runtime.cjs'
+
+node atf-cli.js launch scan huntmind cooldown_minutes=0
+node workspace/bin/atf-launcher.cjs --agent huntmind --mode sessions_spawn --dispatcher host-launcher --limit 1 --lease-minutes 5
+```
 
 ---
 

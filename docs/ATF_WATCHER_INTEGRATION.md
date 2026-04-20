@@ -265,6 +265,26 @@ ATF 不直接假设某个特定 runtime。`sessions_spawn` 只是约定：
 3. 用 `ATF_REAL_SESSIONS_SPAWN_MODE=stub` 先验证链路
 4. 真正上线时，再把 repo 内 backend 继续接到真实 runtime command / module
 
+如果要接真实 module backend，直接从下面这个模板开始：
+
+```bash
+workspace/bin/real-sessions-spawn-runtime-template.cjs
+```
+
+最小 canary 还是建议单 agent：
+
+```bash
+cp workspace/bin/real-sessions-spawn-runtime-template.cjs /root/.openclaw/workspace/host/bin/real-sessions-spawn-runtime.cjs
+# 编辑上面的文件，实现 spawnRuntimeSession()
+
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_MODULE='/root/.openclaw/workspace/agent-taskflow/workspace/bin/real-sessions-spawn-backend.cjs'
+export ATF_REAL_SESSIONS_SPAWN_MODULE='/root/.openclaw/workspace/host/bin/real-sessions-spawn-runtime.cjs'
+
+node atf-cli.js launch scan huntmind cooldown_minutes=0
+node workspace/bin/atf-launcher.cjs --agent huntmind --dispatcher host-launcher --mode sessions_spawn --limit 1 --lease-minutes 5
+```
+
 上线后直接看：
 
 ```bash

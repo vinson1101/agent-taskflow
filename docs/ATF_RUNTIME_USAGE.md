@@ -578,6 +578,28 @@ repo 内 backend 还支持：
 1. 先用 repo 内 backend + `stub` 验证 launcher 真 dispatch 到 sessions_spawn adapter
 2. 再把 repo 内 backend 接到你真实的 runtime command / module
 
+推荐优先走 `ATF_REAL_SESSIONS_SPAWN_MODULE`。repo 内 backend 现在会把真实 backend 返回的 `session_key / agent / task_id / action_id` 提到结果顶层，后续看审计更直接。
+
+真实 runtime 模板已经放在：
+
+```bash
+workspace/bin/real-sessions-spawn-runtime-template.cjs
+```
+
+最小 canary 切换：
+
+```bash
+cp workspace/bin/real-sessions-spawn-runtime-template.cjs /root/.openclaw/workspace/host/bin/real-sessions-spawn-runtime.cjs
+# 编辑上面的文件，实现 spawnRuntimeSession()
+
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/agent-taskflow/workspace/bin/sessions-spawn-bridge.cjs'
+export ATF_SESSIONS_SPAWN_BACKEND_MODULE='/root/.openclaw/workspace/agent-taskflow/workspace/bin/real-sessions-spawn-backend.cjs'
+export ATF_REAL_SESSIONS_SPAWN_MODULE='/root/.openclaw/workspace/host/bin/real-sessions-spawn-runtime.cjs'
+
+node atf-cli.js launch scan huntmind cooldown_minutes=0
+node workspace/bin/atf-launcher.cjs --agent huntmind --mode sessions_spawn --dispatcher host-launcher --limit 1 --lease-minutes 5
+```
+
 bridge 至少要求配置一个 backend：
 
 - `ATF_SESSIONS_SPAWN_BACKEND_CMD`

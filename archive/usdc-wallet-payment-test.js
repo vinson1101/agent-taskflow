@@ -10,11 +10,11 @@ class USDCWalletPaymentTest {
   constructor() {
     this.paymentManager = new USDCPaymentManager();
     this.testResults = [];
-    this.mockPlatformPrivateKey = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
+    this.mockPlatformPrivateKey = '<mock-platform-private-key>';
     this.mockAgentWallets = [
-      { id: 'agent1', privateKey: '0x1111111111111111111111111111111111111111111111111111111111111111' },
-      { id: 'agent2', privateKey: '0x2222222222222222222222222222222222222222222222222222222222222222' },
-      { id: 'agent3', privateKey: '0x3333332222222222222222222222222222222222222222222222223333333333' }
+      { id: 'agent1', privateKey: '<mock-agent-1-private-key>' },
+      { id: 'agent2', privateKey: '<mock-agent-2-private-key>' },
+      { id: 'agent3', privateKey: '<mock-agent-3-private-key>' }
     ];
     
     // 模拟区块链状态

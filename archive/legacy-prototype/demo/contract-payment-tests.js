@@ -174,7 +174,7 @@ class ContractAndPaymentTests {
     
     try {
       // 模拟支付系统初始化 | Simulate payment system initialization
-      const mockPrivateKey = '0x1234567890123456789012345678901234567890123456789012345678901234';
+      const mockPrivateKey = '<mock-platform-private-key>';
       const initialized = await this.paymentSystem.initializePlatformWallet(mockPrivateKey);
       
       if (!initialized) {

@@ -109,7 +109,7 @@ openclaw skills start agent-taskflow
       "logLevel": "info"
     },
     "payment": {
-      "platformPrivateKey": "your_private_key",
+      "platformPrivateKey": "<set-via-env-or-secret-store>",
       "autoExecute": true
     }
   }

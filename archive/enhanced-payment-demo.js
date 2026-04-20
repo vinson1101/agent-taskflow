@@ -9,8 +9,8 @@ async function enhancedPaymentDemo() {
   
   console.log('💰 Step 1: Initialize payment system...');
   
-  // Mock platform private key (in real use, this should be stored securely)
-  const platformPrivateKey = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
+  // Mock platform credential label (placeholder only, not a real key)
+  const platformPrivateKey = '<mock-platform-private-key>';
   
   try {
     const paymentInitSuccess = await taskFlow.initializePayments(platformPrivateKey);

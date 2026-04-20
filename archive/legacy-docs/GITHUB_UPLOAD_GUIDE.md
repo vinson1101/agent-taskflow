@@ -4,7 +4,7 @@
 - ✅ Git仓库已初始化
 - ✅ 代码已提交到本地仓库
 - ❌ GitHub仓库未创建
-- ❌ GitHub token无效
+- ❌ GitHub 凭据校验失败
 
 ## 🔧 手动上传步骤
 
@@ -18,11 +18,11 @@
    - **Initialize this repository with**: 勾选 "Add a README file"
 4. 点击 "Create repository"
 
-### 步骤2：验证GitHub Token
-如果使用GitHub token，请确保：
-- Token有正确的权限（至少需要 `repo` 权限）
-- Token没有过期
-- Token格式正确（以 `ghp_` 开头）
+### 步骤2：验证 GitHub 凭据
+如果使用 GitHub Personal Access Token（PAT），请确保：
+- 凭据有正确的权限（至少需要 `repo` 权限）
+- 凭据没有过期
+- 凭据格式与当前 GitHub PAT 类型匹配
 
 ### 步骤3：推送代码到GitHub
 创建仓库后，运行以下命令：
@@ -86,13 +86,13 @@ agent-taskflow/
 ## 🔧 故障排除
 
 ### 常见问题
-1. **权限错误**: 确保GitHub token有正确权限
+1. **权限错误**: 确保 GitHub 凭据有正确权限
 2. **网络问题**: 检查网络连接
 3. **仓库不存在**: 确保先创建GitHub仓库
 4. **分支问题**: 确保使用正确的分支名称
 
 ### 解决方案
-1. 重新生成GitHub token
+1. 重新生成 GitHub 凭据
 2. 检查网络连接
 3. 确认仓库已创建
 4. 使用正确的分支名称

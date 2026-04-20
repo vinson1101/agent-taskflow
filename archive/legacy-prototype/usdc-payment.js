@@ -13,7 +13,7 @@ class USDCPaymentManager {
   async initializePlatformWallet(platformPrivateKey) {
     try {
       // Initialize Ethereum provider
-      this.provider = new ethers.JsonRpcProvider('https://sepolia.infura.io/v3/YOUR_INFURA_ID');
+      this.provider = new ethers.JsonRpcProvider('https://sepolia.infura.io/v3/<INFURA_PROJECT_ID>');
       
       // Initialize platform wallet (资金池)
       this.platformWallet = new ethers.Wallet(platformPrivateKey, this.provider);

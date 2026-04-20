@@ -97,6 +97,7 @@ function parseArgs(argv) {
     messageHours: 12,
     decisionHours: 6,
     writebackMinutes: 30,
+    resolutionHours: 12,
     minConfidence: 0.9,
     maxRisk: 'medium',
     cooldownMinutes: 15,
@@ -137,6 +138,9 @@ function parseArgs(argv) {
     } else if (arg === '--writeback-minutes') {
       const value = Number(argv[++i]);
       if (Number.isInteger(value) && value >= 0) options.writebackMinutes = value;
+    } else if (arg === '--resolution-hours') {
+      const value = Number(argv[++i]);
+      if (Number.isInteger(value) && value >= 0) options.resolutionHours = value;
     } else if (arg === '--min-confidence') {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) options.minConfidence = value;
@@ -187,6 +191,7 @@ Options:
   --message-hours <n>          Action watcher reply threshold
   --decision-hours <n>         Action watcher decision threshold
   --writeback-minutes <n>      Action watcher overdue writeback threshold
+  --resolution-hours <n>       Action watcher acknowledged post-launch threshold
   --min-confidence <n>         Action watcher min confidence
   --max-risk <level>           Action watcher max risk
   --cooldown-minutes <n>       Launcher scan cooldown
@@ -289,6 +294,7 @@ function buildActionArgs(options) {
   args.push('--message-hours', String(options.messageHours));
   args.push('--decision-hours', String(options.decisionHours));
   args.push('--writeback-minutes', String(options.writebackMinutes));
+  args.push('--resolution-hours', String(options.resolutionHours));
   args.push('--min-confidence', String(options.minConfidence));
   args.push('--max-risk', String(options.maxRisk));
   if (options.limit) args.push('--limit', String(options.limit));

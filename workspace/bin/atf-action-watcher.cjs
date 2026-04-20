@@ -116,6 +116,7 @@ function parseArgs(argv) {
     messageHours: 12,
     decisionHours: 6,
     writebackMinutes: 30,
+    resolutionHours: 12,
     minConfidence: 0,
     maxRisk: 'medium',
     registeredOnly: true,
@@ -150,6 +151,9 @@ function parseArgs(argv) {
     } else if (arg === '--writeback-minutes') {
       const value = Number(argv[++i]);
       if (Number.isInteger(value) && value >= 0) options.writebackMinutes = value;
+    } else if (arg === '--resolution-hours') {
+      const value = Number(argv[++i]);
+      if (Number.isInteger(value) && value >= 0) options.resolutionHours = value;
     } else if (arg === '--min-confidence') {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) options.minConfidence = value;
@@ -190,6 +194,7 @@ Options:
   --message-hours <n>     Threshold for pending message follow-up
   --decision-hours <n>    Threshold for decision reflection follow-up
   --writeback-minutes <n> Threshold for overdue launch writeback follow-up
+  --resolution-hours <n>  Threshold for acknowledged post-launch resolution follow-up
   --min-confidence <n>    Only execute actions with confidence >= n (0-1)
   --max-risk <level>      Highest allowed risk level (low|medium|high|urgent)
   --allow-unregistered    Allow actions owned by agents missing from registry/env
@@ -499,6 +504,7 @@ function buildScanArgs(options) {
   args.push(`message_hours=${options.messageHours}`);
   args.push(`decision_hours=${options.decisionHours}`);
   args.push(`writeback_minutes=${options.writebackMinutes}`);
+  args.push(`resolution_hours=${options.resolutionHours}`);
   return args;
 }
 
@@ -523,7 +529,7 @@ function printTextSummary(summary) {
   console.log(`  started: ${summary.started_at}`);
   console.log(`  completed: ${summary.completed_at}`);
   console.log(`  duration_ms: ${summary.duration_ms}`);
-  console.log(`  thresholds: stale=${summary.staleDays}d message=${summary.messageHours}h decision=${summary.decisionHours}h writeback=${summary.writebackMinutes}m`);
+  console.log(`  thresholds: stale=${summary.staleDays}d message=${summary.messageHours}h decision=${summary.decisionHours}h writeback=${summary.writebackMinutes}m resolution=${summary.resolutionHours}h`);
   console.log(`  filters: min_conf=${summary.filters.minConfidence} max_risk=${summary.filters.maxRisk} registered_only=${summary.filters.registeredOnly} allow_confirmation=${summary.filters.allowConfirmationRequired}`);
   console.log(`  pending before scan: ${summary.pendingBeforeScan}`);
   console.log(`  pending after scan: ${summary.pendingAfterScan}`);
@@ -585,6 +591,7 @@ function main() {
     messageHours: options.messageHours,
     decisionHours: options.decisionHours,
     writebackMinutes: options.writebackMinutes,
+    resolutionHours: options.resolutionHours,
     filters: {
       minConfidence: options.minConfidence,
       maxRisk: options.maxRisk,

@@ -27,6 +27,7 @@ Phase D 新增正式协议对象：
 - `pending_reply_follow_up`
 - `decision_follow_up`
 - `launch_writeback_follow_up`
+- `launch_resolution_follow_up`
 
 ## 2. 当前规则
 
@@ -63,6 +64,7 @@ node atf-cli.js action scan
 node atf-cli.js action scan pinchymeow
 node atf-cli.js action scan kind=stale_review_follow_up stale_days=7
 node atf-cli.js action scan f0x kind=launch_writeback_follow_up writeback_minutes=30
+node atf-cli.js action scan f0x kind=launch_resolution_follow_up resolution_hours=12
 ```
 
 查看动作队列：

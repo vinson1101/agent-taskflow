@@ -198,6 +198,7 @@ function main() {
   assertIncludes(controlPlaneHelp, '--action-mode <mode>', 'control-plane help');
   assertIncludes(controlPlaneHelp, '--action-thread <id>', 'control-plane help');
   assertIncludes(controlPlaneHelp, '--writeback-minutes <n>', 'control-plane help');
+  assertIncludes(controlPlaneHelp, '--resolution-hours <n>', 'control-plane help');
 
   const invalidTriggerMode = runExpectedFailure(controlPlanePath, ['--trigger-mode', 'invalid-mode'], env);
   const invalidActionMode = runExpectedFailure(controlPlanePath, ['--action-mode', 'invalid-mode'], env);
@@ -303,6 +304,38 @@ function main() {
   if (controlPlaneStatusAcknowledged.launcher?.launch_queue?.counts?.leased !== 0) throw new Error(`expected control-plane launcher leased=0 after immediate archive, got ${controlPlaneStatusAcknowledged.launcher?.launch_queue?.counts?.leased}`);
   if (launchStatusAcknowledged.writeback?.post_launch?.latest?.resolution !== 'acknowledged') throw new Error(`expected latest post-launch resolution acknowledged, got ${launchStatusAcknowledged.writeback?.post_launch?.latest?.resolution}`);
 
+  const postLaunchFollowUpSummary = JSON.parse(runControlPlane([
+    '--agent', 'f0x',
+    '--no-trigger',
+    '--no-launcher',
+    '--action-executor', 'control-plane-smoke',
+    '--action-mode', 'message',
+    '--action-thread', 'THR-control-post-launch',
+    '--resolution-hours', '0',
+    '--min-confidence', '0',
+    '--json',
+  ], env, options));
+  if ((postLaunchFollowUpSummary.action?.eligibleActions || 0) !== 1) throw new Error(`expected post-launch eligibleActions=1, got ${postLaunchFollowUpSummary.action?.eligibleActions}`);
+  if ((postLaunchFollowUpSummary.action?.executed || 0) !== 1) throw new Error(`expected post-launch follow-up executed=1, got ${postLaunchFollowUpSummary.action?.executed}`);
+  const staleTaskDir = resolveTaskDir(staleTaskId, env);
+  const staleTaskActionsAfterResolutionFollowUp = readJsonCollection(path.join(staleTaskDir, 'actions'));
+  const resolutionAction = staleTaskActionsAfterResolutionFollowUp.find(action => action.kind === 'launch_resolution_follow_up');
+  if (!resolutionAction) throw new Error('expected launch_resolution_follow_up action to be recorded');
+  const staleTaskMessagesAfterResolutionFollowUp = readJsonCollection(path.join(staleTaskDir, 'messages'));
+  const resolutionActionMessage = staleTaskMessagesAfterResolutionFollowUp.find(message =>
+    message.action_id === resolutionAction.action_id
+    && message.thread_id === 'THR-control-post-launch'
+  );
+  if (!resolutionActionMessage) throw new Error('expected post-launch resolution follow-up to generate a message');
+  if (!resolutionActionMessage.body.includes(launchStatusAcknowledged.writeback?.latest?.launch_id || '')) throw new Error('expected post-launch resolution follow-up message to mention launch id');
+  const launchStatusWithResolutionFollowUp = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  const controlPlaneStatusWithResolutionFollowUp = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
+  if ((launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.total_actions || 0) < 1) throw new Error(`expected post-launch follow-up actions >= 1, got ${launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.total_actions}`);
+  if (launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.action_id !== resolutionAction.action_id) throw new Error(`expected latest post-launch follow-up ${resolutionAction.action_id}, got ${launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.action_id}`);
+  if (launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.message_id !== resolutionActionMessage.message_id) throw new Error(`expected latest post-launch follow-up message ${resolutionActionMessage.message_id}, got ${launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.message_id}`);
+  if (launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.preflight_code !== 'post_launch_pending') throw new Error(`expected latest post-launch preflight code post_launch_pending, got ${launchStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.preflight_code}`);
+  if (controlPlaneStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.action_id !== resolutionAction.action_id) throw new Error(`expected control-plane latest post-launch follow-up ${resolutionAction.action_id}, got ${controlPlaneStatusWithResolutionFollowUp.writeback?.post_launch?.follow_up?.latest?.action_id}`);
+
   runCli(['review', 'add', staleTaskId, 'huntmind', 'f0x', 'approved', 'smoke-post-launch', 'type=task', 'overall=4'], env, options);
   const launchStatusResolvedAfterArchive = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
   const controlPlaneStatusResolvedAfterArchive = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
@@ -320,10 +353,14 @@ function main() {
   if (latestDelivered?.by !== 'f0x') throw new Error(`expected delivered by=f0x, got ${latestDelivered?.by}`);
 
   const staleIso = new Date(Date.now() - (65 * 60 * 1000)).toISOString();
-  controlPlaneAudit.started_at = staleIso;
-  controlPlaneAudit.completed_at = staleIso;
-  writeJson(summary.audit_path, controlPlaneAudit);
-  writeJson(path.join(path.dirname(summary.audit_path), 'latest.json'), controlPlaneAudit);
+  const staleAuditPaths = [...new Set([summary.audit_path, postLaunchFollowUpSummary.audit_path].filter(Boolean))];
+  for (const auditPath of staleAuditPaths) {
+    const audit = readJson(auditPath);
+    audit.started_at = staleIso;
+    audit.completed_at = staleIso;
+    writeJson(auditPath, audit);
+  }
+  writeJson(path.join(path.dirname(summary.audit_path), 'latest.json'), readJson(postLaunchFollowUpSummary.audit_path || summary.audit_path));
   const controlPlaneStatusStale = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
   if (controlPlaneStatusStale.status !== 'stale') throw new Error(`expected stale control-plane status, got ${controlPlaneStatusStale.status}`);
   if (controlPlaneStatusStale.code !== 'latest_run_stale') throw new Error(`expected control-plane stale code latest_run_stale, got ${controlPlaneStatusStale.code}`);

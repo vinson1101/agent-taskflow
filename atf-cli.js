@@ -72,7 +72,7 @@ const TRIGGER_TYPES = new Set(['cron', 'interval', 'on_message', 'on_status_chan
 const TRIGGER_STATUSES = new Set(['active', 'paused', 'fired', 'archived']);
 const TRIGGER_FIRE_STATUSES = new Set(['pending', 'consumed', 'ignored']);
 const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'room', 'noop']);
-const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up', 'decision_follow_up', 'launch_writeback_follow_up']);
+const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up', 'decision_follow_up', 'launch_writeback_follow_up', 'launch_resolution_follow_up']);
 const ACTION_STATUSES = new Set(['pending', 'executed', 'skipped', 'archived']);
 const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
 const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
@@ -4452,6 +4452,83 @@ function summarizeLaunchWritebackFollowUps(requests) {
   };
 }
 
+function summarizeLaunchPostLaunchFollowUps(requests) {
+  const emptyCounts = () => ({
+    pending: 0,
+    executed: 0,
+    skipped: 0,
+    archived: 0,
+  });
+  const launchMap = new Map(
+    requests
+      .filter(request => request?.launch_id)
+      .map(request => [request.launch_id, request])
+  );
+  const groups = new Map();
+  const totalByStatus = emptyCounts();
+  const activeByStatus = emptyCounts();
+
+  for (const action of collectActions({ kind: 'launch_resolution_follow_up' })) {
+    const launchId = action?.payload?.launch_id || action?.source_ref || null;
+    if (!launchId || !launchMap.has(launchId)) continue;
+    const request = launchMap.get(launchId);
+    const requestActive = request?.status !== 'archived';
+    const status = ACTION_STATUSES.has(action.status) ? action.status : 'pending';
+    const latestAt = action.executed_at || action.updated_at || action.created_at || null;
+    if (!groups.has(launchId)) {
+      groups.set(launchId, {
+        launch_id: launchId,
+        task_id: action.task_id || request?.payload?.task_id || null,
+        agent: request?.agent || action.owner_agent || null,
+        request_status: request?.status || null,
+        total_actions: 0,
+        total_by_status: emptyCounts(),
+        latest: null,
+      });
+    }
+    const row = groups.get(launchId);
+    row.total_actions += 1;
+    row.total_by_status[status] += 1;
+    totalByStatus[status] += 1;
+    if (requestActive) activeByStatus[status] += 1;
+    if (!row.latest || (latestAt || '') > (row.latest.at || '')) {
+      row.latest = {
+        action_id: action.action_id,
+        status,
+        attempt: action.attempt || 1,
+        at: latestAt,
+        execution_mode: action.execution_mode || null,
+        message_id: action.execution?.artifacts?.message_id || null,
+        thread_id: action.execution?.thread_id || action.thread_id || null,
+        preflight_code: action.verification?.preflight?.code || null,
+        postflight_code: action.verification?.postflight?.code || null,
+      };
+    }
+  }
+
+  const byLaunch = [...groups.values()]
+    .sort((a, b) => (b.latest?.at || '').localeCompare(a.latest?.at || ''));
+  const latest = byLaunch[0]?.latest
+    ? {
+        launch_id: byLaunch[0].launch_id,
+        task_id: byLaunch[0].task_id,
+        agent: byLaunch[0].agent,
+        request_status: byLaunch[0].request_status,
+        ...byLaunch[0].latest,
+      }
+    : null;
+
+  return {
+    total_launches: byLaunch.length,
+    active_launches: byLaunch.filter(item => item.request_status !== 'archived').length,
+    total_actions: byLaunch.reduce((sum, item) => sum + item.total_actions, 0),
+    total_by_status: totalByStatus,
+    active_by_status: activeByStatus,
+    latest,
+    by_launch: byLaunch,
+  };
+}
+
 function evaluateLaunchPostLaunchEvidence(request, options = {}) {
   const writeback = request?.writeback || null;
   const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
@@ -4671,6 +4748,7 @@ function buildLaunchStatus(options = {}) {
   writeback.post_launch = summarizeLaunchPostLaunchEvidence(requests, {
     warn_after_minutes: warnAfterMinutes,
   });
+  writeback.post_launch.follow_up = summarizeLaunchPostLaunchFollowUps(requests);
 
   let status = 'idle';
   let code = 'no_pending_launches';
@@ -4859,6 +4937,10 @@ function deriveActionCooldownHours(entity) {
     const writebackMinutes = Number.isInteger(entity.payload?.writeback_minutes) ? entity.payload.writeback_minutes : null;
     return Math.max(1, Math.min(6, Math.ceil((writebackMinutes || 30) / 60)));
   }
+  if (entity.kind === 'launch_resolution_follow_up') {
+    const resolutionHours = Number.isInteger(entity.payload?.resolution_hours) ? entity.payload.resolution_hours : null;
+    return Math.max(2, Math.min(12, resolutionHours || 12));
+  }
   return null;
 }
 
@@ -4939,6 +5021,10 @@ function deriveActionConfidence(candidate) {
     confidence = 0.9;
     if (candidate.payload?.writeback_status === 'stale') confidence += 0.04;
     if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 2) confidence += 0.02;
+  } else if (candidate.kind === 'launch_resolution_follow_up') {
+    confidence = 0.88;
+    if (candidate.payload?.post_launch_resolution === 'acknowledged') confidence += 0.02;
+    if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 24) confidence += 0.04;
   }
 
   if (Number.isInteger(candidate.attempt) && candidate.attempt > 1) {
@@ -4970,6 +5056,9 @@ function buildActionPolicy(candidate) {
   } else if (candidate?.kind === 'launch_writeback_follow_up') {
     defaults.verification_mode = 'writeback_pending';
     defaults.recovery_plan = 'Skip if the launch request was archived or any ATF writeback was already recorded; otherwise let the next scan or launch reissue produce a fresher follow-up.';
+  } else if (candidate?.kind === 'launch_resolution_follow_up') {
+    defaults.verification_mode = 'post_launch_pending';
+    defaults.recovery_plan = 'Skip if post-launch evidence already reached resolved or the task no longer needs explicit close-out evidence; otherwise let the next scan produce a fresher follow-up.';
   }
 
   return {
@@ -5036,7 +5125,20 @@ function buildActionEvidence(taskId, ctx, candidate, capturedAt) {
       type: 'writeback',
       ref: candidate.payload?.launch_id || candidate.source_ref || null,
       at: candidate.payload?.last_writeback_at || candidate.payload?.due_at || sourceAt,
-      summary: `status=${candidate.payload?.writeback_status || '-'} resolution=${candidate.payload?.writeback_resolution || '-'} age_minutes=${candidate.payload?.age_minutes ?? '-'} threshold_minutes=${candidate.payload?.writeback_minutes ?? '-'}`,
+        summary: `status=${candidate.payload?.writeback_status || '-'} resolution=${candidate.payload?.writeback_resolution || '-'} age_minutes=${candidate.payload?.age_minutes ?? '-'} threshold_minutes=${candidate.payload?.writeback_minutes ?? '-'}`,
+      });
+  } else if (candidate?.kind === 'launch_resolution_follow_up') {
+    items.push({
+      type: 'launch_request',
+      ref: candidate.payload?.launch_id || candidate.source_ref || null,
+      at: sourceAt,
+      summary: `agent=${candidate.owner_agent || '-'} launch_status=${candidate.payload?.launch_status || '-'} dispatch_mode=${candidate.payload?.dispatch_mode || '-'}`,
+    });
+    items.push({
+      type: 'post_launch',
+      ref: candidate.payload?.launch_id || candidate.source_ref || null,
+      at: candidate.payload?.last_post_launch_at || sourceAt,
+      summary: `status=${candidate.payload?.post_launch_status || '-'} resolution=${candidate.payload?.post_launch_resolution || '-'} age_hours=${candidate.payload?.age_hours ?? '-'} threshold_hours=${candidate.payload?.resolution_hours ?? '-'}`,
     });
   }
 
@@ -5233,6 +5335,59 @@ function runActionPreflight(taskId, action, ctx, checkedAt = null) {
       resolution: evaluation.resolution,
       age_minutes: evaluation.age_minutes,
       writeback_minutes: writebackMinutes,
+    });
+  }
+
+  if (action.kind === 'launch_resolution_follow_up') {
+    const launchId = action.payload?.launch_id || action.source_ref || null;
+    const request = launchId ? readLaunchRequest(launchId) : null;
+    const resolutionHours = Number.isInteger(action.payload?.resolution_hours) ? action.payload.resolution_hours : 12;
+    const resolutionMinutes = Math.max(0, resolutionHours * 60);
+    if (!request) {
+      return createActionCheck('preflight', now, false, 'missing_source_launch', 'source launch request no longer exists', {
+        launch_id: launchId,
+      });
+    }
+    const evaluation = evaluateLaunchPostLaunchEvidence(request, {
+      warn_after_minutes: resolutionMinutes,
+    });
+    if (!evaluation.tracked) {
+      return createActionCheck('preflight', now, false, 'post_launch_not_tracked', 'launch request does not require post-launch tracking', {
+        launch_id: launchId,
+        request_status: request.status || null,
+      });
+    }
+    if (evaluation.resolution === 'resolved') {
+      return createActionCheck('preflight', now, false, 'post_launch_resolved', 'post-launch evidence is already resolved', {
+        launch_id: launchId,
+        request_status: request.status || null,
+        post_launch_status: evaluation.status,
+        resolution: evaluation.resolution,
+      });
+    }
+    if (evaluation.resolution !== 'acknowledged') {
+      return createActionCheck('preflight', now, false, 'post_launch_not_acknowledged', `post-launch evidence is ${evaluation.status}/${evaluation.resolution}`, {
+        launch_id: launchId,
+        request_status: request.status || null,
+        post_launch_status: evaluation.status,
+        resolution: evaluation.resolution,
+      });
+    }
+    const evidenceAgeHours = evaluation.evidence?.at ? computeAgeHours(evaluation.evidence.at) : null;
+    if (Number.isInteger(evidenceAgeHours) && evidenceAgeHours < resolutionHours) {
+      return createActionCheck('preflight', now, false, 'post_launch_not_due', `post-launch age ${evidenceAgeHours}h is below threshold ${resolutionHours}h`, {
+        launch_id: launchId,
+        age_hours: evidenceAgeHours,
+        resolution_hours: resolutionHours,
+      });
+    }
+    return createActionCheck('preflight', now, true, 'post_launch_pending', 'launch has acknowledged writeback but still lacks resolved evidence', {
+      launch_id: launchId,
+      request_status: request.status || null,
+      post_launch_status: evaluation.status,
+      resolution: evaluation.resolution,
+      age_hours: evidenceAgeHours,
+      resolution_hours: resolutionHours,
     });
   }
 
@@ -5558,6 +5713,62 @@ function buildLaunchWritebackActionCandidates(options = {}) {
   return candidates;
 }
 
+function buildLaunchResolutionActionCandidates(options = {}) {
+  const resolutionHours = Number.isInteger(options.resolution_hours) && options.resolution_hours >= 0 ? options.resolution_hours : 12;
+  const ownerFilter = isClearedValue(options.owner_agent) ? null : String(options.owner_agent).trim();
+  const candidates = [];
+
+  for (const request of readLaunchRequests()) {
+    if (!request.dispatched_at || !request.writeback?.required) continue;
+    const evaluation = evaluateLaunchPostLaunchEvidence(request, {
+      warn_after_minutes: Math.max(0, resolutionHours * 60),
+    });
+    if (!evaluation.tracked) continue;
+    if (evaluation.resolution !== 'acknowledged') continue;
+    if (!evaluation.agent) continue;
+    if (ownerFilter && evaluation.agent !== ownerFilter) continue;
+    const ctx = readCtx(evaluation.task_id);
+    if (!ctx) continue;
+    const evidenceAt = evaluation.evidence?.at || request.dispatched_at || null;
+    const ageHours = evidenceAt ? computeAgeHours(evidenceAt) : null;
+    if (!Number.isInteger(ageHours) || ageHours < resolutionHours) continue;
+    candidates.push({
+      task_id: evaluation.task_id,
+      owner_agent: evaluation.agent,
+      thread_id: defaultThreadId(evaluation.task_id, null, null),
+      kind: 'launch_resolution_follow_up',
+      priority: ageHours >= 24 ? 'high' : 'normal',
+      source_type: 'launch_post_launch',
+      source_ref: request.launch_id,
+      source_at: evidenceAt,
+      dedupe_key: `launch_resolution_follow_up:${request.launch_id}`,
+      summary: `${evaluation.agent} acknowledged ${evaluation.task_id} but it still lacks resolved evidence`,
+      guidance: `Record explicit resolved evidence in ATF (review, delivered, or terminal status) for launch ${request.launch_id}.`,
+      suggested_message_type: 'request',
+      age_hours: ageHours,
+      payload: {
+        description: ctx.description,
+        launch_id: request.launch_id,
+        launch_status: request.status || null,
+        dispatch_mode: request.dispatch_mode || null,
+        dispatched_at: request.dispatched_at || null,
+        post_launch_status: evaluation.status,
+        post_launch_resolution: evaluation.resolution,
+        post_launch_code: evaluation.code,
+        post_launch_resolution_code: evaluation.resolution_code,
+        resolution_hours: resolutionHours,
+        age_hours: ageHours,
+        last_post_launch_at: evaluation.evidence?.at || null,
+        source_kind: request.payload?.kind || null,
+        source_action_id: request.payload?.action_id || null,
+        reissue_cooldown_hours: Math.max(2, Math.min(12, resolutionHours)),
+      },
+    });
+  }
+
+  return candidates;
+}
+
 function buildActionCandidates(options = {}) {
   const kindFilter = normalizeActionKind(options.kind);
   let candidates = [];
@@ -5572,6 +5783,9 @@ function buildActionCandidates(options = {}) {
   }
   if (!kindFilter || kindFilter === 'launch_writeback_follow_up') {
     candidates.push(...buildLaunchWritebackActionCandidates(options));
+  }
+  if (!kindFilter || kindFilter === 'launch_resolution_follow_up') {
+    candidates.push(...buildLaunchResolutionActionCandidates(options));
   }
   return candidates.sort(compareActionCandidates);
 }
@@ -5627,7 +5841,7 @@ function buildActionMessageBody(action) {
   if (Number.isInteger(action.age_hours)) parts.push(`Age: ${action.age_hours}h`);
   if (action.payload?.original_excerpt) parts.push(`Signal: ${action.payload.original_excerpt}`);
   if (action.payload?.reflection_excerpt) parts.push(`Reflection: ${action.payload.reflection_excerpt}`);
-  if (action.payload?.launch_id) parts.push(`Launch: ${action.payload.launch_id} ${action.payload.launch_status || '-'} / ${action.payload.writeback_status || '-'}`);
+  if (action.payload?.launch_id) parts.push(`Launch: ${action.payload.launch_id} ${action.payload.launch_status || '-'} / ${action.payload.writeback_status || action.payload.post_launch_status || '-'}`);
   return parts.join('\n');
 }
 
@@ -5797,6 +6011,7 @@ function parseActionPlanArgs(parts) {
   let messageHours = 12;
   let decisionHours = 6;
   let writebackMinutes = 30;
+  let resolutionHours = 12;
   let limit = null;
   let invalid = null;
 
@@ -5842,6 +6057,15 @@ function parseActionPlanArgs(parts) {
       writebackMinutes = value;
       continue;
     }
+    if (part.startsWith('resolution_hours=')) {
+      const value = Number(part.substring('resolution_hours='.length));
+      if (!Number.isInteger(value) || value < 0) {
+        invalid = part;
+        break;
+      }
+      resolutionHours = value;
+      continue;
+    }
     if (part.startsWith('limit=')) {
       const value = Number(part.substring('limit='.length));
       if (!Number.isInteger(value) || value <= 0) {
@@ -5866,6 +6090,7 @@ function parseActionPlanArgs(parts) {
     messageHours,
     decisionHours,
     writebackMinutes,
+    resolutionHours,
     limit,
     invalid,
   };
@@ -6668,7 +6893,7 @@ atf delivered <taskId> [by=agent]      手动标记已送达
   atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]  查看待评价任务
   atf review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看待评价 backlog 汇总
   atf review show <taskId> <reviewId>                查看单条 Review
-  atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [writeback_minutes=N] [limit=N]  扫描并生成 Phase D 动作
+  atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [writeback_minutes=N] [resolution_hours=N] [limit=N]  扫描并生成 Phase D 动作
   atf action list [taskId|owner] [status=x] [kind=x] [limit=N]      查看动作队列
   atf action inbox <agent> [kind=x]                 查看 agent 待执行动作
   atf action rebuild-index                          重建全局动作索引
@@ -8191,6 +8416,7 @@ switch (cmd) {
         message_hours: parsed.messageHours,
         decision_hours: parsed.decisionHours,
         writeback_minutes: parsed.writebackMinutes,
+        resolution_hours: parsed.resolutionHours,
         limit: parsed.limit,
         planner: 'cli',
       });
@@ -9069,6 +9295,12 @@ switch (cmd) {
           if (status.launch_queue.writeback.post_launch.latest) {
             console.log(`latest_post_launch=${status.launch_queue.writeback.post_launch.latest.launch_id}  task=${status.launch_queue.writeback.post_launch.latest.task_id}  ${status.launch_queue.writeback.post_launch.latest.status}/${status.launch_queue.writeback.post_launch.latest.resolution}  at=${status.launch_queue.writeback.post_launch.latest.evidence?.at || status.launch_queue.writeback.post_launch.latest.dispatched_at || '-'}  code=${status.launch_queue.writeback.post_launch.latest.resolution_code}`);
           }
+          if (status.launch_queue.writeback.post_launch.follow_up?.total_actions > 0) {
+            console.log(`post_launch_follow_up=launches:${status.launch_queue.writeback.post_launch.follow_up.total_launches}  active_launches:${status.launch_queue.writeback.post_launch.follow_up.active_launches}  total:${status.launch_queue.writeback.post_launch.follow_up.total_actions}  pending:${status.launch_queue.writeback.post_launch.follow_up.total_by_status.pending}  executed:${status.launch_queue.writeback.post_launch.follow_up.total_by_status.executed}`);
+            if (status.launch_queue.writeback.post_launch.follow_up.latest) {
+              console.log(`latest_post_launch_follow_up=${status.launch_queue.writeback.post_launch.follow_up.latest.launch_id}  action=${status.launch_queue.writeback.post_launch.follow_up.latest.action_id}  ${status.launch_queue.writeback.post_launch.follow_up.latest.status}  try=${status.launch_queue.writeback.post_launch.follow_up.latest.attempt}  at=${status.launch_queue.writeback.post_launch.follow_up.latest.at || '-'}  postflight=${status.launch_queue.writeback.post_launch.follow_up.latest.postflight_code || '-'}`);
+            }
+          }
         }
       }
       const pendingByAgent = Object.entries(status.launch_queue.by_agent).filter(([, count]) => count > 0);
@@ -9142,6 +9374,12 @@ switch (cmd) {
           console.log(`post_launch=tracked:${status.writeback.post_launch.tracked}  resolved:${status.writeback.post_launch.total_resolution_counts.resolved}  acknowledged:${status.writeback.post_launch.total_resolution_counts.acknowledged}  unresolved:${status.writeback.post_launch.total_resolution_counts.unresolved}`);
           if (status.writeback.post_launch.latest) {
             console.log(`latest_post_launch=${status.writeback.post_launch.latest.launch_id}  task=${status.writeback.post_launch.latest.task_id}  ${status.writeback.post_launch.latest.status}/${status.writeback.post_launch.latest.resolution}  at=${status.writeback.post_launch.latest.evidence?.at || status.writeback.post_launch.latest.dispatched_at || '-'}  code=${status.writeback.post_launch.latest.resolution_code}`);
+          }
+          if (status.writeback.post_launch.follow_up?.total_actions > 0) {
+            console.log(`post_launch_follow_up=launches:${status.writeback.post_launch.follow_up.total_launches}  active_launches:${status.writeback.post_launch.follow_up.active_launches}  total:${status.writeback.post_launch.follow_up.total_actions}  pending:${status.writeback.post_launch.follow_up.total_by_status.pending}  executed:${status.writeback.post_launch.follow_up.total_by_status.executed}`);
+            if (status.writeback.post_launch.follow_up.latest) {
+              console.log(`latest_post_launch_follow_up=${status.writeback.post_launch.follow_up.latest.launch_id}  action=${status.writeback.post_launch.follow_up.latest.action_id}  ${status.writeback.post_launch.follow_up.latest.status}  try=${status.writeback.post_launch.follow_up.latest.attempt}  at=${status.writeback.post_launch.follow_up.latest.at || '-'}  postflight=${status.writeback.post_launch.follow_up.latest.postflight_code || '-'}`);
+            }
           }
         }
       }
@@ -9314,6 +9552,12 @@ switch (cmd) {
           console.log(`post_launch=tracked:${status.writeback.post_launch.tracked}  resolved:${status.writeback.post_launch.total_resolution_counts.resolved}  acknowledged:${status.writeback.post_launch.total_resolution_counts.acknowledged}  unresolved:${status.writeback.post_launch.total_resolution_counts.unresolved}`);
           if (status.writeback.post_launch.latest) {
             console.log(`latest_post_launch=${status.writeback.post_launch.latest.launch_id}  task=${status.writeback.post_launch.latest.task_id}  ${status.writeback.post_launch.latest.status}/${status.writeback.post_launch.latest.resolution}  at=${status.writeback.post_launch.latest.evidence?.at || status.writeback.post_launch.latest.dispatched_at || '-'}  code=${status.writeback.post_launch.latest.resolution_code}`);
+          }
+          if (status.writeback.post_launch.follow_up?.total_actions > 0) {
+            console.log(`post_launch_follow_up=launches:${status.writeback.post_launch.follow_up.total_launches}  active_launches:${status.writeback.post_launch.follow_up.active_launches}  total:${status.writeback.post_launch.follow_up.total_actions}  pending:${status.writeback.post_launch.follow_up.total_by_status.pending}  executed:${status.writeback.post_launch.follow_up.total_by_status.executed}`);
+            if (status.writeback.post_launch.follow_up.latest) {
+              console.log(`latest_post_launch_follow_up=${status.writeback.post_launch.follow_up.latest.launch_id}  action=${status.writeback.post_launch.follow_up.latest.action_id}  ${status.writeback.post_launch.follow_up.latest.status}  try=${status.writeback.post_launch.follow_up.latest.attempt}  at=${status.writeback.post_launch.follow_up.latest.at || '-'}  postflight=${status.writeback.post_launch.follow_up.latest.postflight_code || '-'}`);
+            }
           }
         }
       }

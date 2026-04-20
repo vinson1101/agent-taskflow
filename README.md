@@ -330,6 +330,7 @@ wrapper 现在也会先校验本地 `--mode`，并支持把 `--to / --thread / -
 - `pending_reply_follow_up`
 - `decision_follow_up`
 - `launch_writeback_follow_up`
+- `launch_resolution_follow_up`
 
 现在每条 `atf.action.v1` 还会附带一层轻量 harness 控制元数据：
 
@@ -407,7 +408,7 @@ node atf-cli.js launch launcher-status
 
 `launch status` 现在除了 queue 本身的 `pending / leased / archived` 分布，也会汇总 `writeback` 的 `pending / confirmed / inferred / stale`，并额外区分 `resolution=unresolved / acknowledged / resolved`；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。对于 `update / delivered / msg send / review add` 这类 ATF writeback，active launch 现在会在写回时立即 reconcile；只要证据达到 `confirmed` 或 `resolved`，请求不会再等下一次 `launch scan` 才归档。与此同时，`writeback.post_launch` 会继续跟踪 launch 关闭之后的后续任务证据，用来回答“这次唤醒后来有没有真的走到 resolved”，而不是把这层语义再塞回 active launch 生命周期。
 
-当某条 active launch 长时间没有任何 ATF writeback 时，`action scan` 现在也可以额外生成 `launch_writeback_follow_up`。它和 review / reply / decision follow-up 一样走统一的 `action scan -> action execute-pending` 链，只是阈值改成 `writeback_minutes=N`，默认 30 分钟。对应的催办记录也会直接反映到 `launch status / launch launcher-status / control-plane status` 的 `writeback.follow_up` 视图里，便于看出已经催过几次、最近一次催到哪一步。
+当某条 active launch 长时间没有任何 ATF writeback 时，`action scan` 现在也可以额外生成 `launch_writeback_follow_up`。它和 review / reply / decision follow-up 一样走统一的 `action scan -> action execute-pending` 链，只是阈值改成 `writeback_minutes=N`，默认 30 分钟。对应的催办记录也会直接反映到 `launch status / launch launcher-status / control-plane status` 的 `writeback.follow_up` 视图里，便于看出已经催过几次、最近一次催到哪一步。对已经 `acknowledged` 但迟迟没有变成 `resolved` 的归档 launch，`action scan kind=launch_resolution_follow_up resolution_hours=N` 会生成第二层催办，并把记录写到 `writeback.post_launch.follow_up`。
 
 现在推荐的正式运行方式不是三条独立 cron，而是：
 

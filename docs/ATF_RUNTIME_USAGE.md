@@ -609,7 +609,12 @@ worker 侧要遵守一个硬约束：
 3. 仅写日志、stdout 或本地说明，不算完成
 4. ATF 回写成功后，再删除已消费的 `pending-task.json`
 
-对 `stale_review_follow_up`，bridge prompt 会明确要求补一条 `atf review add ...`，否则 launcher 会把这个 pending-task 视为未闭环来源。
+对 `stale_review_follow_up`，bridge prompt 现在分两种情况：
+
+1. 如果被唤醒的是 reviewee 自己，明确禁止 self review，并要求通过 ATF 发起外部 review 跟进
+2. 只有外部 reviewer 场景，才会建议 `atf review add ...`
+
+这点很重要，因为 self review 不会关闭 stale review backlog。
 
 真实 runtime 模板已经放在：
 

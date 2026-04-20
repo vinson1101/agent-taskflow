@@ -331,7 +331,7 @@ repo 内置 bridge 另外还会生成：
 - 推荐优先用 `ATF_REAL_SESSIONS_SPAWN_MODULE`，这样真实 backend 返回的 `session_key` 会直接落到 backend 事件里
 - 可直接从 `workspace/bin/real-sessions-spawn-runtime-template.cjs` 复制一份到 host/runtime 侧实现
 - worker 被唤醒后，必须把结果回写到 ATF；仅写日志或本地说明不算完成
-- 对 `stale_review_follow_up`，默认要求补一条 `atf review add ...`；成功回写后再删除消费过的 `pending-task.json`
+- 对 `stale_review_follow_up`，如果被唤醒的是 reviewee 自己，bridge prompt 会明确禁止 self review，并要求通过 ATF 发起外部 review 跟进；只有外部 reviewer 场景才会建议 `atf review add ...`
 
 同时 `ATF_DATA_DIR/launch-dispatch-payloads/<launchId>.json` 会保留完整 payload，便于审计和外部 bridge 读入上下文。
 

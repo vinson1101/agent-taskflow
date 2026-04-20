@@ -10,7 +10,9 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const cliPath = path.join(repoRoot, 'atf-cli.js');
 const watcherPath = path.join(repoRoot, 'workspace', 'bin', 'atf-action-watcher.cjs');
 const launcherPath = path.join(repoRoot, 'workspace', 'bin', 'atf-launcher.cjs');
+const bridgePath = path.join(repoRoot, 'workspace', 'bin', 'sessions-spawn-bridge.cjs');
 const smokeRoot = path.join(repoRoot, '.tmp-atf-phased-smoke');
+const bridgeHelpers = require(bridgePath);
 
 function parseArgs(argv) {
   return {
@@ -495,6 +497,22 @@ function main() {
   const sessionsSpawnDispatch = runCli(['launch', 'dispatch', reissuedLaunch.launch_id, 'dispatcher=phase-d-smoke', 'mode=sessions_spawn', 'lease_minutes=5'], env, options);
   const spawnedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${reissuedLaunch.launch_id}.json`));
   const mockSpawnEvent = readJson(path.join(mockSpawnEventsDir, `${reissuedLaunch.launch_id}.json`));
+  const staleReviewPrompt = bridgeHelpers.buildPrompt({
+    launch_id: reissuedLaunch.launch_id,
+    agent: 'f0x',
+    workspace: env.ATF_WORKSPACE_F0X,
+    source_path: path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'),
+    guidance: reissuedLaunch.guidance,
+    summary: reissuedLaunch.summary,
+    payload: {
+      task_id: staleTaskId,
+      action_id: stalePendingAction.action_id,
+      kind: 'stale_review_follow_up',
+      reviewee: 'f0x',
+      assigned_to: 'f0x',
+      pending_task_path: path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'),
+    },
+  });
   assertIncludes(sessionsSpawnDispatch, 'mode: sessions_spawn', 'sessions_spawn dispatch');
   if (spawnedLaunchRequest.status !== 'leased') throw new Error(`expected sessions_spawn launch request leased, got ${spawnedLaunchRequest.status}`);
   if (spawnedLaunchRequest.dispatch_mode !== 'sessions_spawn') throw new Error(`expected dispatch_mode sessions_spawn, got ${spawnedLaunchRequest.dispatch_mode}`);
@@ -507,6 +525,8 @@ function main() {
   if (mockSpawnEvent.task_id !== staleTaskId) throw new Error(`expected mock sessions_spawn task_id=${staleTaskId}, got ${mockSpawnEvent.task_id}`);
   if (mockSpawnEvent.action_id !== stalePendingAction.action_id) throw new Error(`expected mock sessions_spawn action_id=${stalePendingAction.action_id}, got ${mockSpawnEvent.action_id}`);
   if (mockSpawnEvent.payload_path !== spawnedLaunchRequest.dispatch.artifacts.payload_path) throw new Error('expected mock sessions_spawn payload_path to match dispatch artifact');
+  if (!staleReviewPrompt.includes('Do not write a self review')) throw new Error('expected stale review prompt to warn against self review');
+  if (staleReviewPrompt.includes(`review add ${staleTaskId} f0x f0x approved`)) throw new Error('stale review prompt must not suggest self review closure');
 
   runCli(['review', 'add', staleTaskId, 'huntmind', 'f0x', 'approved', 'smoke-review', 'type=task', 'overall=4'], env, options);
   const launchScanAfterReviewWriteback = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);

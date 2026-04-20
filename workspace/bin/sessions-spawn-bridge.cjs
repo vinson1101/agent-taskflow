@@ -92,8 +92,14 @@ function buildWritebackInstructions(payload) {
   ];
 
   if (actionKind === 'stale_review_follow_up' && taskId !== '-') {
-    lines.push(`After the review is done, persist it with: node atf-cli.js review add ${taskId} ${agent} ${reviewee} approved "<summary>" type=task overall=4`);
-    lines.push('If approval is not appropriate, use needs_revision or rejected instead of approved.');
+    if (agent === reviewee) {
+      lines.push('Do not write a self review for your own task. Self review does not close stale review backlog in ATF.');
+      lines.push(`Request an external review through ATF for ${taskId}, or otherwise follow up with the coordinator/reviewer via ATF message.`);
+      lines.push('Only treat the backlog as closed after a non-self review exists in ATF.');
+    } else {
+      lines.push(`If you are acting as an external reviewer, persist it with: node atf-cli.js review add ${taskId} ${agent} ${reviewee} approved "<summary>" type=task overall=4`);
+      lines.push('If approval is not appropriate, use needs_revision or rejected instead of approved.');
+    }
   } else if (actionKind === 'decision_follow_up' && taskId !== '-') {
     lines.push(`Write the decision back into ATF for ${taskId}; if the task is blocked, use: node atf-cli.js update ${taskId} blocked`);
   } else if (actionKind === 'pending_reply_follow_up') {
@@ -237,7 +243,12 @@ function main() {
 }
 
 try {
-  process.exitCode = main();
+  module.exports.buildWritebackInstructions = buildWritebackInstructions;
+  module.exports.buildPrompt = buildPrompt;
+  module.exports.persistPrompt = persistPrompt;
+  if (require.main === module) {
+    process.exitCode = main();
+  }
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

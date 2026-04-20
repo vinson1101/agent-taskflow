@@ -407,7 +407,7 @@ node atf-cli.js launch launcher-status
 
 `launch status` 现在除了 queue 本身的 `pending / leased / archived` 分布，也会汇总 `writeback` 的 `pending / confirmed / inferred / stale`，并额外区分 `resolution=unresolved / acknowledged / resolved`；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
 
-当某条 active launch 长时间没有任何 ATF writeback 时，`action scan` 现在也可以额外生成 `launch_writeback_follow_up`。它和 review / reply / decision follow-up 一样走统一的 `action scan -> action execute-pending` 链，只是阈值改成 `writeback_minutes=N`，默认 30 分钟。
+当某条 active launch 长时间没有任何 ATF writeback 时，`action scan` 现在也可以额外生成 `launch_writeback_follow_up`。它和 review / reply / decision follow-up 一样走统一的 `action scan -> action execute-pending` 链，只是阈值改成 `writeback_minutes=N`，默认 30 分钟。对应的催办记录也会直接反映到 `launch status / launch launcher-status / control-plane status` 的 `writeback.follow_up` 视图里，便于看出已经催过几次、最近一次催到哪一步。
 
 现在推荐的正式运行方式不是三条独立 cron，而是：
 

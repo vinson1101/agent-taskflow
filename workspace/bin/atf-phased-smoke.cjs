@@ -518,12 +518,21 @@ function main() {
     message.source_type === 'action'
     && message.action_id === writebackPendingAction.action_id
   );
+  const launchStatusWithWritebackFollowUp = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  const launcherStatusWithWritebackFollowUp = JSON.parse(runCli(['launch', 'launcher-status', 'f0x', 'json'], env, options));
+  const controlPlaneStatusWithWritebackFollowUp = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'json'], env, options));
   if (executeWritebackFollowUp.executed !== 1) throw new Error(`expected writeback follow-up executed=1, got ${executeWritebackFollowUp.executed}`);
   if (!writebackActionMessage) throw new Error('expected launch writeback follow-up to generate a message');
   if (writebackActionMessage.thread_id !== writebackFollowUpThreadId) throw new Error(`expected writeback follow-up thread ${writebackFollowUpThreadId}, got ${writebackActionMessage.thread_id}`);
   if (!writebackActionMessage.body.includes(firstLaunchRequest.launch_id)) throw new Error('expected writeback follow-up message to mention launch id');
   if (writebackPendingActionFile.verification?.preflight?.code !== 'writeback_pending') throw new Error(`expected writeback follow-up preflight code writeback_pending, got ${writebackPendingActionFile.verification?.preflight?.code}`);
   if (writebackPendingActionFile.verification?.postflight?.ok !== true) throw new Error('expected writeback follow-up postflight to pass');
+  if ((launchStatusWithWritebackFollowUp.writeback?.follow_up?.total_actions || 0) < 1) throw new Error(`expected launch status follow-up actions >= 1, got ${launchStatusWithWritebackFollowUp.writeback?.follow_up?.total_actions}`);
+  if ((launchStatusWithWritebackFollowUp.writeback?.follow_up?.active_by_status?.executed || 0) < 1) throw new Error(`expected launch status active executed follow-up >= 1, got ${launchStatusWithWritebackFollowUp.writeback?.follow_up?.active_by_status?.executed}`);
+  if (launchStatusWithWritebackFollowUp.writeback?.follow_up?.latest?.action_id !== writebackPendingAction.action_id) throw new Error(`expected launch status latest follow-up ${writebackPendingAction.action_id}, got ${launchStatusWithWritebackFollowUp.writeback?.follow_up?.latest?.action_id}`);
+  if (launchStatusWithWritebackFollowUp.writeback?.follow_up?.latest?.message_id !== writebackActionMessage.message_id) throw new Error(`expected launch status latest follow-up message ${writebackActionMessage.message_id}, got ${launchStatusWithWritebackFollowUp.writeback?.follow_up?.latest?.message_id}`);
+  if (launcherStatusWithWritebackFollowUp.launch_queue?.writeback?.follow_up?.latest?.action_id !== writebackPendingAction.action_id) throw new Error(`expected launcher-status latest follow-up ${writebackPendingAction.action_id}, got ${launcherStatusWithWritebackFollowUp.launch_queue?.writeback?.follow_up?.latest?.action_id}`);
+  if (controlPlaneStatusWithWritebackFollowUp.writeback?.follow_up?.latest?.action_id !== writebackPendingAction.action_id) throw new Error(`expected control-plane status latest follow-up ${writebackPendingAction.action_id}, got ${controlPlaneStatusWithWritebackFollowUp.writeback?.follow_up?.latest?.action_id}`);
 
   const launchScanAfterLeaseExpiry = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
   const launchRequestsAfterLeaseExpiry = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json'));

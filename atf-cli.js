@@ -4321,6 +4321,83 @@ function shouldArchiveLaunchRequestForWriteback(request, options = {}) {
   return null;
 }
 
+function summarizeLaunchWritebackFollowUps(requests) {
+  const emptyCounts = () => ({
+    pending: 0,
+    executed: 0,
+    skipped: 0,
+    archived: 0,
+  });
+  const launchMap = new Map(
+    requests
+      .filter(request => request?.launch_id)
+      .map(request => [request.launch_id, request])
+  );
+  const groups = new Map();
+  const totalByStatus = emptyCounts();
+  const activeByStatus = emptyCounts();
+
+  for (const action of collectActions({ kind: 'launch_writeback_follow_up' })) {
+    const launchId = action?.payload?.launch_id || action?.source_ref || null;
+    if (!launchId || !launchMap.has(launchId)) continue;
+    const request = launchMap.get(launchId);
+    const requestActive = request?.status !== 'archived';
+    const status = ACTION_STATUSES.has(action.status) ? action.status : 'pending';
+    const latestAt = action.executed_at || action.updated_at || action.created_at || null;
+    if (!groups.has(launchId)) {
+      groups.set(launchId, {
+        launch_id: launchId,
+        task_id: action.task_id || request?.payload?.task_id || null,
+        agent: request?.agent || action.owner_agent || null,
+        request_status: request?.status || null,
+        total_actions: 0,
+        total_by_status: emptyCounts(),
+        latest: null,
+      });
+    }
+    const row = groups.get(launchId);
+    row.total_actions += 1;
+    row.total_by_status[status] += 1;
+    totalByStatus[status] += 1;
+    if (requestActive) activeByStatus[status] += 1;
+    if (!row.latest || (latestAt || '') > (row.latest.at || '')) {
+      row.latest = {
+        action_id: action.action_id,
+        status,
+        attempt: action.attempt || 1,
+        at: latestAt,
+        execution_mode: action.execution_mode || null,
+        message_id: action.execution?.artifacts?.message_id || null,
+        thread_id: action.execution?.thread_id || action.thread_id || null,
+        preflight_code: action.verification?.preflight?.code || null,
+        postflight_code: action.verification?.postflight?.code || null,
+      };
+    }
+  }
+
+  const byLaunch = [...groups.values()]
+    .sort((a, b) => (b.latest?.at || '').localeCompare(a.latest?.at || ''));
+  const latest = byLaunch[0]?.latest
+    ? {
+        launch_id: byLaunch[0].launch_id,
+        task_id: byLaunch[0].task_id,
+        agent: byLaunch[0].agent,
+        request_status: byLaunch[0].request_status,
+        ...byLaunch[0].latest,
+      }
+    : null;
+
+  return {
+    total_launches: byLaunch.length,
+    active_launches: byLaunch.filter(item => item.request_status !== 'archived').length,
+    total_actions: byLaunch.reduce((sum, item) => sum + item.total_actions, 0),
+    total_by_status: totalByStatus,
+    active_by_status: activeByStatus,
+    latest,
+    by_launch: byLaunch,
+  };
+}
+
 function buildLaunchStatus(options = {}) {
   const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
   const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
@@ -4337,6 +4414,7 @@ function buildLaunchStatus(options = {}) {
   const writeback = summarizeLaunchWritebacks(requests, {
     warn_after_minutes: warnAfterMinutes,
   });
+  writeback.follow_up = summarizeLaunchWritebackFollowUps(requests);
 
   let status = 'idle';
   let code = 'no_pending_launches';
@@ -8716,6 +8794,12 @@ switch (cmd) {
       if (status.launch_queue.writeback?.tracked) {
         console.log(`writeback=tracked:${status.launch_queue.writeback.tracked}  active_pending:${status.launch_queue.writeback.active_counts.pending}  active_stale:${status.launch_queue.writeback.active_counts.stale}  confirmed:${status.launch_queue.writeback.total_counts.confirmed}  inferred:${status.launch_queue.writeback.total_counts.inferred}`);
         console.log(`writeback_resolution=active_unresolved:${status.launch_queue.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.launch_queue.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.launch_queue.writeback.active_resolution_counts.resolved}`);
+        if (status.launch_queue.writeback.follow_up?.total_actions > 0) {
+          console.log(`writeback_follow_up=launches:${status.launch_queue.writeback.follow_up.total_launches}  active_launches:${status.launch_queue.writeback.follow_up.active_launches}  total:${status.launch_queue.writeback.follow_up.total_actions}  pending:${status.launch_queue.writeback.follow_up.total_by_status.pending}  executed:${status.launch_queue.writeback.follow_up.total_by_status.executed}`);
+          if (status.launch_queue.writeback.follow_up.latest) {
+            console.log(`latest_writeback_follow_up=${status.launch_queue.writeback.follow_up.latest.launch_id}  action=${status.launch_queue.writeback.follow_up.latest.action_id}  ${status.launch_queue.writeback.follow_up.latest.status}  try=${status.launch_queue.writeback.follow_up.latest.attempt}  at=${status.launch_queue.writeback.follow_up.latest.at || '-'}  postflight=${status.launch_queue.writeback.follow_up.latest.postflight_code || '-'}`);
+          }
+        }
       }
       const pendingByAgent = Object.entries(status.launch_queue.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
@@ -8778,6 +8862,12 @@ switch (cmd) {
           console.log(`latest_writeback=${status.writeback.latest.launch_id}  task=${status.writeback.latest.task_id}  ${status.writeback.latest.status}/${status.writeback.latest.resolution}  age=${status.writeback.latest.age_minutes ?? '-'}m  code=${status.writeback.latest.code}`);
         }
         console.log(`writeback_resolution=active_unresolved:${status.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.writeback.active_resolution_counts.resolved}`);
+        if (status.writeback.follow_up?.total_actions > 0) {
+          console.log(`writeback_follow_up=launches:${status.writeback.follow_up.total_launches}  active_launches:${status.writeback.follow_up.active_launches}  total:${status.writeback.follow_up.total_actions}  pending:${status.writeback.follow_up.total_by_status.pending}  executed:${status.writeback.follow_up.total_by_status.executed}`);
+          if (status.writeback.follow_up.latest) {
+            console.log(`latest_writeback_follow_up=${status.writeback.follow_up.latest.launch_id}  action=${status.writeback.follow_up.latest.action_id}  ${status.writeback.follow_up.latest.status}  try=${status.writeback.follow_up.latest.attempt}  at=${status.writeback.follow_up.latest.at || '-'}  postflight=${status.writeback.follow_up.latest.postflight_code || '-'}`);
+          }
+        }
       }
       const pendingByAgent = Object.entries(status.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
@@ -8938,6 +9028,12 @@ switch (cmd) {
       if (status.writeback?.tracked) {
         console.log(`writeback=tracked:${status.writeback.tracked}  active_pending:${status.writeback.active_counts.pending}  active_stale:${status.writeback.active_counts.stale}  confirmed:${status.writeback.total_counts.confirmed}  inferred:${status.writeback.total_counts.inferred}`);
         console.log(`writeback_resolution=active_unresolved:${status.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.writeback.active_resolution_counts.resolved}`);
+        if (status.writeback.follow_up?.total_actions > 0) {
+          console.log(`writeback_follow_up=launches:${status.writeback.follow_up.total_launches}  active_launches:${status.writeback.follow_up.active_launches}  total:${status.writeback.follow_up.total_actions}  pending:${status.writeback.follow_up.total_by_status.pending}  executed:${status.writeback.follow_up.total_by_status.executed}`);
+          if (status.writeback.follow_up.latest) {
+            console.log(`latest_writeback_follow_up=${status.writeback.follow_up.latest.launch_id}  action=${status.writeback.follow_up.latest.action_id}  ${status.writeback.follow_up.latest.status}  try=${status.writeback.follow_up.latest.attempt}  at=${status.writeback.follow_up.latest.at || '-'}  postflight=${status.writeback.follow_up.latest.postflight_code || '-'}`);
+          }
+        }
       }
       console.log('');
       break;

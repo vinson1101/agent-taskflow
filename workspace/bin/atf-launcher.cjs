@@ -131,7 +131,7 @@ Usage:
 Options:
   --agent <name>             Only scan / dispatch launch requests for one agent
   --dispatcher <name>        Dispatcher name written into launch records
-  --mode <mode>              Dispatch mode (manual|noop)
+  --mode <mode>              Dispatch mode (manual|noop|sessions_spawn)
   --limit <n>                Max number of launch requests to dispatch
   --note <text>              Extra dispatch note
   --cooldown-minutes <n>     Cooldown used while scanning launch requests

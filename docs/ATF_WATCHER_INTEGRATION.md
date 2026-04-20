@@ -239,7 +239,21 @@ node atf-cli.js action watcher-status
 */10 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode noop >> /tmp/atf-launcher.log 2>&1
 ```
 
-这里推荐先用 `mode=noop` 或 `mode=manual`，先把 queue / cooldown / lease / audit 打通，再决定是否要接外部 session adapter。
+这里推荐先用 `mode=noop` 或 `mode=manual`，先把 queue / cooldown / lease / audit 打通，再切到 `mode=sessions_spawn`。
+
+如果服务器上已经有 bridge command，可以这样切：
+
+```bash
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/host/bin/sessions-spawn-bridge.cjs'
+node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode sessions_spawn
+```
+
+ATF 不直接假设某个特定 runtime。`sessions_spawn` 只是约定：
+
+- bridge command 从 `ATF_LAUNCH_PAYLOAD_PATH` 读取完整 payload
+- `ATF_LAUNCH_AGENT / TASK_ID / ACTION_ID / GUIDANCE` 会作为环境变量提供
+- bridge command 返回 `exit 0` 视为已接受 launch
+- 非零退出码会把 launch request 标成 `failed`
 
 上线后直接看：
 

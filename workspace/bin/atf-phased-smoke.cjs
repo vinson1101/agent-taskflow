@@ -219,6 +219,39 @@ function setLaunchRequestTimestamps(env, launchId, dispatchedAt, leaseExpiresAt 
   writeJson(launchFile, request);
 }
 
+function createMockSessionsSpawnBridge(scriptPath, eventsDir) {
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.mkdirSync(eventsDir, { recursive: true });
+  fs.writeFileSync(scriptPath, `const fs = require('fs');
+const path = require('path');
+
+module.exports = function sessionsSpawn(payload, context) {
+  const payloadPath = context?.payload_path;
+  const eventsDir = context?.env?.ATF_MOCK_SESSIONS_SPAWN_EVENTS_DIR;
+  if (!payloadPath) {
+    throw new Error('missing payload_path');
+  }
+  if (!eventsDir) {
+    throw new Error('missing ATF_MOCK_SESSIONS_SPAWN_EVENTS_DIR');
+  }
+  const event = {
+    schema: 'atf.mock-sessions-spawn-event.v1',
+    launch_id: context?.env?.ATF_LAUNCH_ID,
+    agent: context?.env?.ATF_LAUNCH_AGENT,
+    task_id: payload?.payload?.task_id || null,
+    action_id: payload?.payload?.action_id || null,
+    payload_path: payloadPath,
+    guidance: payload?.guidance || null,
+    received_at: new Date().toISOString(),
+  };
+  fs.mkdirSync(eventsDir, { recursive: true });
+  const eventPath = path.join(eventsDir, \`\${event.launch_id}.json\`);
+  fs.writeFileSync(eventPath, JSON.stringify(event, null, 2));
+  return { ok: true, launch_id: event.launch_id, agent: event.agent, event_path: eventPath };
+};
+`, 'utf8');
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   safeResetDir(smokeRoot);
@@ -231,10 +264,15 @@ function main() {
     ATF_WORKSPACE_F0X: path.join(smokeRoot, 'workspace-f0x'),
     ATF_WORKSPACE_CLAUDE: path.join(smokeRoot, 'workspace-claude'),
   };
+  const mockSpawnEventsDir = path.join(smokeRoot, 'mock-sessions-spawn-events');
+  const mockSpawnScriptPath = path.join(smokeRoot, 'bin', 'mock-sessions-spawn.cjs');
+  createMockSessionsSpawnBridge(mockSpawnScriptPath, mockSpawnEventsDir);
 
   for (const dir of Object.values(env)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+  env.ATF_MOCK_SESSIONS_SPAWN_EVENTS_DIR = mockSpawnEventsDir;
+  env.ATF_LAUNCH_SESSIONS_SPAWN_MODULE = mockSpawnScriptPath;
 
   runCli(['agent', 'register', 'pinchymeow', `workspace=${env.ATF_WORKSPACE_PINCHYMEOW}`], env, options);
   runCli(['agent', 'register', 'f0x', `workspace=${env.ATF_WORKSPACE_F0X}`], env, options);
@@ -453,6 +491,22 @@ function main() {
   assertIncludes(launchScanAfterLeaseExpiry, 'archived=1', 'launch scan after lease expiry');
   if (reissuedLaunch.attempt !== 2) throw new Error(`expected reissued launch attempt=2, got ${reissuedLaunch.attempt}`);
   if (reissuedLaunch.reissue_of !== firstLaunchRequest.launch_id) throw new Error(`expected reissued launch to point to ${firstLaunchRequest.launch_id}, got ${reissuedLaunch.reissue_of}`);
+
+  const sessionsSpawnDispatch = runCli(['launch', 'dispatch', reissuedLaunch.launch_id, 'dispatcher=phase-d-smoke', 'mode=sessions_spawn', 'lease_minutes=5'], env, options);
+  const spawnedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${reissuedLaunch.launch_id}.json`));
+  const mockSpawnEvent = readJson(path.join(mockSpawnEventsDir, `${reissuedLaunch.launch_id}.json`));
+  assertIncludes(sessionsSpawnDispatch, 'mode: sessions_spawn', 'sessions_spawn dispatch');
+  if (spawnedLaunchRequest.status !== 'leased') throw new Error(`expected sessions_spawn launch request leased, got ${spawnedLaunchRequest.status}`);
+  if (spawnedLaunchRequest.dispatch_mode !== 'sessions_spawn') throw new Error(`expected dispatch_mode sessions_spawn, got ${spawnedLaunchRequest.dispatch_mode}`);
+  if (!spawnedLaunchRequest.dispatch?.artifacts?.payload_path) throw new Error('expected sessions_spawn payload_path artifact');
+  if (!fs.existsSync(spawnedLaunchRequest.dispatch.artifacts.payload_path)) throw new Error('expected sessions_spawn payload file to exist');
+  if (spawnedLaunchRequest.dispatch?.artifacts?.module !== env.ATF_LAUNCH_SESSIONS_SPAWN_MODULE) {
+    throw new Error(`expected sessions_spawn module ${env.ATF_LAUNCH_SESSIONS_SPAWN_MODULE}, got ${spawnedLaunchRequest.dispatch?.artifacts?.module}`);
+  }
+  if (mockSpawnEvent.agent !== 'f0x') throw new Error(`expected mock sessions_spawn agent=f0x, got ${mockSpawnEvent.agent}`);
+  if (mockSpawnEvent.task_id !== staleTaskId) throw new Error(`expected mock sessions_spawn task_id=${staleTaskId}, got ${mockSpawnEvent.task_id}`);
+  if (mockSpawnEvent.action_id !== stalePendingAction.action_id) throw new Error(`expected mock sessions_spawn action_id=${stalePendingAction.action_id}, got ${mockSpawnEvent.action_id}`);
+  if (mockSpawnEvent.payload_path !== spawnedLaunchRequest.dispatch.artifacts.payload_path) throw new Error('expected mock sessions_spawn payload_path to match dispatch artifact');
 
   fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
   const launchScanAfterSourceClear = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);

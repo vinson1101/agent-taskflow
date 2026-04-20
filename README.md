@@ -125,8 +125,8 @@ node atf-cli.js launch scan [agent] [cooldown_minutes=N] [limit=N] # 扫描 agen
 node atf-cli.js launch list [agent] [status=x] [limit=N]     # 查看 launch request 队列
 node atf-cli.js launch inbox <agent> [limit=N]               # 查看 agent 待 dispatch 的 launch request
 node atf-cli.js launch show <launchId>                       # 查看单条 launch request
-node atf-cli.js launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x] # dispatch 单条 launch request
-node atf-cli.js launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x] # 批量 dispatch launch request
+node atf-cli.js launch dispatch <launchId> [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x] # dispatch 单条 launch request
+node atf-cli.js launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x] # 批量 dispatch launch request
 node atf-cli.js launch status [agent] [warn_after_minutes=N] [json] # 查看 launch queue / lease 状态
 node atf-cli.js launch runs [agent] [status=completed|failed] [limit=N] # 查看 launcher 运行审计
 node atf-cli.js launch run-show <runId|latest>             # 查看单次 launcher 运行明细
@@ -255,7 +255,13 @@ node atf-cli.js action watcher-status pinchymeow warn_after_minutes=20
 2. 读取 `pending-launch-requests.json` / `launch-inboxes/<agent>.json`
 3. 调用 `node atf-cli.js launch dispatch-pending`
 
-当前只支持 `manual / noop` 两种 dispatch mode，目标是先把 “哪个 agent 有待消费的 `pending-task.json`” 建模成可审计、可去重、带 lease 的 launch request，而不是把 cron 直接绑死到外部 `sessions_spawn`。
+当前支持 3 种 dispatch mode：
+
+- `manual`
+- `noop`
+- `sessions_spawn`
+
+其中 `sessions_spawn` 不是硬编码某个 runtime，而是通过环境变量 `ATF_LAUNCH_SESSIONS_SPAWN_CMD` 调一个外部 bridge command。ATF 负责写标准 payload、附带 `ATF_LAUNCH_*` 环境变量、记录 lease 和 audit；真正怎么唤醒目标 agent session 由 bridge command 决定。
 
 可以直接用这些命令看 launch queue：
 
@@ -270,6 +276,25 @@ node atf-cli.js launch launcher-status
 ```
 
 `launch status` 关注 queue 本身的 `pending / leased / archived` 分布；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
+
+`sessions_spawn` bridge 最小示例：
+
+```bash
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/host/bin/sessions-spawn-bridge.cjs'
+node workspace/bin/atf-launcher.cjs --dispatcher host-launcher --mode sessions_spawn
+```
+
+bridge command 会收到这些输入：
+
+- `ATF_LAUNCH_PAYLOAD_PATH`
+- `ATF_LAUNCH_ID`
+- `ATF_LAUNCH_AGENT`
+- `ATF_LAUNCH_WORKSPACE`
+- `ATF_LAUNCH_TASK_ID`
+- `ATF_LAUNCH_ACTION_ID`
+- `ATF_LAUNCH_GUIDANCE`
+
+同时 `ATF_DATA_DIR/launch-dispatch-payloads/<launchId>.json` 会保留完整 payload，便于审计和外部 bridge 读入上下文。
 
 ---
 

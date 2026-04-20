@@ -518,7 +518,9 @@ node atf-cli.js launch list status=pending
 node atf-cli.js launch inbox huntmind
 node atf-cli.js launch show LCH-xxxxxxxx-xxxx
 node atf-cli.js launch dispatch-pending huntmind mode=noop dispatcher=host-launcher
+node atf-cli.js launch dispatch-pending huntmind mode=sessions_spawn dispatcher=host-launcher
 node workspace/bin/atf-launcher.cjs --agent huntmind --mode noop
+node workspace/bin/atf-launcher.cjs --agent huntmind --mode sessions_spawn
 node workspace/bin/atf-launcher.cjs --dry-run --json
 ```
 
@@ -528,10 +530,35 @@ node workspace/bin/atf-launcher.cjs --dry-run --json
 - 生成去重、带 cooldown / lease 的 `atf.launch-request.v1`
 - 由控制平面统一 dispatch，而不是让 cron 直接硬绑到外部 `sessions_spawn`
 
-当前支持的 dispatch mode 只有：
+当前支持的 dispatch mode：
 
 - `manual`
 - `noop`
+- `sessions_spawn`
+
+其中 `sessions_spawn` 通过环境变量 `ATF_LAUNCH_SESSIONS_SPAWN_CMD` 调一个外部 bridge command。ATF 自己不假设 OpenClaw / Codex / 任何特定 session runtime，只保证：
+
+- dispatch 前把 launch request 写成标准 payload
+- 把 `ATF_LAUNCH_*` 环境变量传给 bridge command
+- 成功时置 `lease`
+- 失败时把 request 标成 `failed` 并留下 stderr / command artifact
+
+bridge command 最少可以这样接：
+
+```bash
+export ATF_LAUNCH_SESSIONS_SPAWN_CMD='node /root/.openclaw/workspace/host/bin/sessions-spawn-bridge.cjs'
+node workspace/bin/atf-launcher.cjs --mode sessions_spawn --dispatcher host-launcher
+```
+
+bridge 会收到：
+
+- `ATF_LAUNCH_PAYLOAD_PATH`
+- `ATF_LAUNCH_ID`
+- `ATF_LAUNCH_AGENT`
+- `ATF_LAUNCH_WORKSPACE`
+- `ATF_LAUNCH_TASK_ID`
+- `ATF_LAUNCH_ACTION_ID`
+- `ATF_LAUNCH_GUIDANCE`
 
 运行审计与健康检查入口：
 

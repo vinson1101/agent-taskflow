@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { randomBytes } = require('crypto');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 
 // ============================================================
 // 统一配置
@@ -37,6 +37,14 @@ const LAUNCHER_LATEST_FILE = `${LAUNCHER_RUNS_DIR}/latest.json`;
 const LAUNCH_REQUESTS_DIR = `${DATA_DIR}/agent-launch-requests`;
 const LAUNCH_INBOX_DIR = `${DATA_DIR}/launch-inboxes`;
 const PENDING_LAUNCH_REQUESTS_FILE = `${DATA_DIR}/pending-launch-requests.json`;
+const LAUNCH_DISPATCH_PAYLOADS_DIR = `${DATA_DIR}/launch-dispatch-payloads`;
+const LAUNCH_SESSIONS_SPAWN_CMD = process.env.ATF_LAUNCH_SESSIONS_SPAWN_CMD || '';
+const LAUNCH_SESSIONS_SPAWN_MODULE = process.env.ATF_LAUNCH_SESSIONS_SPAWN_MODULE || '';
+const LAUNCH_SESSIONS_SPAWN_CWD = process.env.ATF_LAUNCH_SESSIONS_SPAWN_CWD || WORKSPACE_DIR;
+const LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS = (() => {
+  const value = Number(process.env.ATF_LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS || 30000);
+  return Number.isInteger(value) && value >= 0 ? value : 30000;
+})();
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
 const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORKSPACE_DIR}/pending-decisions.json`;
 const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
@@ -68,7 +76,7 @@ const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
 const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCH_REQUEST_STATUSES = new Set(['pending', 'leased', 'failed', 'archived']);
-const LAUNCH_DISPATCH_MODES = new Set(['manual', 'noop']);
+const LAUNCH_DISPATCH_MODES = new Set(['manual', 'noop', 'sessions_spawn']);
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
 const REVIEW_TYPES = new Set(['task', 'delivery', 'collaboration']);
 const REVIEW_OUTCOMES = new Set(['approved', 'needs_revision', 'rejected']);
@@ -83,6 +91,7 @@ if (!fs.existsSync(TRIGGER_INBOX_DIR)) fs.mkdirSync(TRIGGER_INBOX_DIR, { recursi
 if (!fs.existsSync(ACTION_INBOX_DIR)) fs.mkdirSync(ACTION_INBOX_DIR, { recursive: true });
 if (!fs.existsSync(LAUNCH_REQUESTS_DIR)) fs.mkdirSync(LAUNCH_REQUESTS_DIR, { recursive: true });
 if (!fs.existsSync(LAUNCH_INBOX_DIR)) fs.mkdirSync(LAUNCH_INBOX_DIR, { recursive: true });
+if (!fs.existsSync(LAUNCH_DISPATCH_PAYLOADS_DIR)) fs.mkdirSync(LAUNCH_DISPATCH_PAYLOADS_DIR, { recursive: true });
 
 // ============================================================
 // 工具函数
@@ -3023,6 +3032,171 @@ function saveLaunchRequest(request) {
   saveJson(launchRequestPath(request.launch_id), request);
 }
 
+function launchDispatchPayloadPath(launchId) {
+  return `${LAUNCH_DISPATCH_PAYLOADS_DIR}/${launchId}.json`;
+}
+
+function trimDispatchArtifactText(value, limit = 2000) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 14))}...<truncated>`;
+}
+
+function splitCommandArgs(command) {
+  const input = String(command || '').trim();
+  if (!input) return [];
+  const parts = [];
+  let current = '';
+  let quote = null;
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === '\\' && i + 1 < input.length && input[i + 1] === quote) {
+        current += input[i + 1];
+        i += 1;
+        continue;
+      }
+      if (char === quote) {
+        quote = null;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+    if (char === '"' || char === '\'') {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (quote) throw new Error(`unterminated quote in command: ${input}`);
+  if (current) parts.push(current);
+  return parts;
+}
+
+function buildLaunchDispatchPayload(request, options = {}) {
+  return {
+    schema: 'atf.launch-dispatch-payload.v1',
+    generated_at: new Date().toISOString(),
+    launch_id: request.launch_id,
+    agent: request.agent,
+    workspace: request.workspace || null,
+    source_type: request.source_type || null,
+    source_ref: request.source_ref || null,
+    source_path: request.source_path || null,
+    guidance: request.guidance || null,
+    summary: request.summary || null,
+    cooldown_minutes: request.cooldown_minutes ?? null,
+    lease_minutes: deriveLaunchLeaseMinutes(request, options.lease_minutes),
+    dispatch: {
+      dispatcher: options.dispatcher || 'launch-dispatcher',
+      mode: normalizeLaunchDispatchMode(options.mode) || 'manual',
+      note: options.note || null,
+    },
+    payload: request.payload || {},
+  };
+}
+
+function persistLaunchDispatchPayload(request, options = {}) {
+  const payload = buildLaunchDispatchPayload(request, options);
+  const payloadPath = launchDispatchPayloadPath(request.launch_id);
+  saveJson(payloadPath, payload);
+  return {
+    payload,
+    payload_path: payloadPath,
+  };
+}
+
+function executeLaunchSessionsSpawn(request, options = {}, leaseExpiresAt = null) {
+  const payloadArtifact = persistLaunchDispatchPayload(request, options);
+  const env = {
+    ...process.env,
+    ATF_LAUNCH_ID: request.launch_id,
+    ATF_LAUNCH_AGENT: request.agent || '',
+    ATF_LAUNCH_WORKSPACE: request.workspace || '',
+    ATF_LAUNCH_SOURCE_TYPE: request.source_type || '',
+    ATF_LAUNCH_SOURCE_REF: request.source_ref || '',
+    ATF_LAUNCH_SOURCE_PATH: request.source_path || '',
+    ATF_LAUNCH_PAYLOAD_PATH: payloadArtifact.payload_path,
+    ATF_LAUNCH_TASK_ID: request.payload?.task_id || '',
+    ATF_LAUNCH_ACTION_ID: request.payload?.action_id || '',
+    ATF_LAUNCH_GUIDANCE: request.guidance || '',
+    ATF_LAUNCH_SUMMARY: request.summary || '',
+    ATF_LAUNCH_DISPATCHER: options.dispatcher || 'launch-dispatcher',
+    ATF_LAUNCH_MODE: 'sessions_spawn',
+    ATF_LAUNCH_LEASE_EXPIRES_AT: leaseExpiresAt || '',
+  };
+  if (LAUNCH_SESSIONS_SPAWN_MODULE) {
+    const modulePath = path.isAbsolute(LAUNCH_SESSIONS_SPAWN_MODULE)
+      ? LAUNCH_SESSIONS_SPAWN_MODULE
+      : path.resolve(LAUNCH_SESSIONS_SPAWN_MODULE);
+    const bridgeModule = require(modulePath);
+    const bridge = typeof bridgeModule === 'function'
+      ? bridgeModule
+      : (typeof bridgeModule?.sessionsSpawn === 'function' ? bridgeModule.sessionsSpawn : null);
+    if (!bridge) {
+      throw new Error(`ATF_LAUNCH_SESSIONS_SPAWN_MODULE must export a function: ${modulePath}`);
+    }
+    const bridgeResult = bridge(payloadArtifact.payload, {
+      payload_path: payloadArtifact.payload_path,
+      env,
+      request,
+      dispatcher: options.dispatcher || 'launch-dispatcher',
+      lease_expires_at: leaseExpiresAt || null,
+      cwd: LAUNCH_SESSIONS_SPAWN_CWD || WORKSPACE_DIR,
+      timeout_ms: LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS,
+    });
+    return {
+      payload_path: payloadArtifact.payload_path,
+      module: modulePath,
+      cwd: LAUNCH_SESSIONS_SPAWN_CWD || WORKSPACE_DIR,
+      timeout_ms: LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS,
+      result: trimDispatchArtifactText(JSON.stringify(bridgeResult || {})),
+    };
+  }
+  if (!LAUNCH_SESSIONS_SPAWN_CMD) {
+    throw new Error('ATF_LAUNCH_SESSIONS_SPAWN_CMD is not configured');
+  }
+  const commandParts = splitCommandArgs(LAUNCH_SESSIONS_SPAWN_CMD);
+  if (!commandParts.length) {
+    throw new Error('ATF_LAUNCH_SESSIONS_SPAWN_CMD is empty');
+  }
+  const [command, ...args] = commandParts;
+  const child = spawnSync(command, args, {
+    encoding: 'utf8',
+    env,
+    cwd: LAUNCH_SESSIONS_SPAWN_CWD || WORKSPACE_DIR,
+    timeout: LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS,
+  });
+  const stdout = trimDispatchArtifactText(child.stdout);
+  const stderr = trimDispatchArtifactText(child.stderr);
+  if (child.error) {
+    throw new Error(`sessions_spawn failed: ${child.error.message}${stderr ? ` | stderr: ${stderr}` : ''}`);
+  }
+  if ((child.status ?? 0) !== 0) {
+    throw new Error(`sessions_spawn exited with status ${child.status}${stderr ? ` | stderr: ${stderr}` : ''}`);
+  }
+  return {
+    payload_path: payloadArtifact.payload_path,
+    command: LAUNCH_SESSIONS_SPAWN_CMD,
+    executable: command,
+    args,
+    cwd: LAUNCH_SESSIONS_SPAWN_CWD || WORKSPACE_DIR,
+    timeout_ms: LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS,
+    stdout,
+    stderr,
+  };
+}
+
 function launchInboxPath(agent) {
   return `${LAUNCH_INBOX_DIR}/${agent}.json`;
 }
@@ -3425,7 +3599,7 @@ function scanLaunchRequests(options = {}) {
   const observedKeys = new Set(candidates.map(candidate => `${candidate.agent}::${candidate.dedupe_key}`));
 
   for (const request of readLaunchRequests()) {
-    if (!['pending', 'leased'].includes(request.status)) continue;
+    if (!['pending', 'leased', 'failed'].includes(request.status)) continue;
     const key = `${request.agent}::${request.dedupe_key}`;
     if (observedKeys.has(key)) continue;
     archiveLaunchRequest(request, planner, 'source cleared');
@@ -3441,8 +3615,11 @@ function scanLaunchRequests(options = {}) {
       if (state.blocker === 'pending_exists' || state.blocker === 'lease_active') activeBlocked += 1;
       continue;
     }
-    if (state.latest_request && state.latest_request.status === 'leased') {
-      archiveLaunchRequest(state.latest_request, planner, 'lease expired; reissue launch request');
+    if (state.latest_request && ['leased', 'failed'].includes(state.latest_request.status)) {
+      const note = state.latest_request.status === 'failed'
+        ? 'failed launch request cooled down; reissue launch request'
+        : 'lease expired; reissue launch request';
+      archiveLaunchRequest(state.latest_request, planner, note);
       archived += 1;
     }
     candidate.attempt = state.attempt;
@@ -3497,6 +3674,46 @@ function dispatchLaunchRequest(request, options = {}) {
   }
 
   const leaseExpiresAt = new Date(new Date(now).getTime() + (leaseMinutes * 60 * 1000)).toISOString();
+  let adapterArtifacts = {
+    source_path: result.source_path || null,
+    workspace: result.workspace || null,
+  };
+  if (mode === 'sessions_spawn') {
+    try {
+      adapterArtifacts = {
+        ...adapterArtifacts,
+        ...executeLaunchSessionsSpawn(result, {
+          dispatcher,
+          mode,
+          lease_minutes: leaseMinutes,
+          note: options.note || null,
+        }, leaseExpiresAt),
+      };
+    } catch (error) {
+      result.status = 'failed';
+      result.dispatch_mode = mode;
+      result.dispatched_at = now;
+      result.lease_expires_at = null;
+      result.dispatch = {
+        dispatcher,
+        mode,
+        note: options.note || null,
+        dispatched_at: now,
+        status: 'failed',
+        error: { message: error.message },
+        artifacts: adapterArtifacts,
+      };
+      result.history = appendHistoryEvent(result.history, {
+        event: 'dispatch_failed',
+        by: dispatcher,
+        at: now,
+        note: error.message,
+      });
+      saveLaunchRequest(result);
+      refreshLaunchIndexes();
+      return result;
+    }
+  }
   result.status = 'leased';
   result.dispatch_mode = mode;
   result.dispatched_at = now;
@@ -3508,10 +3725,7 @@ function dispatchLaunchRequest(request, options = {}) {
     dispatched_at: now,
     lease_expires_at: leaseExpiresAt,
     status: 'leased',
-    artifacts: {
-      source_path: result.source_path || null,
-      workspace: result.workspace || null,
-    },
+    artifacts: adapterArtifacts,
   };
   result.history = appendHistoryEvent(result.history, {
     event: 'dispatched',
@@ -5399,8 +5613,8 @@ ATF CLI v2
   atf launch list [agent] [status=x] [limit=N]                    查看 launch request 队列
   atf launch inbox <agent> [limit=N]                              查看 agent 待 dispatch 的 launch request
   atf launch show <launchId>                                      查看单条 launch request
-  atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]
-  atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]
+  atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]
+  atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]
   atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch queue / lease 状态
   atf launch runs [agent] [status=completed|failed] [limit=N]     查看 launcher 运行审计
   atf launch run-show <runId|latest>                              查看单次 launcher 运行明细
@@ -7468,7 +7682,7 @@ switch (cmd) {
     if (sub === 'dispatch') {
       const [launchId, ...optionParts] = restArgs;
       if (!launchId) {
-        console.error('用法: atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]');
+        console.error('用法: atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]');
         break;
       }
       const request = readLaunchRequest(launchId);
@@ -7511,7 +7725,7 @@ switch (cmd) {
         break;
       }
       if (invalid) {
-        console.error('用法: atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]');
+        console.error('用法: atf launch dispatch <launchId> [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]');
         break;
       }
       const dispatched = dispatchLaunchRequest(request, {
@@ -7578,7 +7792,7 @@ switch (cmd) {
         break;
       }
       if (invalid) {
-        console.error('用法: atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop] [lease_minutes=N] [note=x]');
+        console.error('用法: atf launch dispatch-pending [agent] [limit=N] [dispatcher=x] [mode=manual|noop|sessions_spawn] [lease_minutes=N] [note=x]');
         break;
       }
       refreshLaunchIndexes();

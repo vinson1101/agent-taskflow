@@ -285,8 +285,22 @@ function main() {
   if (controlPlaneStatus.action_watcher.pending_actions.total !== 0) throw new Error(`expected control-plane action pending total=0, got ${controlPlaneStatus.action_watcher.pending_actions.total}`);
   if (controlPlaneStatus.launcher.launch_queue.counts.leased !== 1) throw new Error(`expected control-plane launcher leased=1, got ${controlPlaneStatus.launcher.launch_queue.counts.leased}`);
   if (controlPlaneStatus.writeback?.active_counts?.pending !== 1) throw new Error(`expected control-plane writeback pending=1, got ${controlPlaneStatus.writeback?.active_counts?.pending}`);
+  if (controlPlaneStatus.writeback?.active_resolution_counts?.unresolved !== 1) throw new Error(`expected control-plane unresolved writeback=1, got ${controlPlaneStatus.writeback?.active_resolution_counts?.unresolved}`);
   if (controlPlaneStatus.status !== 'active') throw new Error(`expected control-plane status active, got ${controlPlaneStatus.status}`);
   if (controlPlaneStatus.code !== 'pending_control_work') throw new Error(`expected control-plane code pending_control_work, got ${controlPlaneStatus.code}`);
+
+  runCli(['update', staleTaskId, 'executing', 'by=f0x'], env, options);
+  const launchStatusAcknowledged = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  const controlPlaneStatusAcknowledged = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
+  if (launchStatusAcknowledged.writeback?.total_counts?.confirmed !== 1) throw new Error(`expected confirmed launch writeback=1 after ack, got ${launchStatusAcknowledged.writeback?.total_counts?.confirmed}`);
+  if (launchStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged !== 1) throw new Error(`expected acknowledged launch writeback=1, got ${launchStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged}`);
+  if (launchStatusAcknowledged.writeback?.latest?.resolution !== 'acknowledged') throw new Error(`expected latest launch writeback resolution acknowledged, got ${launchStatusAcknowledged.writeback?.latest?.resolution}`);
+  if (controlPlaneStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged !== 1) throw new Error(`expected control-plane acknowledged writeback=1, got ${controlPlaneStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged}`);
+  const launchScanAfterAcknowledged = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=0'], env, options);
+  const launchStatusAfterAcknowledgedScan = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  assertIncludes(launchScanAfterAcknowledged, 'archived=1', 'launch scan after acknowledged writeback');
+  if (launchStatusAfterAcknowledgedScan.counts.leased !== 0) throw new Error(`expected no leased launch requests after acknowledged writeback, got ${launchStatusAfterAcknowledgedScan.counts.leased}`);
+  if (launchStatusAfterAcknowledgedScan.writeback?.active_resolution_counts?.acknowledged !== 0) throw new Error(`expected no active acknowledged writebacks after archive, got ${launchStatusAfterAcknowledgedScan.writeback?.active_resolution_counts?.acknowledged}`);
 
   runCli(['update', triggerTaskId, 'completed', 'by=f0x'], env, options);
   runCli(['delivered', triggerTaskId, 'by=f0x'], env, options);

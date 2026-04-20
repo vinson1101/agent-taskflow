@@ -494,7 +494,9 @@ function main() {
   if (launcherWatcherStatus.recent_runs.total !== 2) throw new Error(`expected launcher watcher recent run total=2, got ${launcherWatcherStatus.recent_runs.total}`);
   if (launcherWatcherStatus.launch_queue.counts.leased !== 1) throw new Error(`expected launcher watcher leased count=1, got ${launcherWatcherStatus.launch_queue.counts.leased}`);
   if (launchStatusLeased.writeback?.active_counts?.pending !== 1) throw new Error(`expected launch writeback pending=1, got ${launchStatusLeased.writeback?.active_counts?.pending}`);
+  if (launchStatusLeased.writeback?.active_resolution_counts?.unresolved !== 1) throw new Error(`expected unresolved launch writeback=1, got ${launchStatusLeased.writeback?.active_resolution_counts?.unresolved}`);
   if (launchStatusLeased.writeback?.latest?.status !== 'pending') throw new Error(`expected latest launch writeback pending, got ${launchStatusLeased.writeback?.latest?.status}`);
+  if (launchStatusLeased.writeback?.latest?.resolution !== 'unresolved') throw new Error(`expected latest launch writeback unresolved, got ${launchStatusLeased.writeback?.latest?.resolution}`);
 
   setLaunchRequestTimestamps(env, firstLaunchRequest.launch_id, new Date(Date.now() - (10 * 60 * 1000)).toISOString(), new Date(Date.now() - (4 * 60 * 1000)).toISOString());
   const launchScanAfterLeaseExpiry = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
@@ -549,6 +551,12 @@ function main() {
   if (launchStatusAfterReviewWriteback.counts.leased !== 0) throw new Error(`expected no leased launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.leased}`);
   if ((launchStatusAfterReviewWriteback.writeback?.total_counts?.confirmed || 0) < 1) {
     throw new Error(`expected confirmed launch writeback after review, got ${launchStatusAfterReviewWriteback.writeback?.total_counts?.confirmed}`);
+  }
+  if ((launchStatusAfterReviewWriteback.writeback?.total_resolution_counts?.resolved || 0) < 1) {
+    throw new Error(`expected resolved launch writeback after review, got ${launchStatusAfterReviewWriteback.writeback?.total_resolution_counts?.resolved}`);
+  }
+  if (launchStatusAfterReviewWriteback.writeback?.latest?.resolution !== 'resolved') {
+    throw new Error(`expected latest launch writeback resolved, got ${launchStatusAfterReviewWriteback.writeback?.latest?.resolution}`);
   }
 
   fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });

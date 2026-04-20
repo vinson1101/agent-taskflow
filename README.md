@@ -404,7 +404,7 @@ node atf-cli.js launch run-show latest
 node atf-cli.js launch launcher-status
 ```
 
-`launch status` 现在除了 queue 本身的 `pending / leased / archived` 分布，也会汇总 `writeback` 的 `pending / confirmed / inferred / stale`；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
+`launch status` 现在除了 queue 本身的 `pending / leased / archived` 分布，也会汇总 `writeback` 的 `pending / confirmed / inferred / stale`，并额外区分 `resolution=unresolved / acknowledged / resolved`；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
 
 现在推荐的正式运行方式不是三条独立 cron，而是：
 

@@ -3654,7 +3654,7 @@ function buildLaunchCandidates(options = {}) {
     const launchability = inspectPendingTaskLaunchability(workspace, pendingTask);
     if (!launchability.launchable) continue;
     const sourceRef = pendingTask.action_id || pendingTask.task_id || entry.agent;
-    candidates.push({
+    const candidate = {
       agent: entry.agent,
       workspace,
       source_type: 'pending_task',
@@ -3681,7 +3681,10 @@ function buildLaunchCandidates(options = {}) {
           ? options.cooldown_minutes
           : 15,
       },
-    });
+    };
+    const latestSignalRequest = getSignalLaunchRequests(candidate.agent, candidate.dedupe_key)[0] || null;
+    if (shouldArchiveLaunchRequestForWriteback(latestSignalRequest)) continue;
+    candidates.push(candidate);
   }
   return candidates.sort((a, b) => a.agent.localeCompare(b.agent) || (a.source_ref || '').localeCompare(b.source_ref || ''));
 }
@@ -3822,6 +3825,15 @@ function scanLaunchRequests(options = {}) {
 
   for (const request of readLaunchRequests()) {
     if (!['pending', 'leased', 'failed'].includes(request.status)) continue;
+    const writebackSatisfied = shouldArchiveLaunchRequestForWriteback(request, {
+      warn_after_minutes: Number.isInteger(options.warn_after_minutes) ? options.warn_after_minutes : 30,
+    });
+    if (writebackSatisfied) {
+      persistLaunchWritebackEvaluation(request, writebackSatisfied, scanNow);
+      archiveLaunchRequest(request, planner, `writeback ${writebackSatisfied.resolution}: ${writebackSatisfied.code}`);
+      archived += 1;
+      continue;
+    }
     const key = `${request.agent}::${request.dedupe_key}`;
     if (observedKeys.has(key)) continue;
     archiveLaunchRequest(request, planner, 'source cleared');
@@ -3989,6 +4001,95 @@ function buildLaunchWritebackBaseline(request, trackedAt, dueAt = null) {
   };
 }
 
+function isTerminalTaskStatus(status) {
+  return Boolean(status) && !isActiveTaskStatus(status);
+}
+
+function deriveWritebackResolution(actionKind, evidence, contextStatus = null, options = {}) {
+  if (!evidence) {
+    return {
+      resolution: 'unresolved',
+      resolution_code: 'no_writeback_evidence',
+    };
+  }
+
+  const reviewee = options.reviewee || null;
+  const evidenceStatus = evidence.status || contextStatus || null;
+  const terminalStatus = isTerminalTaskStatus(evidenceStatus);
+
+  if (actionKind === 'stale_review_follow_up') {
+    if (
+      evidence.type === 'review_added'
+      && (!reviewee || evidence.reviewee === reviewee)
+      && (!reviewee || evidence.by !== reviewee)
+    ) {
+      return {
+        resolution: 'resolved',
+        resolution_code: 'external_review_recorded',
+      };
+    }
+    return {
+      resolution: 'acknowledged',
+      resolution_code: `${evidence.type}_recorded`,
+    };
+  }
+
+  if (actionKind === 'pending_reply_follow_up') {
+    if (evidence.type === 'message_sent') {
+      return {
+        resolution: 'resolved',
+        resolution_code: 'reply_sent',
+      };
+    }
+    if (evidence.type === 'delivered' || terminalStatus) {
+      return {
+        resolution: 'resolved',
+        resolution_code: evidence.type === 'delivered' ? 'delivery_recorded' : 'terminal_status_recorded',
+      };
+    }
+    return {
+      resolution: 'acknowledged',
+      resolution_code: `${evidence.type}_recorded`,
+    };
+  }
+
+  if (actionKind === 'decision_follow_up') {
+    if (['status_change', 'task_updated', 'message_sent', 'delivered', 'review_added'].includes(evidence.type)) {
+      return {
+        resolution: 'resolved',
+        resolution_code: evidence.type === 'message_sent' ? 'decision_message_recorded' : `${evidence.type}_recorded`,
+      };
+    }
+    return {
+      resolution: 'acknowledged',
+      resolution_code: `${evidence.type}_recorded`,
+    };
+  }
+
+  if (evidence.type === 'review_added') {
+    return {
+      resolution: 'resolved',
+      resolution_code: 'review_recorded',
+    };
+  }
+  if (evidence.type === 'delivered') {
+    return {
+      resolution: 'resolved',
+      resolution_code: 'delivery_recorded',
+    };
+  }
+  if (terminalStatus) {
+    return {
+      resolution: 'resolved',
+      resolution_code: 'terminal_status_recorded',
+    };
+  }
+  return {
+    resolution: 'acknowledged',
+    resolution_code: `${evidence.type}_recorded`,
+  };
+}
+
 function evaluateLaunchWriteback(request, options = {}) {
   const writeback = request?.writeback || null;
   const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
@@ -4090,6 +4191,11 @@ function evaluateLaunchWriteback(request, options = {}) {
     };
   }
 
+  const resolutionInfo = deriveWritebackResolution(actionKind, evidence, ctx?.status || null, {
+    reviewee,
+    agent,
+  });
+
   let status = 'pending';
   let code = 'awaiting_writeback';
   if (!ctx) {
@@ -4118,6 +4224,8 @@ function evaluateLaunchWriteback(request, options = {}) {
     active,
     status,
     code,
+    resolution: resolutionInfo.resolution,
+    resolution_code: resolutionInfo.resolution_code,
     age_minutes: ageMinutes,
     due_at: writeback.due_at || request.lease_expires_at || null,
     evidence,
@@ -4142,10 +4250,19 @@ function summarizeLaunchWritebacks(requests, options = {}) {
   });
   const totalCounts = emptyCounts();
   const activeCounts = emptyCounts();
+  const emptyResolutionCounts = () => ({
+    unresolved: 0,
+    acknowledged: 0,
+    resolved: 0,
+  });
+  const totalResolutionCounts = emptyResolutionCounts();
+  const activeResolutionCounts = emptyResolutionCounts();
 
   for (const item of evaluations) {
     if (totalCounts[item.status] !== undefined) totalCounts[item.status] += 1;
     if (item.active && activeCounts[item.status] !== undefined) activeCounts[item.status] += 1;
+    if (totalResolutionCounts[item.resolution] !== undefined) totalResolutionCounts[item.resolution] += 1;
+    if (item.active && activeResolutionCounts[item.resolution] !== undefined) activeResolutionCounts[item.resolution] += 1;
   }
 
   return {
@@ -4153,8 +4270,36 @@ function summarizeLaunchWritebacks(requests, options = {}) {
     warn_after_minutes: warnAfterMinutes,
     total_counts: totalCounts,
     active_counts: activeCounts,
+    total_resolution_counts: totalResolutionCounts,
+    active_resolution_counts: activeResolutionCounts,
     latest: evaluations[0] || null,
   };
+}
+
+function persistLaunchWritebackEvaluation(request, evaluation, evaluatedAt = null) {
+  if (!request || !evaluation) return request;
+  const now = evaluatedAt || new Date().toISOString();
+  request.writeback = {
+    ...(request.writeback || {}),
+    last_evaluated_at: now,
+    last_evaluation: {
+      status: evaluation.status,
+      code: evaluation.code,
+      resolution: evaluation.resolution,
+      resolution_code: evaluation.resolution_code,
+      active: Boolean(evaluation.active),
+      age_minutes: evaluation.age_minutes ?? null,
+      evidence: evaluation.evidence || null,
+    },
+  };
+  return request;
+}
+
+function shouldArchiveLaunchRequestForWriteback(request, options = {}) {
+  if (!request?.dispatched_at || !request?.writeback?.required) return null;
+  const evaluation = evaluateLaunchWriteback(request, options);
+  if (evaluation.status === 'confirmed' || evaluation.resolution === 'resolved') return evaluation;
+  return null;
 }
 
 function buildLaunchStatus(options = {}) {
@@ -8405,6 +8550,7 @@ switch (cmd) {
       console.log(`launch_queue=status:${status.launch_queue.status}  code:${status.launch_queue.code}  total:${status.launch_queue.counts.total}  pending:${status.launch_queue.counts.pending}  leased:${status.launch_queue.counts.leased}`);
       if (status.launch_queue.writeback?.tracked) {
         console.log(`writeback=tracked:${status.launch_queue.writeback.tracked}  active_pending:${status.launch_queue.writeback.active_counts.pending}  active_stale:${status.launch_queue.writeback.active_counts.stale}  confirmed:${status.launch_queue.writeback.total_counts.confirmed}  inferred:${status.launch_queue.writeback.total_counts.inferred}`);
+        console.log(`writeback_resolution=active_unresolved:${status.launch_queue.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.launch_queue.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.launch_queue.writeback.active_resolution_counts.resolved}`);
       }
       const pendingByAgent = Object.entries(status.launch_queue.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
@@ -8464,8 +8610,9 @@ switch (cmd) {
       if (status.writeback?.tracked) {
         console.log(`writeback=tracked:${status.writeback.tracked}  active_pending:${status.writeback.active_counts.pending}  active_stale:${status.writeback.active_counts.stale}  confirmed:${status.writeback.total_counts.confirmed}  inferred:${status.writeback.total_counts.inferred}`);
         if (status.writeback.latest) {
-          console.log(`latest_writeback=${status.writeback.latest.launch_id}  task=${status.writeback.latest.task_id}  ${status.writeback.latest.status}  age=${status.writeback.latest.age_minutes ?? '-'}m  code=${status.writeback.latest.code}`);
+          console.log(`latest_writeback=${status.writeback.latest.launch_id}  task=${status.writeback.latest.task_id}  ${status.writeback.latest.status}/${status.writeback.latest.resolution}  age=${status.writeback.latest.age_minutes ?? '-'}m  code=${status.writeback.latest.code}`);
         }
+        console.log(`writeback_resolution=active_unresolved:${status.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.writeback.active_resolution_counts.resolved}`);
       }
       const pendingByAgent = Object.entries(status.by_agent).filter(([, count]) => count > 0);
       if (pendingByAgent.length) {
@@ -8625,6 +8772,7 @@ switch (cmd) {
       console.log(`launcher=status:${status.launcher.status}  code:${status.launcher.code}  pending:${status.launcher.launch_queue.counts.pending}  leased:${status.launcher.launch_queue.counts.leased}`);
       if (status.writeback?.tracked) {
         console.log(`writeback=tracked:${status.writeback.tracked}  active_pending:${status.writeback.active_counts.pending}  active_stale:${status.writeback.active_counts.stale}  confirmed:${status.writeback.total_counts.confirmed}  inferred:${status.writeback.total_counts.inferred}`);
+        console.log(`writeback_resolution=active_unresolved:${status.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.writeback.active_resolution_counts.resolved}`);
       }
       console.log('');
       break;

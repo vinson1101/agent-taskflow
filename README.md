@@ -234,7 +234,7 @@ node atf-cli.js review add <taskId> <reviewer> <reviewee> <outcome> <总结> [ty
 node atf-cli.js review list <taskId> [reviewee] [reviewer=x] [type=x] [outcome=x] [focus=FOC-...] # 查看任务 Reviews
 node atf-cli.js review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N] # 查看待评价任务（含 age_days）
 node atf-cli.js review show <taskId> <reviewId>               # 查看 Review
-node atf-cli.js action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [limit=N] # 扫描 Phase D 动作
+node atf-cli.js action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [writeback_minutes=N] [limit=N] # 扫描 Phase D 动作
 node atf-cli.js action list [taskId|owner] [status=x] [kind=x] [limit=N] # 查看动作队列
 node atf-cli.js action inbox <agent> [kind=x] [limit=N]       # 查看 agent 待执行动作
 node atf-cli.js action execute <taskId> <actionId> [executor=x] [mode=message|pending_task|noop] [to=agent] [thread=x] [note=x] # 执行单条动作
@@ -324,11 +324,12 @@ wrapper 现在也会先校验本地 `--mode`，并支持把 `--to / --thread / -
 2. 读取 `pending-actions.json` / `action-inboxes/<agent>.json`
 3. 调用 `node atf-cli.js action execute-pending`
 
-当前默认支持 3 类动作：
+当前默认支持 4 类动作：
 
 - `stale_review_follow_up`
 - `pending_reply_follow_up`
 - `decision_follow_up`
+- `launch_writeback_follow_up`
 
 现在每条 `atf.action.v1` 还会附带一层轻量 harness 控制元数据：
 
@@ -405,6 +406,8 @@ node atf-cli.js launch launcher-status
 ```
 
 `launch status` 现在除了 queue 本身的 `pending / leased / archived` 分布，也会汇总 `writeback` 的 `pending / confirmed / inferred / stale`，并额外区分 `resolution=unresolved / acknowledged / resolved`；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
+
+当某条 active launch 长时间没有任何 ATF writeback 时，`action scan` 现在也可以额外生成 `launch_writeback_follow_up`。它和 review / reply / decision follow-up 一样走统一的 `action scan -> action execute-pending` 链，只是阈值改成 `writeback_minutes=N`，默认 30 分钟。
 
 现在推荐的正式运行方式不是三条独立 cron，而是：
 

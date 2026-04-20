@@ -72,7 +72,7 @@ const TRIGGER_TYPES = new Set(['cron', 'interval', 'on_message', 'on_status_chan
 const TRIGGER_STATUSES = new Set(['active', 'paused', 'fired', 'archived']);
 const TRIGGER_FIRE_STATUSES = new Set(['pending', 'consumed', 'ignored']);
 const TRIGGER_EXECUTION_MODES = new Set(['pending_task', 'message', 'room', 'noop']);
-const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up', 'decision_follow_up']);
+const ACTION_KINDS = new Set(['stale_review_follow_up', 'pending_reply_follow_up', 'decision_follow_up', 'launch_writeback_follow_up']);
 const ACTION_STATUSES = new Set(['pending', 'executed', 'skipped', 'archived']);
 const ACTION_EXECUTION_MODES = new Set(['message', 'pending_task', 'noop']);
 const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
@@ -4066,6 +4066,25 @@ function deriveWritebackResolution(actionKind, evidence, contextStatus = null, o
     };
   }
 
+  if (actionKind === 'launch_writeback_follow_up') {
+    if (['message_sent', 'review_added'].includes(evidence.type)) {
+      return {
+        resolution: 'resolved',
+        resolution_code: evidence.type === 'message_sent' ? 'writeback_message_recorded' : 'writeback_review_recorded',
+      };
+    }
+    if (evidence.type === 'delivered' || terminalStatus) {
+      return {
+        resolution: 'resolved',
+        resolution_code: evidence.type === 'delivered' ? 'delivery_recorded' : 'terminal_status_recorded',
+      };
+    }
+    return {
+      resolution: 'acknowledged',
+      resolution_code: `${evidence.type}_recorded`,
+    };
+  }
+
   if (evidence.type === 'review_added') {
     return {
       resolution: 'resolved',
@@ -4502,6 +4521,10 @@ function deriveActionCooldownHours(entity) {
     const decisionHours = Number.isInteger(entity.payload?.decision_hours) ? entity.payload.decision_hours : null;
     return Math.max(4, Math.min(12, decisionHours || 6));
   }
+  if (entity.kind === 'launch_writeback_follow_up') {
+    const writebackMinutes = Number.isInteger(entity.payload?.writeback_minutes) ? entity.payload.writeback_minutes : null;
+    return Math.max(1, Math.min(6, Math.ceil((writebackMinutes || 30) / 60)));
+  }
   return null;
 }
 
@@ -4578,6 +4601,10 @@ function deriveActionConfidence(candidate) {
   } else if (candidate.kind === 'decision_follow_up') {
     confidence = 0.86;
     if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 12) confidence += 0.03;
+  } else if (candidate.kind === 'launch_writeback_follow_up') {
+    confidence = 0.9;
+    if (candidate.payload?.writeback_status === 'stale') confidence += 0.04;
+    if (Number.isInteger(candidate.age_hours) && candidate.age_hours >= 2) confidence += 0.02;
   }
 
   if (Number.isInteger(candidate.attempt) && candidate.attempt > 1) {
@@ -4606,6 +4633,9 @@ function buildActionPolicy(candidate) {
     defaults.risk_level = 'medium';
     defaults.verification_mode = 'decision_pending';
     defaults.recovery_plan = 'Skip if a decision reply or task-level decision state already closed the signal; otherwise let the next scan escalate with fresher context.';
+  } else if (candidate?.kind === 'launch_writeback_follow_up') {
+    defaults.verification_mode = 'writeback_pending';
+    defaults.recovery_plan = 'Skip if the launch request was archived or any ATF writeback was already recorded; otherwise let the next scan or launch reissue produce a fresher follow-up.';
   }
 
   return {
@@ -4660,6 +4690,19 @@ function buildActionEvidence(taskId, ctx, candidate, capturedAt) {
       ref: taskId,
       at: ctx?.updated_at || ctx?.created_at || null,
       summary: `decision_status=${ctx?.decision?.status || 'none'} age_hours=${candidate.age_hours ?? '-'}`,
+    });
+  } else if (candidate?.kind === 'launch_writeback_follow_up') {
+    items.push({
+      type: 'launch_request',
+      ref: candidate.payload?.launch_id || candidate.source_ref || null,
+      at: sourceAt,
+      summary: `agent=${candidate.owner_agent || '-'} launch_status=${candidate.payload?.launch_status || '-'} dispatch_mode=${candidate.payload?.dispatch_mode || '-'}`,
+    });
+    items.push({
+      type: 'writeback',
+      ref: candidate.payload?.launch_id || candidate.source_ref || null,
+      at: candidate.payload?.last_writeback_at || candidate.payload?.due_at || sourceAt,
+      summary: `status=${candidate.payload?.writeback_status || '-'} resolution=${candidate.payload?.writeback_resolution || '-'} age_minutes=${candidate.payload?.age_minutes ?? '-'} threshold_minutes=${candidate.payload?.writeback_minutes ?? '-'}`,
     });
   }
 
@@ -4807,6 +4850,55 @@ function runActionPreflight(taskId, action, ctx, checkedAt = null) {
       reflection_id: reflectionId,
       thread_id: threadId,
       age_hours: computeAgeHours(reflection.created_at),
+    });
+  }
+
+  if (action.kind === 'launch_writeback_follow_up') {
+    const launchId = action.payload?.launch_id || action.source_ref || null;
+    const request = launchId ? readLaunchRequest(launchId) : null;
+    const writebackMinutes = Number.isInteger(action.payload?.writeback_minutes) ? action.payload.writeback_minutes : 30;
+    if (!request) {
+      return createActionCheck('preflight', now, false, 'missing_source_launch', 'source launch request no longer exists', {
+        launch_id: launchId,
+      });
+    }
+    const evaluation = evaluateLaunchWriteback(request, {
+      warn_after_minutes: writebackMinutes,
+    });
+    if (!evaluation.tracked) {
+      return createActionCheck('preflight', now, false, 'writeback_not_tracked', 'launch request does not require writeback tracking', {
+        launch_id: launchId,
+        request_status: request.status || null,
+      });
+    }
+    if (!evaluation.active || request.status === 'archived') {
+      return createActionCheck('preflight', now, false, 'writeback_closed', 'launch request is already archived', {
+        launch_id: launchId,
+        request_status: request.status || null,
+      });
+    }
+    if (evaluation.status === 'confirmed' || evaluation.status === 'inferred' || evaluation.resolution !== 'unresolved') {
+      return createActionCheck('preflight', now, false, 'writeback_recorded', `launch writeback is already ${evaluation.status}/${evaluation.resolution}`, {
+        launch_id: launchId,
+        request_status: request.status || null,
+        writeback_status: evaluation.status,
+        resolution: evaluation.resolution,
+      });
+    }
+    if (Number.isInteger(evaluation.age_minutes) && evaluation.age_minutes < writebackMinutes) {
+      return createActionCheck('preflight', now, false, 'writeback_not_due', `launch writeback age ${evaluation.age_minutes}m is below threshold ${writebackMinutes}m`, {
+        launch_id: launchId,
+        age_minutes: evaluation.age_minutes,
+        writeback_minutes: writebackMinutes,
+      });
+    }
+    return createActionCheck('preflight', now, true, 'writeback_pending', 'launch writeback is still overdue', {
+      launch_id: launchId,
+      request_status: request.status || null,
+      writeback_status: evaluation.status,
+      resolution: evaluation.resolution,
+      age_minutes: evaluation.age_minutes,
+      writeback_minutes: writebackMinutes,
     });
   }
 
@@ -5075,6 +5167,63 @@ function buildDecisionFollowUpCandidates(options = {}) {
   return candidates;
 }
 
+function buildLaunchWritebackActionCandidates(options = {}) {
+  const writebackMinutes = Number.isInteger(options.writeback_minutes) && options.writeback_minutes >= 0 ? options.writeback_minutes : 30;
+  const ownerFilter = isClearedValue(options.owner_agent) ? null : String(options.owner_agent).trim();
+  const candidates = [];
+
+  for (const request of readLaunchRequests()) {
+    if (request.status === 'archived' || !request.dispatched_at || !request.writeback?.required) continue;
+    const evaluation = evaluateLaunchWriteback(request, {
+      warn_after_minutes: writebackMinutes,
+    });
+    if (!evaluation.tracked || !evaluation.active) continue;
+    if (!['pending', 'stale'].includes(evaluation.status)) continue;
+    if (evaluation.resolution !== 'unresolved') continue;
+    if (!evaluation.agent) continue;
+    if (ownerFilter && evaluation.agent !== ownerFilter) continue;
+    const ctx = readCtx(evaluation.task_id);
+    if (!ctx) continue;
+    const ageMinutes = Number.isInteger(evaluation.age_minutes) ? evaluation.age_minutes : null;
+    const ageHours = Number.isInteger(ageMinutes) ? Math.floor(ageMinutes / 60) : null;
+    candidates.push({
+      task_id: evaluation.task_id,
+      owner_agent: evaluation.agent,
+      thread_id: defaultThreadId(evaluation.task_id, null, null),
+      kind: 'launch_writeback_follow_up',
+      priority: evaluation.status === 'stale' ? 'high' : 'normal',
+      source_type: 'launch_writeback',
+      source_ref: request.launch_id,
+      source_at: request.dispatched_at || request.updated_at || null,
+      dedupe_key: `launch_writeback_follow_up:${request.launch_id}`,
+      summary: `${evaluation.agent} still has no ATF writeback for ${evaluation.task_id}`,
+      guidance: `Record a task writeback in ATF (status/message/review/delivered) so launch ${request.launch_id} can close cleanly.`,
+      suggested_message_type: 'request',
+      age_hours: ageHours,
+      payload: {
+        description: ctx.description,
+        launch_id: request.launch_id,
+        launch_status: request.status || null,
+        dispatch_mode: request.dispatch_mode || null,
+        dispatched_at: request.dispatched_at || null,
+        lease_expires_at: request.lease_expires_at || null,
+        due_at: evaluation.due_at || null,
+        writeback_status: evaluation.status,
+        writeback_resolution: evaluation.resolution,
+        writeback_code: evaluation.code,
+        writeback_minutes: writebackMinutes,
+        age_minutes: ageMinutes,
+        last_writeback_at: evaluation.evidence?.at || null,
+        source_kind: request.payload?.kind || null,
+        source_action_id: request.payload?.action_id || null,
+        reissue_cooldown_hours: Math.max(1, Math.min(6, Math.ceil(writebackMinutes / 60))),
+      },
+    });
+  }
+
+  return candidates;
+}
+
 function buildActionCandidates(options = {}) {
   const kindFilter = normalizeActionKind(options.kind);
   let candidates = [];
@@ -5086,6 +5235,9 @@ function buildActionCandidates(options = {}) {
   }
   if (!kindFilter || kindFilter === 'decision_follow_up') {
     candidates.push(...buildDecisionFollowUpCandidates(options));
+  }
+  if (!kindFilter || kindFilter === 'launch_writeback_follow_up') {
+    candidates.push(...buildLaunchWritebackActionCandidates(options));
   }
   return candidates.sort(compareActionCandidates);
 }
@@ -5141,6 +5293,7 @@ function buildActionMessageBody(action) {
   if (Number.isInteger(action.age_hours)) parts.push(`Age: ${action.age_hours}h`);
   if (action.payload?.original_excerpt) parts.push(`Signal: ${action.payload.original_excerpt}`);
   if (action.payload?.reflection_excerpt) parts.push(`Reflection: ${action.payload.reflection_excerpt}`);
+  if (action.payload?.launch_id) parts.push(`Launch: ${action.payload.launch_id} ${action.payload.launch_status || '-'} / ${action.payload.writeback_status || '-'}`);
   return parts.join('\n');
 }
 
@@ -5309,6 +5462,7 @@ function parseActionPlanArgs(parts) {
   let staleDays = 4;
   let messageHours = 12;
   let decisionHours = 6;
+  let writebackMinutes = 30;
   let limit = null;
   let invalid = null;
 
@@ -5345,6 +5499,15 @@ function parseActionPlanArgs(parts) {
       decisionHours = value;
       continue;
     }
+    if (part.startsWith('writeback_minutes=')) {
+      const value = Number(part.substring('writeback_minutes='.length));
+      if (!Number.isInteger(value) || value < 0) {
+        invalid = part;
+        break;
+      }
+      writebackMinutes = value;
+      continue;
+    }
     if (part.startsWith('limit=')) {
       const value = Number(part.substring('limit='.length));
       if (!Number.isInteger(value) || value <= 0) {
@@ -5368,6 +5531,7 @@ function parseActionPlanArgs(parts) {
     staleDays,
     messageHours,
     decisionHours,
+    writebackMinutes,
     limit,
     invalid,
   };
@@ -6170,7 +6334,7 @@ atf delivered <taskId> [by=agent]      手动标记已送达
   atf review pending [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [limit=N]  查看待评价任务
   atf review backlog [agent] [type=x] [status=completed|delivered] [min_age=N] [max_age=N] [top=N]  查看待评价 backlog 汇总
   atf review show <taskId> <reviewId>                查看单条 Review
-  atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [limit=N]  扫描并生成 Phase D 动作
+  atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [writeback_minutes=N] [limit=N]  扫描并生成 Phase D 动作
   atf action list [taskId|owner] [status=x] [kind=x] [limit=N]      查看动作队列
   atf action inbox <agent> [kind=x]                 查看 agent 待执行动作
   atf action rebuild-index                          重建全局动作索引
@@ -7675,7 +7839,7 @@ switch (cmd) {
     if (sub === 'scan') {
       const parsed = parseActionPlanArgs(restArgs);
       if (parsed.invalid) {
-        console.error('用法: atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [limit=N]');
+        console.error('用法: atf action scan [owner] [kind=x] [stale_days=N] [message_hours=N] [decision_hours=N] [writeback_minutes=N] [limit=N]');
         break;
       }
       const result = scanActions({
@@ -7684,6 +7848,7 @@ switch (cmd) {
         stale_days: parsed.staleDays,
         message_hours: parsed.messageHours,
         decision_hours: parsed.decisionHours,
+        writeback_minutes: parsed.writebackMinutes,
         limit: parsed.limit,
         planner: 'cli',
       });

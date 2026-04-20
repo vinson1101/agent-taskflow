@@ -197,6 +197,7 @@ function main() {
   assertIncludes(controlPlaneHelp, '--trigger-room <name>', 'control-plane help');
   assertIncludes(controlPlaneHelp, '--action-mode <mode>', 'control-plane help');
   assertIncludes(controlPlaneHelp, '--action-thread <id>', 'control-plane help');
+  assertIncludes(controlPlaneHelp, '--writeback-minutes <n>', 'control-plane help');
 
   const invalidTriggerMode = runExpectedFailure(controlPlanePath, ['--trigger-mode', 'invalid-mode'], env);
   const invalidActionMode = runExpectedFailure(controlPlanePath, ['--action-mode', 'invalid-mode'], env);
@@ -228,6 +229,7 @@ function main() {
     '--trigger-at', new Date(Date.now() + (2 * 60 * 1000)).toISOString(),
     '--action-executor', 'control-plane-smoke',
     '--action-mode', 'pending_task',
+    '--writeback-minutes', '5',
     '--launcher-dispatcher', 'control-plane-smoke',
     '--launcher-mode', 'noop',
     '--min-confidence', '0',

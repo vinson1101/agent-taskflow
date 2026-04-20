@@ -499,6 +499,32 @@ function main() {
   if (launchStatusLeased.writeback?.latest?.resolution !== 'unresolved') throw new Error(`expected latest launch writeback unresolved, got ${launchStatusLeased.writeback?.latest?.resolution}`);
 
   setLaunchRequestTimestamps(env, firstLaunchRequest.launch_id, new Date(Date.now() - (10 * 60 * 1000)).toISOString(), new Date(Date.now() - (4 * 60 * 1000)).toISOString());
+  const writebackWatcherDryRun = JSON.parse(runWatcher(['--agent', 'f0x', '--no-execute', '--writeback-minutes', '5', '--json'], env, options));
+  const pendingActionsAfterWritebackScan = readJson(path.join(env.ATF_DATA_DIR, 'pending-actions.json'));
+  const writebackPendingAction = pendingActionsAfterWritebackScan.items.find(item => item.kind === 'launch_writeback_follow_up' && item.task_id === staleTaskId);
+  const writebackActionInbox = runCli(['action', 'inbox', 'f0x', 'kind=launch_writeback_follow_up'], env, options);
+  if (writebackWatcherDryRun.pendingAfterScan !== 1) throw new Error(`expected one pending writeback follow-up after watcher scan, got ${writebackWatcherDryRun.pendingAfterScan}`);
+  if (writebackWatcherDryRun.eligibleActions !== 1) throw new Error(`expected one eligible writeback follow-up, got ${writebackWatcherDryRun.eligibleActions}`);
+  if (!writebackPendingAction) throw new Error('expected launch_writeback_follow_up action to be planned');
+  if (writebackPendingAction.policy?.verification_mode !== 'writeback_pending') throw new Error(`expected writeback verification_mode, got ${writebackPendingAction.policy?.verification_mode}`);
+  assertIncludes(writebackActionInbox, 'launch_writeback_follow_up', 'f0x writeback action inbox');
+
+  const writebackFollowUpThreadId = 'THR-launch-writeback';
+  const executeWritebackFollowUp = JSON.parse(runWatcher(['--agent', 'f0x', '--mode', 'message', '--thread', writebackFollowUpThreadId, '--executor', 'phase-d-smoke', '--no-scan', '--json'], env, options));
+  const writebackPendingActionFile = readJson(path.join(resolveTaskDir(staleTaskId, env), 'actions', `${writebackPendingAction.action_id}.json`));
+  const staleTaskMessagesAfterWritebackFollowUp = fs.readdirSync(path.join(resolveTaskDir(staleTaskId, env), 'messages'))
+    .map(file => readJson(path.join(resolveTaskDir(staleTaskId, env), 'messages', file)));
+  const writebackActionMessage = staleTaskMessagesAfterWritebackFollowUp.find(message =>
+    message.source_type === 'action'
+    && message.action_id === writebackPendingAction.action_id
+  );
+  if (executeWritebackFollowUp.executed !== 1) throw new Error(`expected writeback follow-up executed=1, got ${executeWritebackFollowUp.executed}`);
+  if (!writebackActionMessage) throw new Error('expected launch writeback follow-up to generate a message');
+  if (writebackActionMessage.thread_id !== writebackFollowUpThreadId) throw new Error(`expected writeback follow-up thread ${writebackFollowUpThreadId}, got ${writebackActionMessage.thread_id}`);
+  if (!writebackActionMessage.body.includes(firstLaunchRequest.launch_id)) throw new Error('expected writeback follow-up message to mention launch id');
+  if (writebackPendingActionFile.verification?.preflight?.code !== 'writeback_pending') throw new Error(`expected writeback follow-up preflight code writeback_pending, got ${writebackPendingActionFile.verification?.preflight?.code}`);
+  if (writebackPendingActionFile.verification?.postflight?.ok !== true) throw new Error('expected writeback follow-up postflight to pass');
+
   const launchScanAfterLeaseExpiry = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
   const launchRequestsAfterLeaseExpiry = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json'));
   const reissuedLaunch = launchRequestsAfterLeaseExpiry.items.find(item => item.launch_id !== firstLaunchRequest.launch_id);

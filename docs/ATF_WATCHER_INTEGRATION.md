@@ -204,6 +204,22 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
 */5 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-watcher.cjs --executor watcher-v1 >> /tmp/atf-watcher.log 2>&1
 ```
 
+### 6.1b 统一 control-plane
+
+正式环境更推荐保留一条统一 control-plane，而不是三条独立 cron：
+
+```cron
+*/10 * * * * cd /root/.openclaw/workspace/agent-taskflow && node workspace/bin/atf-control-plane.cjs --quiet-idle >> /tmp/atf-control-plane.log 2>&1
+```
+
+这条 cron 会顺序执行：
+
+1. `atf-watcher.cjs`
+2. `atf-action-watcher.cjs`
+3. `atf-launcher.cjs`
+
+并且在整条链都 idle 时静默，不做无意义汇报。
+
 ### 6.2 单 agent watcher
 
 ```cron
@@ -294,6 +310,32 @@ node atf-cli.js launch runs limit=10
 node atf-cli.js launch launcher-status
 node atf-cli.js launch status
 ```
+
+### 6.6 Task-Watcher 触发 one-shot control-plane
+
+如果你服务器上已经有独立的 `ATF-Task-Watcher` / timeout watcher，它不应该去启停别的 cron。更稳的做法是：
+
+1. Task-Watcher 低频常驻
+2. 它扫到真实变化时，直接补打一枪 one-shot control-plane
+
+最小接法：
+
+```bash
+cd /root/.openclaw/workspace/agent-taskflow
+node workspace/bin/atf-control-plane.cjs --quiet-idle
+```
+
+推荐触发条件：
+
+- 新 `pending-task.json`
+- 新 DLQ / timeout
+- 新 status change / completion
+- 你自己的 Task-Watcher 已明确判定“有真实变化”
+
+不推荐：
+
+- 为 `huntmind` / `acestock` 单独保留 `sessions_spawn` cron
+- 让 Task-Watcher 动态启停其他 cron 条目
 
 ## 7. 本地 smoke 建议
 

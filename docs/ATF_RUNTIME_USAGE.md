@@ -530,6 +530,28 @@ node workspace/bin/atf-launcher.cjs --dry-run --json
 - 生成去重、带 cooldown / lease 的 `atf.launch-request.v1`
 - 由控制平面统一 dispatch，而不是让 cron 直接硬绑到外部 `sessions_spawn`
 
+统一控制面的正式入口：
+
+```bash
+npm run atf:control-plane -- --quiet-idle
+npm run atf:control-plane:dry -- --json
+node workspace/bin/atf-control-plane.cjs --quiet-idle
+node workspace/bin/atf-control-plane.cjs --agent huntmind --json
+```
+
+这个 wrapper 会顺序串起：
+
+1. `atf-watcher.cjs`
+2. `atf-action-watcher.cjs`
+3. `atf-launcher.cjs`
+
+推荐部署形态：
+
+1. 一条低频 control-plane cron 常驻
+2. 一条 Task-Watcher / timeout watcher 常驻
+3. Task-Watcher 发现真实变化时，额外补打一枪 one-shot control-plane
+4. 不再保留 per-agent `sessions_spawn` cron
+
 当前支持的 dispatch mode：
 
 - `manual`

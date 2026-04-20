@@ -29,6 +29,7 @@
 | `workspace/bin/atf-watcher.cjs` | 仓库内可见的 watcher v1：`scan-all -> execute-pending` 批量执行脚本 |
 | `workspace/bin/atf-action-watcher.cjs` | 仓库内可见的 action watcher：`action scan -> action execute-pending` |
 | `workspace/bin/atf-launcher.cjs` | 仓库内可见的 launcher：`launch scan -> launch dispatch-pending` |
+| `workspace/bin/atf-control-plane.cjs` | 统一控制面入口：串行跑 `trigger -> action -> launcher`，支持 idle 静默 |
 | `workspace/bin/sessions-spawn-bridge.cjs` | repo 内置的 sessions spawn bridge：读取 launch payload，再转发给真实 backend |
 | `workspace/bin/real-sessions-spawn-backend.cjs` | repo 内置的 backend：支持 `stub` 验证，或继续转发给真实 runtime |
 | `workspace/bin/real-sessions-spawn-runtime-template.cjs` | 真实 runtime backend 模板：复制后填入实际 `sessions_spawn` 调用 |
@@ -175,6 +176,8 @@ npm run atf:action:watcher -- --agent pinchymeow --mode message
 npm run atf:action:watcher:dry -- --agent f0x --mode pending_task
 npm run atf:launcher -- --agent f0x --mode noop
 npm run atf:launcher:dry -- --agent f0x
+npm run atf:control-plane -- --quiet-idle
+npm run atf:control-plane:dry -- --json
 ```
 
 `workspace/bin/atf-watcher.cjs` 当前做两件事：
@@ -279,6 +282,21 @@ node atf-cli.js launch launcher-status
 ```
 
 `launch status` 关注 queue 本身的 `pending / leased / archived` 分布；`launch launcher-status` 关注 launcher wrapper 最近有没有真的运行、最近一次 run 是不是失败或 stale。生产巡检时这两个都该看。
+
+现在推荐的正式运行方式不是三条独立 cron，而是：
+
+1. 保留一条低频 `ATF-Task-Watcher` / timeout watcher
+2. 保留一条统一 `atf-control-plane.cjs` cron
+3. `ATF-Task-Watcher` 只在发现真实变化时，补打一枪 one-shot control-plane
+4. 删除所有 per-agent `sessions_spawn` cron
+
+`workspace/bin/atf-control-plane.cjs` 会顺序执行：
+
+1. `atf-watcher.cjs`
+2. `atf-action-watcher.cjs`
+3. `atf-launcher.cjs`
+
+并且支持 `--quiet-idle`，在整条链都 idle 时不输出，避免空跑汇报。
 
 `sessions_spawn` bridge 最小示例：
 

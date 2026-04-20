@@ -580,6 +580,15 @@ repo 内 backend 还支持：
 
 推荐优先走 `ATF_REAL_SESSIONS_SPAWN_MODULE`。repo 内 backend 现在会把真实 backend 返回的 `session_key / agent / task_id / action_id` 提到结果顶层，后续看审计更直接。
 
+worker 侧要遵守一个硬约束：
+
+1. 被唤醒后先处理目标 workspace 里的 `pending-task.json`
+2. 处理完成后，必须回写到 ATF
+3. 仅写日志、stdout 或本地说明，不算完成
+4. ATF 回写成功后，再删除已消费的 `pending-task.json`
+
+对 `stale_review_follow_up`，bridge prompt 会明确要求补一条 `atf review add ...`，否则 launcher 会把这个 pending-task 视为未闭环来源。
+
 真实 runtime 模板已经放在：
 
 ```bash

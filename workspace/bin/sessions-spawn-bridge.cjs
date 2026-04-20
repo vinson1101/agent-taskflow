@@ -81,7 +81,33 @@ function readPayload() {
   return { payload, payloadPath };
 }
 
+function buildWritebackInstructions(payload) {
+  const taskId = payload.payload?.task_id || '-';
+  const actionKind = payload.payload?.kind || null;
+  const agent = payload.agent || 'unknown';
+  const reviewee = payload.payload?.reviewee || payload.payload?.assigned_to || agent;
+  const pendingTaskPath = payload.payload?.pending_task_path || payload.source_path || 'pending-task.json';
+  const lines = [
+    'ATF writeback is mandatory. Logs or local notes do not count as completion.',
+  ];
+
+  if (actionKind === 'stale_review_follow_up' && taskId !== '-') {
+    lines.push(`After the review is done, persist it with: node atf-cli.js review add ${taskId} ${agent} ${reviewee} approved "<summary>" type=task overall=4`);
+    lines.push('If approval is not appropriate, use needs_revision or rejected instead of approved.');
+  } else if (actionKind === 'decision_follow_up' && taskId !== '-') {
+    lines.push(`Write the decision back into ATF for ${taskId}; if the task is blocked, use: node atf-cli.js update ${taskId} blocked`);
+  } else if (actionKind === 'pending_reply_follow_up') {
+    lines.push(`Reply through the ATF message flow for ${taskId}; do not stop at local notes or logs.`);
+  } else if (taskId !== '-') {
+    lines.push(`Write the outcome back into ATF for ${taskId} before considering the work done.`);
+  }
+
+  lines.push(`After successful ATF writeback, delete the consumed file: ${pendingTaskPath}`);
+  return lines;
+}
+
 function buildPrompt(payload) {
+  const writebackInstructions = buildWritebackInstructions(payload);
   const lines = [
     `Wake agent ${payload.agent || 'unknown'} and let it consume its pending task.`,
     '',
@@ -94,7 +120,12 @@ function buildPrompt(payload) {
     `Guidance: ${payload.guidance || '-'}`,
     '',
     'Instruction:',
-    'Open the target workspace, inspect pending-task.json, and handle the requested follow-up there.',
+    '1. Open the target workspace and inspect pending-task.json.',
+    '2. Handle the requested follow-up there.',
+    '3. Persist the result back into ATF using the ATF CLI.',
+    '4. Only after ATF writeback succeeds, remove the consumed pending-task.json.',
+    '',
+    ...writebackInstructions.map(item => `- ${item}`),
   ];
   return `${lines.join('\n')}\n`;
 }

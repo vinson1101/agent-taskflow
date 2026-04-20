@@ -257,6 +257,8 @@ ATF 不直接假设某个特定 runtime。`sessions_spawn` 只是约定：
 - repo 内置 bridge 还会生成 `ATF_LAUNCH_PROMPT / ATF_LAUNCH_PROMPT_PATH`
 - bridge command 返回 `exit 0` 视为已接受 launch
 - 非零退出码会把 launch request 标成 `failed`
+- worker 完成后必须回写 ATF；仅有运行日志不算完成
+- 对 action 派生的 `pending-task.json`，如果对应 action 已闭环，launcher scan 会自动停止继续派发
 
 推荐接法：
 

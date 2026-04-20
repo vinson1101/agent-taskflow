@@ -508,11 +508,18 @@ function main() {
   if (mockSpawnEvent.action_id !== stalePendingAction.action_id) throw new Error(`expected mock sessions_spawn action_id=${stalePendingAction.action_id}, got ${mockSpawnEvent.action_id}`);
   if (mockSpawnEvent.payload_path !== spawnedLaunchRequest.dispatch.artifacts.payload_path) throw new Error('expected mock sessions_spawn payload_path to match dispatch artifact');
 
+  runCli(['review', 'add', staleTaskId, 'huntmind', 'f0x', 'approved', 'smoke-review', 'type=task', 'overall=4'], env, options);
+  const launchScanAfterReviewWriteback = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
+  const launchStatusAfterReviewWriteback = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  assertIncludes(launchScanAfterReviewWriteback, 'created=0', 'launch scan after review writeback');
+  assertIncludes(launchScanAfterReviewWriteback, 'archived=1', 'launch scan after review writeback');
+  if (launchStatusAfterReviewWriteback.counts.pending !== 0) throw new Error(`expected no pending launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.pending}`);
+  if (launchStatusAfterReviewWriteback.counts.leased !== 0) throw new Error(`expected no leased launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.leased}`);
+
   fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
   const launchScanAfterSourceClear = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
   const launchStatusAfterClear = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
   assertIncludes(launchScanAfterSourceClear, 'created=0', 'launch scan after source clear');
-  assertIncludes(launchScanAfterSourceClear, 'archived=1', 'launch scan after source clear');
   if (launchStatusAfterClear.counts.pending !== 0) throw new Error(`expected no pending launch requests after source clear, got ${launchStatusAfterClear.counts.pending}`);
 
   if (options.cleanup) {

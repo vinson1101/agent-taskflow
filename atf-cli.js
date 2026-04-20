@@ -3428,6 +3428,51 @@ function readWorkspacePendingTask(workspace) {
   return loadJson(path.join(workspace, 'pending-task.json'));
 }
 
+function inspectPendingTaskLaunchability(workspace, pendingTask) {
+  if (!pendingTask || pendingTask.schema !== 'atf.action-pending-task.v1') {
+    return {
+      launchable: true,
+      reason: 'non_action_pending_task',
+      action: null,
+      preflight: null,
+    };
+  }
+
+  const taskId = pendingTask.task_id || null;
+  const actionId = pendingTask.action_id || null;
+  if (!taskId || !actionId) {
+    return {
+      launchable: false,
+      reason: 'incomplete_action_pending_task',
+      action: null,
+      preflight: createActionCheck('preflight', new Date().toISOString(), false, 'missing_action_ref', 'pending-task is missing task_id or action_id', {
+        workspace,
+      }),
+    };
+  }
+
+  const ctx = readCtx(taskId);
+  if (!ctx) {
+    return {
+      launchable: false,
+      reason: 'missing_task_ctx',
+      action: null,
+      preflight: createActionCheck('preflight', new Date().toISOString(), false, 'missing_task_ctx', `task ${taskId} no longer exists`, {
+        workspace,
+        task_id: taskId,
+      }),
+    };
+  }
+  const action = readAction(taskId, actionId);
+  const preflight = runActionPreflight(taskId, action, ctx, new Date().toISOString());
+  return {
+    launchable: Boolean(preflight?.ok),
+    reason: preflight?.code || (preflight?.ok ? 'launchable' : 'not_launchable'),
+    action,
+    preflight,
+  };
+}
+
 function buildLaunchCandidates(options = {}) {
   const agentFilter = isClearedValue(options.agent) ? null : String(options.agent).trim();
   const registry = loadAgentRegistry({ persistIfMissing: true });
@@ -3437,6 +3482,8 @@ function buildLaunchCandidates(options = {}) {
     const workspace = entry.workspace || inferAgentWorkspace(entry.agent);
     const pendingTask = readWorkspacePendingTask(workspace);
     if (!pendingTask) continue;
+    const launchability = inspectPendingTaskLaunchability(workspace, pendingTask);
+    if (!launchability.launchable) continue;
     const sourceRef = pendingTask.action_id || pendingTask.task_id || entry.agent;
     candidates.push({
       agent: entry.agent,
@@ -3455,6 +3502,12 @@ function buildLaunchCandidates(options = {}) {
         priority: pendingTask.priority || null,
         summary: pendingTask.summary || null,
         pending_task_path: path.join(workspace, 'pending-task.json'),
+        reviewee: pendingTask.payload?.reviewee || null,
+        task_status: pendingTask.payload?.task_status || null,
+        task_type: pendingTask.payload?.task_type || null,
+        thread_id: pendingTask.payload?.thread_id || null,
+        reflection_id: pendingTask.payload?.reflection_id || null,
+        pending_payload: pendingTask.payload || null,
         launch_cooldown_minutes: Number.isInteger(options.cooldown_minutes) && options.cooldown_minutes >= 0
           ? options.cooldown_minutes
           : 15,

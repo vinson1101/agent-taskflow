@@ -20,4 +20,4 @@
 - 这组文档是当前阶段的产品与架构指导书。
 - 当前主线已经吸收 Clawith 式 `Focus / Trigger Binding / Agent Messaging / Reflections` 的最小协议对象；除非特别说明，不再把重平台 / 市场化设计当成当前阶段前提。
 - `README.md` 仍然保留运行方式和现状说明。
-- `PROJECT-OVERVIEW.md`、`SUBMISSION*.md`、`TODO*.md` 更多反映历史阶段、黑客松材料或特定时期的规划，不应替代本目录作为当前判断依据。
+- 历史阶段材料已经归档到 `archive/legacy-docs/`，早期原型代码归档到 `archive/legacy-prototype/`；它们更多反映黑客松阶段、旧 TODO、支付原型和阶段性草稿，不应替代本目录作为当前判断依据。

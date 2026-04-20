@@ -4,6 +4,9 @@
   "description": "Async multi-agent coordination kernel and control plane for OpenClaw",
   "author": "PinchyMeow",
   "main": "index.js",
+  "bin": {
+    "atf": "./atf-cli.js"
+  },
   "scripts": {
     "start": "node index.js",
     "atf:watcher": "node workspace/bin/atf-watcher.cjs",

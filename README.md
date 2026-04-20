@@ -38,6 +38,26 @@ ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作�
 
 这四层共同组成一个“可审计、可恢复、可逐步自治”的异步协作系统。
 
+## 架构图
+
+```mermaid
+flowchart LR
+  Repo["ATF Shared Repository<br/>ctx / focus / trigger / review / action / launch"] --> Control["Control Plane<br/>atf-cli + watcher + action watcher + launcher"]
+  Control --> Runtime["Wakeup Runtime<br/>sessions_spawn bridge + real backend"]
+  Runtime --> Agents["Worker Agents<br/>huntmind / acestock / f0x / ..."]
+  Agents --> Workspace["Agent Workspaces<br/>pending-task / inbox / launch payload"]
+  Workspace --> Repo
+  Agents --> Writeback["ATF Write-back<br/>status / review / receipts / reflections"]
+  Writeback --> Repo
+```
+
+这张图对应 ATF 当前的真实运行方式：
+
+- 任务事实和协作对象统一沉淀在共享任务仓库
+- control-plane 负责扫描、补漏、动作执行和 launch dispatch
+- runtime 只负责按需唤醒 agent，不承担 ATF 的状态真相
+- worker 完成动作后必须回写 ATF，闭环才算成立
+
 ## 非目标
 
 为了避免方向漂移，当前阶段 ATF 明确不是：
@@ -65,12 +85,27 @@ ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作�
 - [docs/ATF_WATCHER_INTEGRATION.md](./docs/ATF_WATCHER_INTEGRATION.md) - cron / watcher / heartbeat 集成说明
 - [docs/ATF_ACTION_LAYER.md](./docs/ATF_ACTION_LAYER.md) - Phase D / 主动运营动作层设计
 
+## 历史材料归档
+
+为了保持主干干净，历史阶段材料已经从根目录收拢到归档目录：
+
+- [archive/legacy-docs/README.md](./archive/legacy-docs/README.md) - 黑客松提交稿、旧 TODO、历史反馈
+- [archive/legacy-prototype/README.md](./archive/legacy-prototype/README.md) - 旧支付原型、早期 CLI、旧 demo
+
+当前活跃主线只看：
+
+- `README.md`
+- `docs/`
+- `atf-cli.js`
+- `workspace/bin/`
+
 ---
 
 ## 核心文件
 
 | 文件 | 说明 |
 |------|------|
+| `index.js` | 根目录兼容入口：无参数时展示主入口，有参数时转发到 `atf-cli.js` |
 | `atf-cli.js` | CLI 入口，所有命令 |
 | `workspace/bin/atf-watcher.cjs` | 仓库内可见的 watcher v1：`scan-all -> execute-pending` 批量执行脚本 |
 | `workspace/bin/atf-action-watcher.cjs` | 仓库内可见的 action watcher：`action scan -> action execute-pending` |

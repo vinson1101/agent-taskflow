@@ -10,6 +10,21 @@ const { createRequire } = require('module');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const atfCliPath = path.join(repoRoot, 'atf-cli.js');
+const LAUNCHER_DISPATCH_MODES = ['manual', 'noop', 'sessions_spawn'];
+const LAUNCHER_DISPATCH_MODE_SET = new Set(LAUNCHER_DISPATCH_MODES);
+
+function normalizeMode(value) {
+  return String(value || '').trim().toLowerCase().replace(/-/g, '_');
+}
+
+function parseModeOption(flag, rawValue) {
+  const normalized = normalizeMode(rawValue);
+  if (!normalized) throw new Error(`${flag} requires a value`);
+  if (!LAUNCHER_DISPATCH_MODE_SET.has(normalized)) {
+    throw new Error(`invalid ${flag}: ${rawValue}. expected one of ${LAUNCHER_DISPATCH_MODES.join('|')}`);
+  }
+  return normalized;
+}
 
 function defaultOpenClawRoot() {
   const defaultRoot = process.platform === 'win32'
@@ -100,7 +115,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--agent') options.agent = argv[++i] || null;
     else if (arg === '--dispatcher') options.dispatcher = argv[++i] || options.dispatcher;
-    else if (arg === '--mode') options.mode = argv[++i] || null;
+    else if (arg === '--mode') options.mode = parseModeOption('--mode', argv[++i]);
     else if (arg === '--limit') {
       const value = Number(argv[++i]);
       options.limit = Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
@@ -131,7 +146,7 @@ Usage:
 Options:
   --agent <name>             Only scan / dispatch launch requests for one agent
   --dispatcher <name>        Dispatcher name written into launch records
-  --mode <mode>              Dispatch mode (manual|noop|sessions_spawn)
+  --mode <mode>              Dispatch mode (${LAUNCHER_DISPATCH_MODES.join('|')})
   --limit <n>                Max number of launch requests to dispatch
   --note <text>              Extra dispatch note
   --cooldown-minutes <n>     Cooldown used while scanning launch requests

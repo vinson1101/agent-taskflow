@@ -83,6 +83,8 @@ node atf-cli.js action execute T-001 ACT-xxx mode=noop
 
 当前支持 3 种动作执行模式：
 
+标准术语：`action pending_task -> <agentWorkspace>/pending-task.json`。这与 trigger 层默认落在 `<taskDir>/pending-task.json` 的 `pending_task` 是两条不同链路。
+
 - `message`
   - 生成一条 `atf.message.v1`
   - `from_agent=adapter-action`

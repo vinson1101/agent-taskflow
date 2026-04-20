@@ -37,6 +37,12 @@
 
 默认执行模式是 `pending_task`，会把 pending fire 落成任务目录下的 `pending-task.json`，同时把 execution 记录写进 `trigger-executions/`。如果显式使用 `mode=message` 或 `mode=room`，则会生成 `handoff` 消息，而不是任务文件信号。
 
+为避免后续文档再把三条链混成一句，当前统一使用下面三条标准术语：
+
+- `trigger pending_task -> <taskDir>/pending-task.json`
+- `action pending_task -> <agentWorkspace>/pending-task.json`
+- `launch -> ATF_DATA_DIR/pending-launch-requests.json / launch-inboxes/<agent>.json / launch-dispatch-payloads/<launchId>.json + env bridge`
+
 如果你已经把 Phase D 主动动作层接上，那么控制平面的完整链路推荐变成：
 
 1. `trigger scan-all`
@@ -50,7 +56,7 @@
 
 - `atf-watcher.cjs` 负责 Trigger 层
 - `atf-action-watcher.cjs` 负责主动 follow-up
-- `atf-launcher.cjs` 负责把目标 agent workspace 里的 `pending-task.json` 升格成统一 launch queue
+- `atf-launcher.cjs` 负责把目标 agent workspace 里的 `pending-task.json` 扫描成 `pending-launch-requests / launch-inboxes`，并在 dispatch 时写 `launch-dispatch-payloads`
 
 ## 2. 仓库内可见的 watcher v1
 
@@ -163,6 +169,12 @@ node atf-cli.js reflect from-fire T-001 TGF-xxx pinchymeow what_changed 这次�
   `message / room` adapter 的 handoff 投递物
 - `trigger-executions/*.json`
   fire 的执行审计记录
+
+如果把 launcher 也纳入控制面，则还需要额外关注：
+
+- `ATF_DATA_DIR/pending-launch-requests.json`
+- `ATF_DATA_DIR/launch-inboxes/<agent>.json`
+- `ATF_DATA_DIR/launch-dispatch-payloads/<launchId>.json`
 
 ## 5. 推荐 cron 频率
 

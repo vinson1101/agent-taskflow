@@ -42,21 +42,31 @@ ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作�
 
 ```mermaid
 flowchart LR
-  Repo["ATF Shared Repository<br/>ctx / focus / trigger / review / action / launch"] --> Control["Control Plane<br/>atf-cli + watcher + action watcher + launcher"]
+  Repo["Task Repository<br/>ctx / focus / trigger / review / action / messages"] --> Control["Control Plane<br/>atf-cli + watcher + action watcher + launcher"]
+  Data["ATF_DATA_DIR<br/>pending indexes / inboxes / launch queue / payloads"] --> Control["Control Plane<br/>atf-cli + watcher + action watcher + launcher"]
   Control --> Runtime["Wakeup Runtime<br/>sessions_spawn bridge + real backend"]
   Runtime --> Agents["Worker Agents<br/>huntmind / acestock / f0x / ..."]
-  Agents --> Workspace["Agent Workspaces<br/>pending-task / inbox / launch payload"]
-  Workspace --> Repo
+  Agents --> Workspace["Agent Workspaces<br/>action pending-task / runtime files"]
+  Workspace --> Data
   Agents --> Writeback["ATF Write-back<br/>status / review / receipts / reflections"]
   Writeback --> Repo
 ```
 
 这张图对应 ATF 当前的真实运行方式：
 
-- 任务事实和协作对象统一沉淀在共享任务仓库
+- 任务事实和协作对象主要沉淀在任务仓库
+- `ATF_DATA_DIR` 主要沉淀 pending 索引、agent inbox、launch queue、dispatch payload 和部分可重建投影
 - control-plane 负责扫描、补漏、动作执行和 launch dispatch
 - runtime 只负责按需唤醒 agent，不承担 ATF 的状态真相
 - worker 完成动作后必须回写 ATF，闭环才算成立
+
+**当前标准链路术语：**
+
+- `trigger pending_task -> <taskDir>/pending-task.json`
+- `action pending_task -> <agentWorkspace>/pending-task.json`
+- `launch -> ATF_DATA_DIR/pending-launch-requests.json / launch-inboxes/<agent>.json / launch-dispatch-payloads/<launchId>.json + env bridge`
+
+更细的 truth / queue / projection / audit 划分，见 [docs/ATF_STORAGE_MODEL.md](./docs/ATF_STORAGE_MODEL.md)。
 
 ## 非目标
 
@@ -80,6 +90,13 @@ flowchart LR
 - [docs/ATF_AUTONOMY_ROADMAP.md](./docs/ATF_AUTONOMY_ROADMAP.md) - 自主能力缺口与路线图
 - [docs/ATF_CAPABILITY_EVOLUTION.md](./docs/ATF_CAPABILITY_EVOLUTION.md) - 从当前实现到长期能力体系的演进图
 - [docs/ATF_EXTERNAL_REFERENCES.md](./docs/ATF_EXTERNAL_REFERENCES.md) - Clawith、BotCord 等外部参考及可吸收点
+- [docs/ATF_STORAGE_MODEL.md](./docs/ATF_STORAGE_MODEL.md) - task repo / `ATF_DATA_DIR` / workspace 的存储模型
+- [docs/ATF_DISPATCH_MATRIX.md](./docs/ATF_DISPATCH_MATRIX.md) - trigger / watcher / action / launch 的接口矩阵
+- [docs/ATF_INVARIANTS.md](./docs/ATF_INVARIANTS.md) - 当前已落地与未硬保证的不变量
+- [docs/ATF_POSITIONING_TEMPLATE.md](./docs/ATF_POSITIONING_TEMPLATE.md) - 对外定位与表述边界模板
+- [docs/ATF_REMEDIATION_MEMO.md](./docs/ATF_REMEDIATION_MEMO.md) - 当前阶段的整改优先级 memo
+- [docs/ATF_FORMAL_REVIEW.md](./docs/ATF_FORMAL_REVIEW.md) - 可直接对外使用的正式评审稿
+- [docs/ATF_EVIDENCE_MAP.md](./docs/ATF_EVIDENCE_MAP.md) - 正式评审常用结论到证据的对照表
 - [docs/ATF_RUNTIME_USAGE.md](./docs/ATF_RUNTIME_USAGE.md) - 当前 CLI 的实际调用说明
 - [docs/ATF_REPUTATION_LAYER.md](./docs/ATF_REPUTATION_LAYER.md) - Phase C Lite / 内部调度信誉层设计
 - [docs/ATF_WATCHER_INTEGRATION.md](./docs/ATF_WATCHER_INTEGRATION.md) - cron / watcher / heartbeat 集成说明
@@ -137,8 +154,11 @@ Execution & Control Plane
 
 ATF 的运行方式不是实时事件总线，而是：
 
-- 共享任务仓库保存事实和状态
-- agent 在自己的 workspace 上消费 `pending-task.json` / 消息 / launch 请求
+- 任务仓库存放任务事实与协作对象
+- `ATF_DATA_DIR` 存放 pending 索引、agent inbox、launch queue 和 dispatch payload
+- `trigger pending_task` 默认落到 `<taskDir>/pending-task.json`
+- `action pending_task` 默认落到 `<agentWorkspace>/pending-task.json`
+- `launch` 从 agent workspace 信号生成 launch queue，并在 dispatch 时写 `launch-dispatch-payloads`
 - watcher / control-plane 负责扫描、补漏、催办、唤醒和审计
 - 所有关键动作最终都要回写到 ATF，而不是停留在日志里
 

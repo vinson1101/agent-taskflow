@@ -11,6 +11,7 @@
     "start": "node index.js",
     "atf:watcher": "node workspace/bin/atf-watcher.cjs",
     "atf:watcher:dry": "node workspace/bin/atf-watcher.cjs --dry-run",
+    "atf:watcher:smoke": "node workspace/bin/atf-watcher-smoke.cjs",
     "atf:action:watcher": "node workspace/bin/atf-action-watcher.cjs",
     "atf:action:watcher:dry": "node workspace/bin/atf-action-watcher.cjs --dry-run",
     "atf:launcher": "node workspace/bin/atf-launcher.cjs",

@@ -27,7 +27,7 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - watcher 默认执行 `trigger scan-all -> trigger execute-pending`
 - 已可读取 `ATF_DATA_DIR/pending-trigger-fires.json`
 - 已可读取 `ATF_DATA_DIR/trigger-inboxes/*.json`
-- 默认执行模式会把 pending fire 落成 `pending-task.json`
+- 标准术语：`trigger pending_task -> <taskDir>/pending-task.json`
 - 已支持 `pending_task / message / room / noop` 4 种 adapter mode
 - 已支持显式 `handoff` payload，把任务/上下文/反思传给 adapter
 - 同时会写入 `trigger-executions/` 审计记录
@@ -80,6 +80,17 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 - 不同 Agent 的任务状态可以并行推进
 - 至少在 `pinchymeow` / `f0x` 场景下，异步运行保障链路已经有实际运行证据
 - `workspace/bin/atf-watcher.cjs` 的 `scan-all -> execute-pending` 链路已有本地隔离 smoke 证据
+
+## 当前标准链路术语
+
+- `trigger pending_task -> <taskDir>/pending-task.json`
+- `action pending_task -> <agentWorkspace>/pending-task.json`
+- `launch -> ATF_DATA_DIR/pending-launch-requests.json / launch-inboxes/<agent>.json / launch-dispatch-payloads/<launchId>.json + env bridge`
+
+注：
+
+- `assign`、`dlq retry` 等直接任务流也会复用任务目录下的 `pending-task.json`
+- 这不改变上面的三条标准术语；只是说明同一个 signal 文件会被多条链复用
 
 ## 当前系统性质
 

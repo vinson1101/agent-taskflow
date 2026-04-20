@@ -11,6 +11,21 @@ const { createRequire } = require('module');
 const repoRoot = path.resolve(__dirname, '..', '..');
 const atfCliPath = path.join(repoRoot, 'atf-cli.js');
 const RISK_LEVELS = ['low', 'medium', 'high', 'urgent'];
+const ACTION_WATCHER_EXECUTION_MODES = ['message', 'pending_task', 'noop'];
+const ACTION_WATCHER_EXECUTION_MODE_SET = new Set(ACTION_WATCHER_EXECUTION_MODES);
+
+function normalizeMode(value) {
+  return String(value || '').trim().toLowerCase().replace(/-/g, '_');
+}
+
+function parseModeOption(flag, rawValue) {
+  const normalized = normalizeMode(rawValue);
+  if (!normalized) throw new Error(`${flag} requires a value`);
+  if (!ACTION_WATCHER_EXECUTION_MODE_SET.has(normalized)) {
+    throw new Error(`invalid ${flag}: ${rawValue}. expected one of ${ACTION_WATCHER_EXECUTION_MODES.join('|')}`);
+  }
+  return normalized;
+}
 
 function defaultOpenClawRoot() {
   const defaultRoot = process.platform === 'win32'
@@ -113,7 +128,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--agent') options.agent = argv[++i] || null;
     else if (arg === '--executor') options.executor = argv[++i] || options.executor;
-    else if (arg === '--mode') options.mode = argv[++i] || null;
+    else if (arg === '--mode') options.mode = parseModeOption('--mode', argv[++i]);
     else if (arg === '--limit') {
       const value = Number(argv[++i]);
       options.limit = Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
@@ -158,7 +173,7 @@ Usage:
 Options:
   --agent <name>          Only plan and execute actions for one agent
   --executor <name>       Execution actor name written into action records
-  --mode <mode>           Force execution mode (message|pending_task|noop)
+  --mode <mode>           Force execution mode (${ACTION_WATCHER_EXECUTION_MODES.join('|')})
   --limit <n>             Max number of actions to execute
   --note <text>           Extra execution note
   --stale-days <n>        Threshold for stale review follow-up

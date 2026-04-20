@@ -4321,6 +4321,60 @@ function shouldArchiveLaunchRequestForWriteback(request, options = {}) {
   return null;
 }
 
+function reconcileLaunchWritebacksForTask(taskId, options = {}) {
+  if (!taskId) {
+    return {
+      task_id: null,
+      checked: 0,
+      touched: 0,
+      archived_count: 0,
+      archived: [],
+    };
+  }
+  const warnAfterMinutes = Number.isInteger(options.warn_after_minutes) && options.warn_after_minutes >= 0
+    ? options.warn_after_minutes
+    : 30;
+  const reconciler = options.reconciler || 'writeback-reconcile';
+  const evaluatedAt = options.evaluated_at || new Date().toISOString();
+  const activeRequests = readLaunchRequests().filter(request =>
+    ['pending', 'leased', 'failed'].includes(request.status)
+    && request.dispatched_at
+    && request.writeback?.required
+    && request.writeback.task_id === taskId
+  );
+  const archived = [];
+  let touched = 0;
+
+  for (const request of activeRequests) {
+    const evaluation = evaluateLaunchWriteback(request, {
+      warn_after_minutes: warnAfterMinutes,
+    });
+    if (!evaluation.tracked) continue;
+    persistLaunchWritebackEvaluation(request, evaluation, evaluatedAt);
+    touched += 1;
+    if (evaluation.status === 'confirmed' || evaluation.resolution === 'resolved') {
+      archiveLaunchRequest(request, reconciler, `writeback ${evaluation.resolution}: ${evaluation.code}`);
+      archived.push({
+        launch_id: request.launch_id,
+        status: evaluation.status,
+        resolution: evaluation.resolution,
+        code: evaluation.code,
+      });
+    } else {
+      saveLaunchRequest(request);
+    }
+  }
+
+  if (touched) refreshLaunchIndexes();
+  return {
+    task_id: taskId,
+    checked: activeRequests.length,
+    touched,
+    archived_count: archived.length,
+    archived,
+  };
+}
+
 function summarizeLaunchWritebackFollowUps(requests) {
   const emptyCounts = () => ({
     pending: 0,
@@ -6679,6 +6733,10 @@ switch (cmd) {
       })
     );
     console.log(`✅ ${taskId} → ${status}`);
+    reconcileLaunchWritebacksForTask(taskId, {
+      reconciler: 'update',
+      evaluated_at: now,
+    });
     if (firedTriggers.length) console.log(`   trigger fires: ${firedTriggers.map(f => f.fire_id).join(', ')}`);
     break;
   }
@@ -7612,6 +7670,10 @@ switch (cmd) {
           trigger_id: triggerId,
           fire_id: fireId,
           scores,
+        });
+        reconcileLaunchWritebacksForTask(taskId, {
+          reconciler: 'review-add',
+          evaluated_at: review.created_at,
         });
         buildReputationIndex();
         buildCreditsIndex();
@@ -10013,6 +10075,10 @@ switch (cmd) {
       };
       saveMessage(taskId, message);
       appendNotificationHistory(taskId, { event: 'message_sent', message_id: message.message_id, from: fromAgent, to: toAgent, type: messageType, thread_id: message.thread_id, focus_id: message.focus_id, at: message.created_at });
+      reconcileLaunchWritebacksForTask(taskId, {
+        reconciler: 'msg-send',
+        evaluated_at: message.created_at,
+      });
       const firedTriggers = fireMatchingTriggers(
         taskId,
         trigger => {
@@ -10429,7 +10495,12 @@ ${body}\n`;
     buildCreditsIndex();
     const hf = notificationHistoryPath(taskId);
     const deliveryActor = (args.find(part => typeof part === 'string' && part.startsWith('by=')) || '').replace(/^by=/, '') || null;
-    const h = loadJson(hf)||[]; h.push({event:'delivered',by:deliveryActor,at:new Date().toISOString()}); saveJson(hf,h.slice(-50));
+    const deliveredAt = new Date().toISOString();
+    const h = loadJson(hf)||[]; h.push({event:'delivered',by:deliveryActor,at:deliveredAt}); saveJson(hf,h.slice(-50));
+    reconcileLaunchWritebacksForTask(taskId, {
+      reconciler: 'delivered',
+      evaluated_at: deliveredAt,
+    });
     console.log(`✅ ${taskId} → delivered`);
     break;
   }

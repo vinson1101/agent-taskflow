@@ -578,10 +578,7 @@ function main() {
   if (staleReviewPrompt.includes(`review add ${staleTaskId} f0x f0x approved`)) throw new Error('stale review prompt must not suggest self review closure');
 
   runCli(['review', 'add', staleTaskId, 'huntmind', 'f0x', 'approved', 'smoke-review', 'type=task', 'overall=4'], env, options);
-  const launchScanAfterReviewWriteback = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=5'], env, options);
   const launchStatusAfterReviewWriteback = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
-  assertIncludes(launchScanAfterReviewWriteback, 'created=0', 'launch scan after review writeback');
-  assertIncludes(launchScanAfterReviewWriteback, 'archived=1', 'launch scan after review writeback');
   if (launchStatusAfterReviewWriteback.counts.pending !== 0) throw new Error(`expected no pending launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.pending}`);
   if (launchStatusAfterReviewWriteback.counts.leased !== 0) throw new Error(`expected no leased launch requests after review writeback, got ${launchStatusAfterReviewWriteback.counts.leased}`);
   if ((launchStatusAfterReviewWriteback.writeback?.total_counts?.confirmed || 0) < 1) {

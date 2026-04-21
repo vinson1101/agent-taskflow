@@ -167,6 +167,7 @@ function main() {
     ATF_TASKS_DIR: path.join(smokeRoot, 'tasks'),
     ATF_WORKSPACE_DIR: path.join(smokeRoot, 'workspace'),
     ATF_DATA_DIR: path.join(smokeRoot, 'data'),
+    ATF_WORKSPACE_PINCHYMEOW: path.join(smokeRoot, 'workspace-pinchymeow'),
   };
 
   for (const dir of Object.values(env)) {
@@ -196,7 +197,11 @@ function main() {
   const taskId = extractTaskId(createOutput);
   runCli(['assign', taskId, 'pinchymeow'], env, options);
   const taskDir = resolveTaskDir(taskId, env);
+  const workspacePendingTask = path.join(env.ATF_WORKSPACE_PINCHYMEOW, 'pending-task.json');
+  if (!fs.existsSync(workspacePendingTask)) throw new Error('expected assign to write workspace pending-task.json');
+  if (fs.existsSync(path.join(taskDir, 'pending-task.json'))) throw new Error('assign should not write taskDir/pending-task.json');
   fs.rmSync(path.join(taskDir, 'pending-task.json'), { force: true });
+  fs.rmSync(workspacePendingTask, { force: true });
 
   runCli(['trigger', 'follow-up', taskId, 'pinchymeow', '1s'], env, options);
   const watcherSummary = JSON.parse(runTriggerWatcher([

@@ -80,6 +80,12 @@ const LAUNCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const CONTROL_PLANE_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCH_REQUEST_STATUSES = new Set(['pending', 'leased', 'failed', 'archived']);
 const LAUNCH_DISPATCH_MODES = new Set(['manual', 'noop', 'sessions_spawn']);
+const TASK_STATUSES = new Set(['created', 'pending', 'assigned', 'confirmed', 'active', 'executing', 'paused', 'blocked', 'completed', 'delivered', 'cancelled', 'archived', 'unknown']);
+const TASK_STATUS_ALIASES = {
+  in_progress: 'active',
+  inprogress: 'active',
+  done: 'completed',
+};
 const REFLECTION_FIELDS = new Set(['what_changed', 'what_failed', 'what_should_repeat', 'what_needs_decision']);
 const REVIEW_TYPES = new Set(['task', 'delivery', 'collaboration']);
 const REVIEW_OUTCOMES = new Set(['approved', 'needs_revision', 'rejected']);
@@ -111,16 +117,56 @@ function saveJson(f, d) {
 function ctxPath(taskId)    { const d=dirOfTaskId(taskId);return `${TASKS_DIR}/${d}/ctx.json`; }
 function latestPath(taskId) { return `${TASKS_DIR}/${taskId}/latest.json`; }
 
+function normalizeTaskLifecycleStatus(status, fallback = 'unknown') {
+  if (status === null || status === undefined) return fallback;
+  const normalized = String(status).trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!normalized) return fallback;
+  const canonical = TASK_STATUS_ALIASES[normalized] || normalized;
+  return TASK_STATUSES.has(canonical) ? canonical : fallback;
+}
+
+function normalizeTaskProtocol(protocol = {}) {
+  const base = protocol && typeof protocol === 'object' && !Array.isArray(protocol) ? protocol : {};
+  return {
+    confirm_timeout: base.confirm_timeout ?? 300,
+    final_timeout: base.final_timeout ?? 7200,
+    retry_count: base.retry_count ?? 0,
+    max_retries: base.max_retries ?? 3,
+    delivery_status: base.delivery_status ?? 'pending',
+    delivery_attempts: base.delivery_attempts ?? 0,
+    ...base,
+  };
+}
+
+function normalizeTaskCtx(ctx = {}) {
+  if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) return ctx;
+  const normalizedStatus = ctx.status === null || ctx.status === undefined
+    ? 'created'
+    : normalizeTaskLifecycleStatus(ctx.status, 'unknown');
+  return {
+    ...ctx,
+    short_id: ctx.short_id || ctx.task_id || null,
+    status: normalizedStatus,
+    sub_tasks: Array.isArray(ctx.sub_tasks) ? ctx.sub_tasks : [],
+    protocol: normalizeTaskProtocol(ctx.protocol),
+    inputs: ctx.inputs && typeof ctx.inputs === 'object' && !Array.isArray(ctx.inputs) ? ctx.inputs : {},
+    outputs: ctx.outputs && typeof ctx.outputs === 'object' && !Array.isArray(ctx.outputs) ? ctx.outputs : {},
+    parent_id: ctx.parent_id || null,
+    assigned_to: ctx.assigned_to || null,
+    dri: ctx.dri || ctx.assigned_to || null,
+  };
+}
+
 function readCtx(taskId) {
   // 先尝试直接路径
   const direct = loadJson(ctxPath(taskId));
-  if (direct) return direct;
+  if (direct) return normalizeTaskCtx(direct);
   // 反向查找：T-049 → 目录名
-  if (taskId.startsWith('T-')) {
+  if (typeof taskId === 'string' && taskId.startsWith('T-')) {
     const dirs = fs.readdirSync(TASKS_DIR).filter(d => !d.startsWith('.') && !d.endsWith('.json') && d !== 'dlq');
     for (const d of dirs) {
       const ctx = loadJson(`${TASKS_DIR}/${d}/ctx.json`);
-      if (ctx && (ctx.task_id === taskId || ctx.short_id === taskId)) return ctx;
+      if (ctx && (ctx.task_id === taskId || ctx.short_id === taskId)) return normalizeTaskCtx(ctx);
     }
   }
   return null;
@@ -140,9 +186,36 @@ function dirOfTaskId(taskId) {
 
 function writeCtx(taskId, ctx) {
   const dir = dirOfTaskId(taskId);
-  ctx.updated_at = new Date().toISOString();
-  saveJson(ctxPath(dir), ctx);
-  saveJson(latestPath(dir), ctx);
+  const normalized = normalizeTaskCtx(ctx);
+  normalized.updated_at = new Date().toISOString();
+  saveJson(ctxPath(dir), normalized);
+  saveJson(latestPath(dir), normalized);
+}
+
+function isResolvedTaskStatus(status) {
+  const normalized = normalizeTaskLifecycleStatus(status, 'unknown');
+  return ['completed', 'delivered', 'cancelled', 'archived'].includes(normalized);
+}
+
+function isAwaitingConfirmationTaskStatus(status) {
+  const normalized = normalizeTaskLifecycleStatus(status, 'unknown');
+  return normalized === 'assigned' || normalized === 'confirmed';
+}
+
+function isInProgressTaskStatus(status) {
+  const normalized = normalizeTaskLifecycleStatus(status, 'unknown');
+  return normalized === 'active' || normalized === 'executing';
+}
+
+function classifyTaskProtocolPhase(status) {
+  const normalized = normalizeTaskLifecycleStatus(status, 'unknown');
+  if (normalized === 'created' || normalized === 'pending') return 'pending';
+  if (isAwaitingConfirmationTaskStatus(normalized)) return 'awaiting_confirmation';
+  if (isInProgressTaskStatus(normalized)) return 'in_progress';
+  if (normalized === 'paused') return 'paused';
+  if (normalized === 'blocked') return 'blocked';
+  if (isResolvedTaskStatus(normalized)) return 'resolved';
+  return 'unknown';
 }
 
 function taskDirPath(taskId) {
@@ -1405,6 +1478,60 @@ function resolveAgentWorkspace(agent) {
   return inferAgentWorkspace(agent);
 }
 
+function directWorkspacePendingTaskPath(agent) {
+  const workspace = resolveAgentWorkspace(agent);
+  if (!fs.existsSync(workspace)) fs.mkdirSync(workspace, { recursive: true });
+  return {
+    workspace,
+    file_path: path.join(workspace, 'pending-task.json'),
+  };
+}
+
+function removeLegacyTaskDirPendingTask(taskId) {
+  const pendingTaskPath = `${taskDirPath(taskId)}/pending-task.json`;
+  if (fs.existsSync(pendingTaskPath)) fs.unlinkSync(pendingTaskPath);
+  return pendingTaskPath;
+}
+
+function clearWorkspacePendingTaskForTask(taskId, agent) {
+  if (!agent) return null;
+  const refs = new Set([taskId]);
+  const ctx = readCtx(taskId);
+  if (ctx?.task_id) refs.add(ctx.task_id);
+  if (ctx?.short_id) refs.add(ctx.short_id);
+  const target = directWorkspacePendingTaskPath(agent);
+  if (!fs.existsSync(target.file_path)) return target.file_path;
+  const pendingTask = loadJson(target.file_path);
+  const pendingTaskId = pendingTask?.task_id || null;
+  if (!pendingTaskId || refs.has(pendingTaskId)) fs.unlinkSync(target.file_path);
+  return target.file_path;
+}
+
+function writeDirectTaskPendingSignal(taskId, ctx, payload = {}) {
+  const agent = payload.assigned_to || ctx.assigned_to;
+  if (!agent) throw new Error(`任务 ${taskId} 缺少 assigned_to，无法写入 agent workspace pending-task`);
+  const now = payload.created_at || new Date().toISOString();
+  const target = directWorkspacePendingTaskPath(agent);
+  const pendingTask = {
+    schema: payload.schema || 'atf.pending-task.v1',
+    task_id: ctx.short_id || ctx.task_id,
+    assigned_to: agent,
+    description: payload.description || ctx.description,
+    instructions: payload.instructions === undefined ? (ctx.instructions || null) : payload.instructions,
+    task_profile: payload.task_profile || getTaskProfile(ctx),
+    created_by: payload.created_by || 'pinchymeow',
+    created_at: now,
+    ...payload,
+  };
+  fs.writeFileSync(target.file_path, JSON.stringify(pendingTask, null, 2));
+  removeLegacyTaskDirPendingTask(taskId);
+  return {
+    workspace: target.workspace,
+    file_path: target.file_path,
+    pending_task: pendingTask,
+  };
+}
+
 function refreshTriggerIndexes() {
   const now = new Date().toISOString();
   const pendingFires = [];
@@ -2291,6 +2418,12 @@ function computeAgeMinutes(value, referenceTime = null) {
   return Math.floor(diffMs / (60 * 1000));
 }
 
+function addSecondsToIso(value, seconds) {
+  const date = parseIsoTimestamp(value);
+  if (!date || !Number.isFinite(seconds)) return null;
+  return new Date(date.getTime() + (seconds * 1000)).toISOString();
+}
+
 function getAgeBucketLabel(ageDays) {
   if (!Number.isInteger(ageDays) || ageDays < 0) return 'unknown';
   if (ageDays <= 1) return '0-1d';
@@ -2316,8 +2449,9 @@ function matchesAgeRange(ageDays, minAge = null, maxAge = null) {
 
 function getEffectiveTaskReviewStatus(ctx) {
   if (!ctx) return 'unknown';
-  if (ctx.status === 'delivered' || ctx.protocol?.delivery_status === 'delivered') return 'delivered';
-  return ctx.status || 'unknown';
+  const status = normalizeTaskLifecycleStatus(ctx.status, 'unknown');
+  if (status === 'delivered' || ctx.protocol?.delivery_status === 'delivered') return 'delivered';
+  return status;
 }
 
 function isReviewEligibleTaskStatus(status) {
@@ -3526,16 +3660,17 @@ function buildControlPlaneStatus(options = {}) {
     warn_after_minutes: warnAfterMinutes,
     limit: recentLimit,
   });
+  const taskProtocol = buildTaskProtocolStatus({
+    agent,
+    limit: recentLimit,
+  });
 
   let status = 'ok';
   let code = 'healthy';
-  if (!latestRun) {
-    status = 'never_run';
-    code = 'no_runs_recorded';
-  } else if (latestRun.status === 'failed') {
+  if (latestRun?.status === 'failed') {
     status = 'failed';
     code = 'latest_run_failed';
-  } else if (Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
+  } else if (latestRun && Number.isInteger(latestAgeMinutes) && latestAgeMinutes > warnAfterMinutes) {
     status = 'stale';
     code = 'latest_run_stale';
   } else if (actionWatcher.status === 'failed' || launcher.status === 'failed') {
@@ -3547,9 +3682,18 @@ function buildControlPlaneStatus(options = {}) {
   } else if (launcher.launch_queue.writeback?.active_counts?.stale > 0 || launcher.launch_queue.writeback?.active_counts?.missing_task > 0) {
     status = 'attention';
     code = 'writeback_stale';
+  } else if (taskProtocol.overdue > 0) {
+    status = 'attention';
+    code = 'task_protocol_overdue';
   } else if (triggerQueue.total > 0 || actionWatcher.pending_actions.total > 0 || launcher.launch_queue.counts.pending > 0 || launcher.launch_queue.counts.leased > 0) {
     status = 'active';
     code = 'pending_control_work';
+  } else if (taskProtocol.in_flight > 0) {
+    status = 'active';
+    code = 'pending_task_protocol_work';
+  } else if (!latestRun) {
+    status = 'never_run';
+    code = 'no_runs_recorded';
   } else if (latestRun?.idle) {
     status = 'idle';
     code = 'no_pending_control_work';
@@ -3589,6 +3733,7 @@ function buildControlPlaneStatus(options = {}) {
     action_watcher: actionWatcher,
     launcher,
     writeback: launcher.launch_queue.writeback || null,
+    task_protocol: taskProtocol,
   };
 }
 
@@ -6664,7 +6809,171 @@ function remapAgentReferences(fromAgent, toAgent, options = {}) {
 }
 
 function isActiveTaskStatus(status) {
-  return !['completed', 'delivered', 'cancelled', 'archived'].includes(status);
+  return !isResolvedTaskStatus(status);
+}
+
+function taskOwnedByAgent(ctx, agent) {
+  if (!agent) return true;
+  return [ctx?.assigned_to, ctx?.dri].filter(Boolean).includes(agent);
+}
+
+function applyTaskStatusTransition(ctx, nextStatus, options = {}) {
+  const now = options.at || new Date().toISOString();
+  const previousStatus = normalizeTaskLifecycleStatus(options.previous_status ?? ctx.status, 'unknown');
+  const normalizedStatus = normalizeTaskLifecycleStatus(nextStatus, 'unknown');
+  ctx.status = normalizedStatus;
+  ctx.protocol = normalizeTaskProtocol(ctx.protocol);
+
+  if (normalizedStatus === 'assigned') {
+    ctx.protocol.assigned_at = now;
+    delete ctx.protocol.confirmed_at;
+    delete ctx.protocol.started_at;
+    delete ctx.protocol.completed_at;
+  } else if (normalizedStatus === 'confirmed') {
+    if (!ctx.protocol.assigned_at) ctx.protocol.assigned_at = now;
+    ctx.protocol.confirmed_at = now;
+    delete ctx.protocol.started_at;
+    delete ctx.protocol.completed_at;
+  } else if (isInProgressTaskStatus(normalizedStatus)) {
+    if (!ctx.protocol.assigned_at) ctx.protocol.assigned_at = now;
+    if (!isInProgressTaskStatus(previousStatus) || !ctx.protocol.started_at) ctx.protocol.started_at = now;
+    delete ctx.protocol.completed_at;
+  } else if (['completed', 'delivered', 'cancelled', 'archived'].includes(normalizedStatus)) {
+    ctx.protocol.completed_at = now;
+  }
+
+  return ctx;
+}
+
+function evaluateTaskProtocolWatch(ctx, options = {}) {
+  const reference = options.reference_time instanceof Date
+    ? options.reference_time
+    : parseIsoTimestamp(options.reference_time) || new Date();
+  const normalized = normalizeTaskCtx(ctx);
+  const taskId = normalized.short_id || normalized.task_id || null;
+  const phase = classifyTaskProtocolPhase(normalized.status);
+  const protocol = normalized.protocol || normalizeTaskProtocol();
+  let anchorAt = normalized.updated_at || normalized.created_at || null;
+  let timeoutSeconds = null;
+  let timeoutType = null;
+  let tracked = false;
+  let code = phase;
+
+  if (phase === 'awaiting_confirmation') {
+    tracked = true;
+    timeoutType = 'confirm';
+    timeoutSeconds = protocol.confirm_timeout;
+    anchorAt = protocol.assigned_at || normalized.updated_at || normalized.created_at || null;
+    code = 'awaiting_confirmation';
+  } else if (phase === 'in_progress') {
+    tracked = true;
+    timeoutType = 'final';
+    timeoutSeconds = protocol.final_timeout;
+    anchorAt = protocol.started_at || protocol.confirmed_at || protocol.assigned_at || normalized.updated_at || normalized.created_at || null;
+    code = 'in_progress';
+  } else if (phase === 'pending') {
+    code = normalized.status === 'pending' ? 'pending_dispatch' : 'created_waiting_assignment';
+  } else if (phase === 'blocked') {
+    code = 'blocked_waiting_decision';
+  } else if (phase === 'paused') {
+    code = 'paused';
+  } else if (phase === 'resolved') {
+    code = 'resolved';
+  } else {
+    code = 'unknown_status';
+  }
+
+  const ageMinutes = anchorAt ? computeAgeMinutes(anchorAt, reference) : null;
+  const dueAt = tracked && anchorAt && Number.isInteger(timeoutSeconds) ? addSecondsToIso(anchorAt, timeoutSeconds) : null;
+  const overdue = tracked && Number.isInteger(timeoutSeconds) && Number.isInteger(ageMinutes)
+    ? (ageMinutes * 60) > timeoutSeconds
+    : false;
+  const monitorStatus = overdue
+    ? 'overdue'
+    : tracked
+      ? 'tracked'
+      : phase === 'resolved'
+        ? 'resolved'
+        : 'idle';
+
+  return {
+    task_id: taskId,
+    description: normalized.description || '',
+    assigned_to: normalized.assigned_to || null,
+    task_status: normalized.status,
+    phase,
+    tracked,
+    monitor_status: monitorStatus,
+    code: overdue ? `${timeoutType}_timeout` : code,
+    timeout_type: timeoutType,
+    timeout_seconds: Number.isInteger(timeoutSeconds) ? timeoutSeconds : null,
+    anchor_at: anchorAt,
+    due_at: dueAt,
+    age_minutes: ageMinutes,
+    overdue,
+  };
+}
+
+function buildTaskProtocolStatus(options = {}) {
+  const agent = isClearedValue(options.agent) ? null : String(options.agent || '').trim() || null;
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 10;
+  const reference = parseIsoTimestamp(options.reference_time) || new Date();
+  const rows = getAllTasks()
+    .filter(ctx => taskOwnedByAgent(ctx, agent))
+    .map(ctx => evaluateTaskProtocolWatch(ctx, { reference_time: reference }))
+    .sort((a, b) => {
+      const overdueDiff = Number(b.overdue) - Number(a.overdue);
+      if (overdueDiff) return overdueDiff;
+      const ageDiff = (b.age_minutes ?? -1) - (a.age_minutes ?? -1);
+      if (ageDiff) return ageDiff;
+      return (a.task_id || '').localeCompare(b.task_id || '');
+    });
+
+  const byPhase = {};
+  const byStatus = {};
+  let tracked = 0;
+  let overdue = 0;
+  let inFlight = 0;
+  let oldestOverdueMinutes = null;
+  let latestOverdue = null;
+
+  for (const row of rows) {
+    byPhase[row.phase] = (byPhase[row.phase] || 0) + 1;
+    byStatus[row.task_status] = (byStatus[row.task_status] || 0) + 1;
+    if (['pending', 'awaiting_confirmation', 'in_progress'].includes(row.phase)) inFlight += 1;
+    if (row.tracked) tracked += 1;
+    if (!row.overdue) continue;
+    overdue += 1;
+    if (oldestOverdueMinutes === null || (row.age_minutes ?? -1) > oldestOverdueMinutes) oldestOverdueMinutes = row.age_minutes ?? null;
+    if (!latestOverdue || (row.anchor_at || '') < (latestOverdue.anchor_at || '')) latestOverdue = row;
+  }
+
+  return {
+    schema: 'atf.task-protocol-status.v1',
+    scope: {
+      agent,
+      limit,
+    },
+    generated_at: new Date().toISOString(),
+    total: rows.length,
+    tracked,
+    in_flight: inFlight,
+    overdue,
+    oldest_overdue_minutes: oldestOverdueMinutes,
+    by_phase: byPhase,
+    by_status: byStatus,
+    latest_overdue: latestOverdue ? {
+      task_id: latestOverdue.task_id,
+      task_status: latestOverdue.task_status,
+      phase: latestOverdue.phase,
+      code: latestOverdue.code,
+      anchor_at: latestOverdue.anchor_at,
+      due_at: latestOverdue.due_at,
+      age_minutes: latestOverdue.age_minutes,
+      assigned_to: latestOverdue.assigned_to,
+    } : null,
+    items: rows.slice(0, limit),
+  };
 }
 
 function buildAssignmentRecommendations(taskId, options = {}) {
@@ -6744,7 +7053,7 @@ function getAllTasks() {
   for (const dir of dirs) {
     if (dir === 'dlq' || dir.endsWith('.json')) continue;
     const ctx = loadJson(`${TASKS_DIR}/${dir}/ctx.json`);
-    if (ctx) tasks.push(ctx);
+    if (ctx) tasks.push(normalizeTaskCtx(ctx));
   }
   return tasks;
 }
@@ -7040,12 +7349,14 @@ switch (cmd) {
     const da = ctx.protocol?.delivery_attempts || 0;
     const dri = ctx.dri || '-';
     const taskProfile = getTaskProfile(ctx);
+    const protocolWatch = evaluateTaskProtocolWatch(ctx);
     console.log(`\n任务: ${ctx.task_id} - ${ctx.description}`);
     console.log(`状态: ${ctx.status}  |  指派: ${ctx.assigned_to||'-'}  |  DRI: ${dri}`);
     console.log(`投递: ${ds} (${da}次)  |  重试: ${ctx.protocol?.retry_count||0}/${ctx.protocol?.max_retries||3}`);
     console.log(`创建: ${ctx.created_at}  |  更新: ${ctx.updated_at}`);
+    console.log(`Protocol: phase=${protocolWatch.phase}  monitor=${protocolWatch.monitor_status}  code=${protocolWatch.code}${protocolWatch.timeout_seconds !== null ? `  timeout=${protocolWatch.timeout_seconds}s` : ''}${protocolWatch.age_minutes !== null ? `  age=${protocolWatch.age_minutes}m` : ''}${protocolWatch.due_at ? `  due_at=${protocolWatch.due_at}` : ''}`);
     if (hasTaskProfile(taskProfile)) console.log(`Profile: ${formatTaskProfileSummary(taskProfile)}`);
-    if (ctx.sub_tasks.length) console.log(`子任务: ${ctx.sub_tasks.join(', ')}`);
+    if ((ctx.sub_tasks || []).length) console.log(`子任务: ${ctx.sub_tasks.join(', ')}`);
     if (ctx.parent_id) console.log(`父任务: ${ctx.parent_id}`);
     if (externalReviewSummary) {
       console.log(`Reviews: total=${externalReviewSummary.total}  approved=${externalReviewSummary.outcomes.approved}  needs_revision=${externalReviewSummary.outcomes.needs_revision}  rejected=${externalReviewSummary.outcomes.rejected}  avg_overall=${externalReviewSummary.avg_overall ?? '-'}`);
@@ -7093,34 +7404,30 @@ switch (cmd) {
     if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent> [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
-    ctx.assigned_to = agent; ctx.status = 'assigned';
+    const now = new Date().toISOString();
+    ctx.assigned_to = agent;
     if (!ctx.protocol) ctx.protocol = {};
     if (timeoutParsed.protocol.confirm_timeout !== undefined) ctx.protocol.confirm_timeout = timeoutParsed.protocol.confirm_timeout;
     if (timeoutParsed.protocol.final_timeout !== undefined) ctx.protocol.final_timeout = timeoutParsed.protocol.final_timeout;
     ctx.protocol.delivery_status = 'pending';
     ctx.protocol.delivery_attempts = 0;
+    applyTaskStatusTransition(ctx, 'assigned', { at: now });
     writeCtx(taskId, ctx);
     buildReputationIndex();
     buildCreditsIndex();
-    // 写 pending-task.json 通知 agent
-    const dir = dirOfTaskId(taskId);
-    const ws = `${TASKS_DIR}/${dir}`;
+    // 写 agent workspace pending-task，并接入正式 launch 链
     const pending = {
-      task_id: taskId,
       assigned_to: agent,
-      description: ctx.description,
-      instructions: ctx.instructions || null,
-      task_profile: getTaskProfile(ctx),
       protocol: {
         confirm_timeout: ctx.protocol.confirm_timeout,
         final_timeout: ctx.protocol.final_timeout,
       },
       created_by: ctx.assigned_to || 'pinchymeow',
-      created_at: new Date().toISOString()
+      created_at: now
     };
-    fs.writeFileSync(`${ws}/pending-task.json`, JSON.stringify(pending, null, 2));
+    const delivery = writeDirectTaskPendingSignal(taskId, ctx, pending);
     console.log(`✅ 已指派 ${taskId} → ${agent}`);
-    console.log(`   pending-task.json → ${ws}/pending-task.json`);
+    console.log(`   pending-task.json → ${delivery.file_path}`);
     console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
     if (hasTaskProfile(ctx)) console.log(`   task_profile: ${formatTaskProfileSummary(ctx)}`);
     const assigneeReputation = findAgentReputation(agent, loadReputationIndex());
@@ -7139,27 +7446,33 @@ switch (cmd) {
     if (!taskId || !status) { console.error('用法: atf update <taskId> <status>'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
+    const normalizedStatus = normalizeTaskLifecycleStatus(status, null);
+    if (!normalizedStatus) {
+      console.error(`❌ 非法 status: ${status}. expected one of ${[...TASK_STATUSES].join('|')}`);
+      break;
+    }
     const previousStatus = ctx.status;
     const now = new Date().toISOString();
-    ctx.status = status; writeCtx(taskId, ctx);
+    applyTaskStatusTransition(ctx, normalizedStatus, { at: now, previous_status: previousStatus });
+    writeCtx(taskId, ctx);
     buildReputationIndex();
     buildCreditsIndex();
-    appendNotificationHistory(taskId, { event: 'status_change', from: previousStatus, status, by: (args.find(part => typeof part === 'string' && part.startsWith('by=')) || '').replace(/^by=/, '') || null, at: now });
+    appendNotificationHistory(taskId, { event: 'status_change', from: previousStatus, status: normalizedStatus, by: (args.find(part => typeof part === 'string' && part.startsWith('by=')) || '').replace(/^by=/, '') || null, at: now });
     const firedTriggers = fireMatchingTriggers(
       taskId,
       trigger => {
         if (trigger.focus_id) return false;
         if (trigger.trigger_type === 'on_status_change') return true;
-        return status === 'blocked' && trigger.trigger_type === 'on_blocked';
+        return normalizedStatus === 'blocked' && trigger.trigger_type === 'on_blocked';
       },
       trigger => ({
-        source_type: status === 'blocked' && trigger.trigger_type === 'on_blocked' ? 'task_blocked' : 'task_status_change',
-        source_ref: status,
-        note: `${previousStatus || 'unknown'} -> ${status}`,
+        source_type: normalizedStatus === 'blocked' && trigger.trigger_type === 'on_blocked' ? 'task_blocked' : 'task_status_change',
+        source_ref: normalizedStatus,
+        note: `${previousStatus || 'unknown'} -> ${normalizedStatus}`,
         fired_by: 'update',
       })
     );
-    console.log(`✅ ${taskId} → ${status}`);
+    console.log(`✅ ${taskId} → ${normalizedStatus}`);
     reconcileLaunchWritebacksForTask(taskId, {
       reconciler: 'update',
       evaluated_at: now,
@@ -9539,6 +9852,10 @@ switch (cmd) {
       }
       console.log(`action_watcher=status:${status.action_watcher.status}  code:${status.action_watcher.code}  pending:${status.action_watcher.pending_actions.total}`);
       console.log(`launcher=status:${status.launcher.status}  code:${status.launcher.code}  pending:${status.launcher.launch_queue.counts.pending}  leased:${status.launcher.launch_queue.counts.leased}`);
+      console.log(`task_protocol=in_flight:${status.task_protocol.in_flight}  tracked:${status.task_protocol.tracked}  overdue:${status.task_protocol.overdue}${status.task_protocol.oldest_overdue_minutes !== null ? `  oldest_overdue=${status.task_protocol.oldest_overdue_minutes}m` : ''}`);
+      if (status.task_protocol.latest_overdue) {
+        console.log(`latest_task_protocol_overdue=${status.task_protocol.latest_overdue.task_id}  status=${status.task_protocol.latest_overdue.task_status}  phase=${status.task_protocol.latest_overdue.phase}  code=${status.task_protocol.latest_overdue.code}  age=${status.task_protocol.latest_overdue.age_minutes ?? '-'}m  due_at=${status.task_protocol.latest_overdue.due_at || '-'}`);
+      }
       if (status.writeback?.tracked) {
         console.log(`writeback=tracked:${status.writeback.tracked}  active_pending:${status.writeback.active_counts.pending}  active_stale:${status.writeback.active_counts.stale}  confirmed:${status.writeback.total_counts.confirmed}  inferred:${status.writeback.total_counts.inferred}`);
         console.log(`writeback_resolution=active_unresolved:${status.writeback.active_resolution_counts.unresolved}  active_acknowledged:${status.writeback.active_resolution_counts.acknowledged}  active_resolved:${status.writeback.active_resolution_counts.resolved}`);
@@ -10080,7 +10397,7 @@ switch (cmd) {
         console.error('用法: atf stats tasks [agent=x] [type=x] [status=x] [review=all|pending|reviewed|approved|needs_revision|rejected|na] [min_age=N] [max_age=N] [limit=N]');
         break;
       }
-      if (statusFilter && !['created', 'assigned', 'confirmed', 'executing', 'paused', 'blocked', 'completed', 'delivered', 'cancelled', 'archived', 'unknown'].includes(statusFilter)) {
+      if (statusFilter && !TASK_STATUSES.has(normalizeTaskLifecycleStatus(statusFilter, ''))) {
         console.error('stats tasks status 不合法');
         break;
       }
@@ -10779,27 +11096,24 @@ switch (cmd) {
         console.log('用 atf dlq skip 跳过 或 atf dlq cancel 取消');
         break;
       }
-      ctx.status = 'assigned';
+      const now = new Date().toISOString();
       ctx.protocol = ctx.protocol || {};
       ctx.protocol.retry_count = newRetry;
       ctx.dlq_entry = null;
-      ctx.updated_at = new Date().toISOString();
+      applyTaskStatusTransition(ctx, 'assigned', { at: now });
       writeCtx(taskId, ctx);
       buildReputationIndex();
       buildCreditsIndex();
       fs.unlinkSync(dlqFile);
-      // 写 pending-task.json 通知 agent
-      const ws = resolveAgentWorkspace(ctx.assigned_to);
       const pending = {
-        task_id: ctx.task_id,
-        description: ctx.description,
+        assigned_to: ctx.assigned_to,
         task_profile: getTaskProfile(ctx),
-        assigned_at: new Date().toISOString(),
+        assigned_at: now,
         retry_count: newRetry,
       };
-      fs.writeFileSync(`${ws}/pending-task.json`, JSON.stringify(pending, null, 2));
+      const delivery = writeDirectTaskPendingSignal(taskId, ctx, pending);
       console.log(`✅ ${taskId} 重试 (${newRetry}/${maxRetries})，已写入 pending-task.json`);
-      console.log(`   → ${ws}/pending-task.json`);
+      console.log(`   → ${delivery.file_path}`);
       break;
     }
 
@@ -10951,15 +11265,14 @@ ${body}\n`;
     if (!taskId) { console.error('用法: atf delivered <taskId>'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
-    ctx.status = 'delivered';
-    ctx.protocol = ctx.protocol || {};
+    const deliveredAt = new Date().toISOString();
     ctx.protocol.delivery_status = 'delivered';
+    applyTaskStatusTransition(ctx, 'delivered', { at: deliveredAt });
     writeCtx(taskId, ctx);
     buildReputationIndex();
     buildCreditsIndex();
     const hf = notificationHistoryPath(taskId);
     const deliveryActor = (args.find(part => typeof part === 'string' && part.startsWith('by=')) || '').replace(/^by=/, '') || null;
-    const deliveredAt = new Date().toISOString();
     const h = loadJson(hf)||[]; h.push({event:'delivered',by:deliveryActor,at:deliveredAt}); saveJson(hf,h.slice(-50));
     reconcileLaunchWritebacksForTask(taskId, {
       reconciler: 'delivered',
@@ -10992,7 +11305,7 @@ ${body}\n`;
     const now = new Date().toISOString();
 
     // 更新 ctx
-    ctx.status = 'blocked';
+    applyTaskStatusTransition(ctx, 'blocked', { at: now });
     ctx.decision = { status: 'waiting', question, asked_at: now };
     writeCtx(taskId, ctx);
 
@@ -11033,13 +11346,13 @@ ${body}\n`;
     saveJson(pdJsonPath, jList);
 
     // 删除 pending-task.json（阻塞时不让 agent 继续拿任务）
-    const dir = dirOfTaskId(taskId);
-    const ptPath = `${TASKS_DIR}/${dir}/pending-task.json`;
-    if (fs.existsSync(ptPath)) fs.unlinkSync(ptPath);
+    removeLegacyTaskDirPendingTask(taskId);
+    const workspacePendingPath = clearWorkspacePendingTaskForTask(taskId, ctx.assigned_to);
 
     console.log(`✅ ${taskId} 已阻塞，等待决策`);
     console.log(`   问题: ${question}`);
     console.log(`   → pending-decisions.md 已更新`);
+    if (workspacePendingPath) console.log(`   → workspace pending-task 已清理: ${workspacePendingPath}`);
     break;
   }
 
@@ -11054,24 +11367,17 @@ ${body}\n`;
     const now = new Date().toISOString();
 
     // 更新 ctx
-    ctx.status = 'assigned';
+    applyTaskStatusTransition(ctx, 'assigned', { at: now });
     ctx.decision = { status: 'decided', question: ctx.decision.question, answer, decided_at: now };
     writeCtx(taskId, ctx);
 
-    // 写 pending-task.json 恢复 agent 执行
-    const dir = dirOfTaskId(taskId);
-    const ptPath = `${TASKS_DIR}/${dir}/pending-task.json`;
     const pending = {
-      task_id: taskId,
       assigned_to: ctx.assigned_to,
-      description: ctx.description,
-      instructions: ctx.instructions || null,
-      task_profile: getTaskProfile(ctx),
       decision: { type: 'answered', question: ctx.decision.question, answer },
       created_by: 'pinchymeow',
       created_at: now,
     };
-    fs.writeFileSync(ptPath, JSON.stringify(pending, null, 2));
+    const delivery = writeDirectTaskPendingSignal(taskId, ctx, pending);
 
     // Update pending-decisions.json (Watcher reads this)
     const pdJsonPath = PENDING_DECISIONS_JSON;
@@ -11090,7 +11396,7 @@ ${body}\n`;
     console.log(`✅ ${taskId} 决策已收到，继续执行`);
     console.log(`   问题: ${ctx.decision.question}`);
     console.log(`   回答: ${answer}`);
-    console.log(`   → pending-task.json 已写入，agent 继续执行`);
+    console.log(`   → pending-task.json 已写入，agent 继续执行: ${delivery.file_path}`);
     break;
   }
 
@@ -11104,28 +11410,21 @@ ${body}\n`;
     const now = new Date().toISOString();
 
     // 更新 ctx
-    ctx.status = 'assigned';
+    applyTaskStatusTransition(ctx, 'assigned', { at: now });
     ctx.decision = { status: 'needs_revision', feedback, revised_at: now };
     writeCtx(taskId, ctx);
 
-    // 写 pending-task.json 通知 agent 重做
-    const dir = dirOfTaskId(taskId);
-    const ptPath = `${TASKS_DIR}/${dir}/pending-task.json`;
     const pending = {
-      task_id: taskId,
       assigned_to: ctx.assigned_to,
-      description: ctx.description,
-      instructions: ctx.instructions || null,
-      task_profile: getTaskProfile(ctx),
       decision: { type: 'revision', feedback },
       created_by: 'pinchymeow',
       created_at: now,
     };
-    fs.writeFileSync(ptPath, JSON.stringify(pending, null, 2));
+    const delivery = writeDirectTaskPendingSignal(taskId, ctx, pending);
 
     console.log(`✅ ${taskId} 已打回重做`);
     console.log(`   反馈: ${feedback}`);
-    console.log(`   → pending-task.json 已写入，agent 重新执行`);
+    console.log(`   → pending-task.json 已写入，agent 重新执行: ${delivery.file_path}`);
     break;
   }
 

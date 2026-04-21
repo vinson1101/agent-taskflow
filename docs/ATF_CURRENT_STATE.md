@@ -89,8 +89,8 @@ ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭
 
 注：
 
-- `assign`、`dlq retry` 等直接任务流也会复用任务目录下的 `pending-task.json`
-- 这不改变上面的三条标准术语；只是说明同一个 signal 文件会被多条链复用
+- `assign`、`revise`、`decide`、`dlq retry` 等直接任务流当前会把 signal 写到 `<agentWorkspace>/pending-task.json`
+- `trigger pending_task` 仍然落在 `<taskDir>/pending-task.json`；direct task flow 与 action / launch 共享的是 agent workspace signal，不再复用 task-dir signal
 
 ## 当前系统性质
 

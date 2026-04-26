@@ -209,6 +209,32 @@ function main() {
 
   runCli(['agent', 'register', 'f0x', `workspace=${env.ATF_WORKSPACE_F0X}`], env, options);
 
+  const timeoutCreateOutput = runCli(['create', 'Timeout shorthand create demo', 'type=ops', 'difficulty=1', 'priority=low', '--timeout=1h'], env, options);
+  const timeoutCreateTaskId = extractTaskId(timeoutCreateOutput);
+  const timeoutCreateCtx = readJson(path.join(resolveTaskDir(timeoutCreateTaskId, env), 'ctx.json'));
+  if (timeoutCreateCtx.protocol?.final_timeout !== 3600) throw new Error(`expected --timeout create final_timeout=3600, got ${timeoutCreateCtx.protocol?.final_timeout}`);
+  if (timeoutCreateCtx.protocol?.confirm_timeout !== 3300) throw new Error(`expected --timeout create confirm_timeout=3300, got ${timeoutCreateCtx.protocol?.confirm_timeout}`);
+  runCli(['update', timeoutCreateTaskId, 'completed'], env, options);
+
+  const timeoutOverrideOutput = runCli(['create', 'Timeout shorthand override demo', 'type=ops', 'difficulty=1', 'priority=low', '--timeout=1h', '--confirm-timeout=50m'], env, options);
+  const timeoutOverrideTaskId = extractTaskId(timeoutOverrideOutput);
+  const timeoutOverrideCtx = readJson(path.join(resolveTaskDir(timeoutOverrideTaskId, env), 'ctx.json'));
+  if (timeoutOverrideCtx.protocol?.final_timeout !== 3600) throw new Error(`expected override final_timeout=3600, got ${timeoutOverrideCtx.protocol?.final_timeout}`);
+  if (timeoutOverrideCtx.protocol?.confirm_timeout !== 3000) throw new Error(`expected override confirm_timeout=3000, got ${timeoutOverrideCtx.protocol?.confirm_timeout}`);
+  runCli(['update', timeoutOverrideTaskId, 'completed'], env, options);
+
+  const timeoutAssignOutput = runCli(['create', 'Timeout shorthand assign demo', 'type=ops', 'difficulty=1', 'priority=low'], env, options);
+  const timeoutAssignTaskId = extractTaskId(timeoutAssignOutput);
+  runCli(['assign', timeoutAssignTaskId, 'f0x', '--timeout=45m'], env, options);
+  const timeoutAssignCtx = readJson(path.join(resolveTaskDir(timeoutAssignTaskId, env), 'ctx.json'));
+  if (timeoutAssignCtx.protocol?.final_timeout !== 2700) throw new Error(`expected --timeout assign final_timeout=2700, got ${timeoutAssignCtx.protocol?.final_timeout}`);
+  if (timeoutAssignCtx.protocol?.confirm_timeout !== 2400) throw new Error(`expected --timeout assign confirm_timeout=2400, got ${timeoutAssignCtx.protocol?.confirm_timeout}`);
+  const timeoutAssignPending = readJson(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'));
+  if (timeoutAssignPending.protocol?.final_timeout !== 2700) throw new Error(`expected assign pending final_timeout=2700, got ${timeoutAssignPending.protocol?.final_timeout}`);
+  if (timeoutAssignPending.protocol?.confirm_timeout !== 2400) throw new Error(`expected assign pending confirm_timeout=2400, got ${timeoutAssignPending.protocol?.confirm_timeout}`);
+  fs.rmSync(path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'), { force: true });
+  runCli(['update', timeoutAssignTaskId, 'completed'], env, options);
+
   const directFlowOutput = runCli(['create', 'Direct pending signal demo', 'type=ops', 'difficulty=1', 'priority=low'], env, options);
   const directFlowTaskId = extractTaskId(directFlowOutput);
   runCli(['assign', directFlowTaskId, 'f0x'], env, options);

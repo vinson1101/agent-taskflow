@@ -415,6 +415,32 @@ function parseProtocolTimeoutValue(raw, fieldName) {
   return { value: seconds };
 }
 
+function deriveConfirmTimeoutFromFinalTimeout(finalTimeoutSeconds) {
+  if (!Number.isInteger(finalTimeoutSeconds) || finalTimeoutSeconds <= 0) return null;
+  const leadSeconds = 5 * 60;
+  if (finalTimeoutSeconds > leadSeconds) return finalTimeoutSeconds - leadSeconds;
+  return Math.max(1, Math.floor(finalTimeoutSeconds * 0.9));
+}
+
+function expandUnifiedProtocolTimeouts(protocol = {}) {
+  const expanded = { ...protocol };
+  const requestedTimeout = Number.isInteger(expanded.timeout) && expanded.timeout > 0 ? expanded.timeout : null;
+  delete expanded.timeout;
+
+  if (requestedTimeout !== null && expanded.final_timeout === undefined) {
+    expanded.final_timeout = requestedTimeout;
+  }
+
+  const finalTimeout = Number.isInteger(expanded.final_timeout) && expanded.final_timeout > 0
+    ? expanded.final_timeout
+    : null;
+  if (requestedTimeout !== null && expanded.confirm_timeout === undefined && finalTimeout !== null) {
+    expanded.confirm_timeout = deriveConfirmTimeoutFromFinalTimeout(finalTimeout);
+  }
+
+  return expanded;
+}
+
 function parseProtocolTimeoutArgs(parts = []) {
   const protocol = {};
   const remainingParts = [];
@@ -436,6 +462,10 @@ function parseProtocolTimeoutArgs(parts = []) {
       consumeField('confirm_timeout', part.substring('confirm_timeout='.length));
       continue;
     }
+    if (part.startsWith('timeout=')) {
+      consumeField('timeout', part.substring('timeout='.length));
+      continue;
+    }
     if (part.startsWith('final_timeout=')) {
       consumeField('final_timeout', part.substring('final_timeout='.length));
       continue;
@@ -452,14 +482,22 @@ function parseProtocolTimeoutArgs(parts = []) {
       consumeField('confirm_timeout', part.substring('--confirm-timeout='.length));
       continue;
     }
+    if (part.startsWith('--timeout=')) {
+      consumeField('timeout', part.substring('--timeout='.length));
+      continue;
+    }
     if (part.startsWith('--final-timeout=')) {
       consumeField('final_timeout', part.substring('--final-timeout='.length));
       continue;
     }
-    if (part === '--confirm-timeout' || part === '--final-timeout') {
-      const fieldName = part === '--confirm-timeout' ? 'confirm_timeout' : 'final_timeout';
+    if (part === '--confirm-timeout' || part === '--timeout' || part === '--final-timeout') {
+      const fieldName = part === '--confirm-timeout'
+        ? 'confirm_timeout'
+        : part === '--final-timeout'
+          ? 'final_timeout'
+          : 'timeout';
       const raw = parts[i + 1];
-      if (raw === undefined) errors.push(`${fieldName} 缺少值`);
+      if (raw === undefined) errors.push(`${fieldName} missing value`);
       else consumeField(fieldName, raw);
       i += 1;
       continue;
@@ -7275,9 +7313,10 @@ switch (cmd) {
     const parsed = parseTaskProfileArgs(timeoutParsed.remainingParts);
     if (parsed.errors.length) { console.error(`❌ ${parsed.errors.join('；')}`); break; }
     const description = parsed.descriptionTokens.join(' ');
-    if (!description) { console.error('用法: atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b] [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
+    if (!description) { console.error('用法: atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b] [--timeout=1h] [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
+    const protocolTimeouts = expandUnifiedProtocolTimeouts(timeoutParsed.protocol);
     const num = getNextTaskNum();
-    const { taskId, dirName, ctx } = initCtx(num, description, { task_profile: parsed.profile, ...timeoutParsed.protocol });
+    const { taskId, dirName, ctx } = initCtx(num, description, { task_profile: parsed.profile, ...protocolTimeouts });
     console.log(`\n✅ 任务已创建: ${dirName}`);
     console.log(`   task_id: ${ctx.task_id}  |  status: ${ctx.status}`);
     console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
@@ -7401,14 +7440,15 @@ switch (cmd) {
     const [taskId, agent, ...rest] = args;
     const timeoutParsed = parseProtocolTimeoutArgs(rest);
     if (timeoutParsed.errors.length) { console.error(`❌ ${timeoutParsed.errors.join('；')}`); break; }
-    if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent> [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
+    if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent> [--timeout=1h] [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
     const now = new Date().toISOString();
     ctx.assigned_to = agent;
+    const protocolTimeouts = expandUnifiedProtocolTimeouts(timeoutParsed.protocol);
     if (!ctx.protocol) ctx.protocol = {};
-    if (timeoutParsed.protocol.confirm_timeout !== undefined) ctx.protocol.confirm_timeout = timeoutParsed.protocol.confirm_timeout;
-    if (timeoutParsed.protocol.final_timeout !== undefined) ctx.protocol.final_timeout = timeoutParsed.protocol.final_timeout;
+    if (protocolTimeouts.confirm_timeout !== undefined) ctx.protocol.confirm_timeout = protocolTimeouts.confirm_timeout;
+    if (protocolTimeouts.final_timeout !== undefined) ctx.protocol.final_timeout = protocolTimeouts.final_timeout;
     ctx.protocol.delivery_status = 'pending';
     ctx.protocol.delivery_attempts = 0;
     applyTaskStatusTransition(ctx, 'assigned', { at: now });

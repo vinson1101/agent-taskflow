@@ -134,6 +134,13 @@ function extractTaskId(output) {
   return match[0];
 }
 
+function extractId(output, prefix) {
+  const regex = new RegExp(`${prefix}-\\d{8}-[a-f0-9]+`);
+  const match = output.match(regex);
+  if (!match) throw new Error(`${prefix} id not found in output:\n${output}`);
+  return match[0];
+}
+
 function assertIncludes(output, fragment, label) {
   if (!output.includes(fragment)) {
     throw new Error(`${label} missing fragment: ${fragment}\n--- output ---\n${output}`);
@@ -260,6 +267,43 @@ function main() {
   if (fs.existsSync(path.join(directFlowTaskDir, 'pending-task.json'))) throw new Error('revise should not write task-dir pending-task.json');
   fs.rmSync(directWorkspacePendingPath, { force: true });
   runCli(['update', directFlowTaskId, 'completed'], env, options);
+
+  const messageWakeOutput = runCli(['create', 'Message wake signal demo', 'type=ops', 'difficulty=1', 'priority=low'], env, options);
+  const messageWakeTaskId = extractTaskId(messageWakeOutput);
+  const messageWakeSendOutput = runCli(['msg', 'send', messageWakeTaskId, 'pinchymeow', 'f0x', 'request', 'Please confirm the message wake path'], env, options);
+  const messageWakeMessageId = extractId(messageWakeSendOutput, 'MSG');
+  const messageSignalPath = path.join(env.ATF_WORKSPACE_F0X, 'pending-messages', `${messageWakeMessageId}.json`);
+  if (!fs.existsSync(messageSignalPath)) throw new Error('expected msg send to write workspace pending message signal');
+  const messageSignal = readJson(messageSignalPath);
+  if (messageSignal.task_id !== messageWakeTaskId) throw new Error(`expected message signal task_id ${messageWakeTaskId}, got ${messageSignal.task_id}`);
+  if (messageSignal.message_id !== messageWakeMessageId) throw new Error(`expected message signal message_id ${messageWakeMessageId}, got ${messageSignal.message_id}`);
+  if (messageSignal.to_agent !== 'f0x') throw new Error(`expected message signal to_agent=f0x, got ${messageSignal.to_agent}`);
+
+  const messageLaunchScan = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=0'], env, options);
+  assertIncludes(messageLaunchScan, 'created=1', 'message launch scan');
+  const messageLaunchRequests = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json'));
+  const messageLaunchRequest = messageLaunchRequests.items.find(item =>
+    item.source_type === 'message'
+    && item.source_ref === messageWakeMessageId
+  );
+  if (!messageLaunchRequest) throw new Error('expected pending message launch request');
+  if (messageLaunchRequest.payload?.message_id !== messageWakeMessageId) throw new Error(`expected message launch payload message_id ${messageWakeMessageId}, got ${messageLaunchRequest.payload?.message_id}`);
+
+  const messageLaunchDispatch = runCli(['launch', 'dispatch', messageLaunchRequest.launch_id, 'dispatcher=control-plane-smoke', 'mode=noop', 'lease_minutes=5'], env, options);
+  assertIncludes(messageLaunchDispatch, 'mode: noop', 'message launch dispatch');
+  const messageLaunchLeased = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  const confirmedBeforeAck = messageLaunchLeased.writeback?.total_counts?.confirmed || 0;
+  if (messageLaunchLeased.counts.leased !== 1) throw new Error(`expected message launch leased count=1, got ${messageLaunchLeased.counts.leased}`);
+  if (messageLaunchLeased.writeback?.latest?.task_id !== messageWakeTaskId) throw new Error(`expected latest message launch writeback task ${messageWakeTaskId}, got ${messageLaunchLeased.writeback?.latest?.task_id}`);
+  if (messageLaunchLeased.writeback?.latest?.resolution !== 'unresolved') throw new Error(`expected latest message launch unresolved before ack, got ${messageLaunchLeased.writeback?.latest?.resolution}`);
+
+  runCli(['msg', 'ack', messageWakeTaskId, messageWakeMessageId, 'f0x', 'acked'], env, options);
+  if (fs.existsSync(messageSignalPath)) throw new Error('expected msg ack to clear pending message signal');
+  const messageLaunchAfterAck = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  if (messageLaunchAfterAck.counts.leased !== 0) throw new Error(`expected no leased message launches after ack, got ${messageLaunchAfterAck.counts.leased}`);
+  if ((messageLaunchAfterAck.writeback?.total_counts?.confirmed || 0) <= confirmedBeforeAck) throw new Error(`expected confirmed message launch writeback to increase after ack, got before=${confirmedBeforeAck} after=${messageLaunchAfterAck.writeback?.total_counts?.confirmed}`);
+  if (messageLaunchAfterAck.writeback?.latest?.resolution !== 'resolved') throw new Error(`expected latest message launch resolution resolved after ack, got ${messageLaunchAfterAck.writeback?.latest?.resolution}`);
+  if (messageLaunchAfterAck.writeback?.latest?.resolution_code !== 'receipt_recorded') throw new Error(`expected latest message launch resolution_code receipt_recorded, got ${messageLaunchAfterAck.writeback?.latest?.resolution_code}`);
 
   const legacyStatusOutput = runCli(['create', 'Legacy status compatibility demo', 'type=ops', 'difficulty=1', 'priority=low'], env, options);
   const legacyStatusTaskId = extractTaskId(legacyStatusOutput);
@@ -409,6 +453,8 @@ function main() {
   }
 
   const launchStatus = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
+  const confirmedBeforeExecuting = launchStatus.writeback?.total_counts?.confirmed || 0;
+  const acknowledgedBeforeExecuting = launchStatus.writeback?.total_resolution_counts?.acknowledged || 0;
   if (launchStatus.counts.leased !== 1) throw new Error(`expected leased launch count=1, got ${launchStatus.counts.leased}`);
   if (launchStatus.writeback?.active_counts?.pending !== 1) throw new Error(`expected launch writeback pending=1, got ${launchStatus.writeback?.active_counts?.pending}`);
 
@@ -432,8 +478,8 @@ function main() {
   runCli(['update', staleTaskId, 'executing', 'by=f0x'], env, options);
   const launchStatusAcknowledged = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));
   const controlPlaneStatusAcknowledged = JSON.parse(runCli(['control-plane', 'status', 'f0x', 'warn_after_minutes=30', 'limit=5', 'json'], env, options));
-  if (launchStatusAcknowledged.writeback?.total_counts?.confirmed !== 1) throw new Error(`expected confirmed launch writeback=1 after ack, got ${launchStatusAcknowledged.writeback?.total_counts?.confirmed}`);
-  if (launchStatusAcknowledged.writeback?.total_resolution_counts?.acknowledged !== 1) throw new Error(`expected total acknowledged launch writeback=1, got ${launchStatusAcknowledged.writeback?.total_resolution_counts?.acknowledged}`);
+  if ((launchStatusAcknowledged.writeback?.total_counts?.confirmed || 0) <= confirmedBeforeExecuting) throw new Error(`expected confirmed launch writeback to increase after executing writeback, got before=${confirmedBeforeExecuting} after=${launchStatusAcknowledged.writeback?.total_counts?.confirmed}`);
+  if ((launchStatusAcknowledged.writeback?.total_resolution_counts?.acknowledged || 0) <= acknowledgedBeforeExecuting) throw new Error(`expected acknowledged launch writeback to increase after executing writeback, got before=${acknowledgedBeforeExecuting} after=${launchStatusAcknowledged.writeback?.total_resolution_counts?.acknowledged}`);
   if (launchStatusAcknowledged.writeback?.latest?.resolution !== 'acknowledged') throw new Error(`expected latest launch writeback resolution acknowledged, got ${launchStatusAcknowledged.writeback?.latest?.resolution}`);
   if (launchStatusAcknowledged.counts.leased !== 0) throw new Error(`expected no leased launch requests after acknowledged writeback, got ${launchStatusAcknowledged.counts.leased}`);
   if (launchStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged !== 0) throw new Error(`expected no active acknowledged writebacks after immediate archive, got ${launchStatusAcknowledged.writeback?.active_resolution_counts?.acknowledged}`);

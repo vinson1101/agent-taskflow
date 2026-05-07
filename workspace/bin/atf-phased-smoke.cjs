@@ -300,6 +300,14 @@ function main() {
   const closedMessageId = extractId(closedMessageOutput, 'MSG');
   setMessageCreatedAt(closedTaskId, env, closedMessageId, new Date(Date.now() - (13 * 60 * 60 * 1000)).toISOString());
 
+  const receiptClosedOutput = runCli(['create', 'Phase D receipt close demo', 'type=research', 'difficulty=2', 'priority=normal'], env, options);
+  const receiptClosedTaskId = extractTaskId(receiptClosedOutput);
+  runCli(['assign', receiptClosedTaskId, 'claude'], env, options);
+  const receiptClosedMessageOutput = runCli(['msg', 'send', receiptClosedTaskId, 'claude', 'pinchymeow', 'request', 'Please confirm receipt of this request'], env, options);
+  const receiptClosedMessageId = extractId(receiptClosedMessageOutput, 'MSG');
+  setMessageCreatedAt(receiptClosedTaskId, env, receiptClosedMessageId, new Date(Date.now() - (13 * 60 * 60 * 1000)).toISOString());
+  runCli(['msg', 'ack', receiptClosedTaskId, receiptClosedMessageId, 'pinchymeow', 'acked'], env, options);
+
   const unknownOutput = runCli(['create', 'Phase D unknown owner demo', 'type=research', 'difficulty=2', 'priority=normal'], env, options);
   const unknownTaskId = extractTaskId(unknownOutput);
   runCli(['assign', unknownTaskId, 'claude'], env, options);
@@ -329,6 +337,9 @@ function main() {
   assertIncludes(actionScanAgain, 'duplicates=5', 'action scan dedupe');
   if (pendingActions.total !== 5) {
     throw new Error(`expected 5 pending actions after scan, got ${pendingActions.total}`);
+  }
+  if (pendingActions.items.some(item => item.task_id === receiptClosedTaskId && item.kind === 'pending_reply_follow_up')) {
+    throw new Error('receipt-closed request should not produce pending_reply_follow_up');
   }
   for (const item of pendingActions.items) {
     if (!Number.isFinite(item.confidence)) throw new Error(`action ${item.action_id} missing confidence`);
@@ -562,6 +573,27 @@ function main() {
       pending_task_path: path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'),
     },
   });
+  const messageLaunchPrompt = bridgeHelpers.buildPrompt({
+    launch_id: 'LCH-message-demo',
+    agent: 'pinchymeow',
+    workspace: env.ATF_WORKSPACE_PINCHYMEOW,
+    source_type: 'message',
+    source_ref: blockerMessageId,
+    source_path: path.join(env.ATF_WORKSPACE_PINCHYMEOW, 'pending-messages', `${blockerMessageId}.json`),
+    guidance: 'Open the ATF message thread and reply through ATF.',
+    summary: 'pinchymeow has a pending blocker message',
+    payload: {
+      task_id: blockerTaskId,
+      message_id: blockerMessageId,
+      thread_id: `task:${blockerTaskId}`,
+      from_agent: 'claude',
+      to_agent: 'pinchymeow',
+      message_type: 'blocker',
+      body: 'Need release decision before continuing',
+      pending_message_path: path.join(env.ATF_WORKSPACE_PINCHYMEOW, 'pending-messages', `${blockerMessageId}.json`),
+      message_path: path.join(resolveTaskDir(blockerTaskId, env), 'messages', `${blockerMessageId}.json`),
+    },
+  });
   assertIncludes(sessionsSpawnDispatch, 'mode: sessions_spawn', 'sessions_spawn dispatch');
   if (spawnedLaunchRequest.status !== 'leased') throw new Error(`expected sessions_spawn launch request leased, got ${spawnedLaunchRequest.status}`);
   if (spawnedLaunchRequest.dispatch_mode !== 'sessions_spawn') throw new Error(`expected dispatch_mode sessions_spawn, got ${spawnedLaunchRequest.dispatch_mode}`);
@@ -576,6 +608,10 @@ function main() {
   if (mockSpawnEvent.payload_path !== spawnedLaunchRequest.dispatch.artifacts.payload_path) throw new Error('expected mock sessions_spawn payload_path to match dispatch artifact');
   if (!staleReviewPrompt.includes('Do not write a self review')) throw new Error('expected stale review prompt to warn against self review');
   if (staleReviewPrompt.includes(`review add ${staleTaskId} f0x f0x approved`)) throw new Error('stale review prompt must not suggest self review closure');
+  if (!messageLaunchPrompt.includes('Pending Message:')) throw new Error('expected message launch prompt to mention Pending Message');
+  if (!messageLaunchPrompt.includes(`msg ack ${blockerTaskId} ${blockerMessageId} pinchymeow acked`)) throw new Error('expected message launch prompt to include msg ack guidance');
+  if (!messageLaunchPrompt.includes('Read the ATF message thread')) throw new Error('expected message launch prompt to instruct reading the ATF message thread');
+  if (!messageLaunchPrompt.includes('Need release decision before continuing')) throw new Error('expected message launch prompt to include message body');
 
   runCli(['review', 'add', staleTaskId, 'huntmind', 'f0x', 'approved', 'smoke-review', 'type=task', 'overall=4'], env, options);
   const launchStatusAfterReviewWriteback = JSON.parse(runCli(['launch', 'status', 'f0x', 'json'], env, options));

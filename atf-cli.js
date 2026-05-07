@@ -1525,6 +1525,101 @@ function directWorkspacePendingTaskPath(agent) {
   };
 }
 
+function workspacePendingMessagesDir(workspace) {
+  return path.join(workspace, 'pending-messages');
+}
+
+function directWorkspacePendingMessagesDir(agent) {
+  const workspace = resolveAgentWorkspace(agent);
+  if (!fs.existsSync(workspace)) fs.mkdirSync(workspace, { recursive: true });
+  const dir_path = workspacePendingMessagesDir(workspace);
+  if (!fs.existsSync(dir_path)) fs.mkdirSync(dir_path, { recursive: true });
+  return {
+    workspace,
+    dir_path,
+  };
+}
+
+function workspacePendingMessageSignalPath(agent, messageId) {
+  const target = directWorkspacePendingMessagesDir(agent);
+  return {
+    workspace: target.workspace,
+    dir_path: target.dir_path,
+    file_path: path.join(target.dir_path, `${messageId}.json`),
+  };
+}
+
+function readWorkspacePendingMessageSignals(workspace) {
+  const dir = workspacePendingMessagesDir(workspace);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(name => name.endsWith('.json'))
+    .map(name => {
+      const file_path = path.join(dir, name);
+      const signal = loadJson(file_path);
+      if (!signal) return null;
+      return {
+        ...signal,
+        signal_path: file_path,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+}
+
+function removeWorkspacePendingMessageSignal(agent, messageId) {
+  if (!agent || !messageId) return null;
+  const target = workspacePendingMessageSignalPath(agent, messageId);
+  if (fs.existsSync(target.file_path)) fs.unlinkSync(target.file_path);
+  return target.file_path;
+}
+
+function writeDirectMessageSignal(taskId, ctx, message, options = {}) {
+  const agent = message?.to_agent || null;
+  if (!agent || !isRegisteredAgent(agent)) return null;
+  const target = workspacePendingMessageSignalPath(agent, message.message_id);
+  const signal = {
+    schema: 'atf.message-signal.v1',
+    signal_type: 'message',
+    task_id: ctx.short_id || ctx.task_id,
+    message_id: message.message_id,
+    assigned_to: agent,
+    from_agent: message.from_agent,
+    to_agent: message.to_agent,
+    message_type: message.message_type,
+    thread_id: message.thread_id || null,
+    focus_id: message.focus_id || null,
+    reply_to_message_id: message.reply_to_message_id || null,
+    body: message.body,
+    body_excerpt: compactText(message.body, 240),
+    description: ctx.description,
+    created_at: message.created_at || new Date().toISOString(),
+    message_path: messagePath(taskId, message.message_id),
+    launch_cooldown_minutes: Number.isInteger(options.cooldown_minutes) ? options.cooldown_minutes : 5,
+    guidance: options.guidance || `Open the ATF message thread for ${ctx.short_id || ctx.task_id} and acknowledge or reply through ATF.`,
+    summary: options.summary || `${message.to_agent} has a pending ${message.message_type} message from ${message.from_agent}`,
+    payload: {
+      task_id: ctx.short_id || ctx.task_id,
+      message_id: message.message_id,
+      thread_id: message.thread_id || null,
+      focus_id: message.focus_id || null,
+      reply_to_message_id: message.reply_to_message_id || null,
+      from_agent: message.from_agent,
+      to_agent: message.to_agent,
+      message_type: message.message_type,
+      body: message.body,
+      message_path: messagePath(taskId, message.message_id),
+    },
+  };
+  fs.writeFileSync(target.file_path, JSON.stringify(signal, null, 2));
+  return {
+    workspace: target.workspace,
+    dir_path: target.dir_path,
+    file_path: target.file_path,
+    signal,
+  };
+}
+
 function removeLegacyTaskDirPendingTask(taskId) {
   const pendingTaskPath = `${taskDirPath(taskId)}/pending-task.json`;
   if (fs.existsSync(pendingTaskPath)) fs.unlinkSync(pendingTaskPath);
@@ -3833,41 +3928,81 @@ function buildLaunchCandidates(options = {}) {
     if (agentFilter && entry.agent !== agentFilter) continue;
     const workspace = entry.workspace || inferAgentWorkspace(entry.agent);
     const pendingTask = readWorkspacePendingTask(workspace);
-    if (!pendingTask) continue;
-    const launchability = inspectPendingTaskLaunchability(workspace, pendingTask);
-    if (!launchability.launchable) continue;
-    const sourceRef = pendingTask.action_id || pendingTask.task_id || entry.agent;
-    const candidate = {
-      agent: entry.agent,
-      workspace,
-      source_type: 'pending_task',
-      source_ref: sourceRef,
-      source_path: path.join(workspace, 'pending-task.json'),
-      dedupe_key: `pending_task:${entry.agent}:${sourceRef}`,
-      summary: `${entry.agent} workspace has pending-task ${pendingTask.task_id || sourceRef}`,
-      guidance: `Wake ${entry.agent} to consume pending-task.json in ${workspace}.`,
-      payload: {
-        assigned_to: pendingTask.assigned_to || entry.agent,
-        action_id: pendingTask.action_id || null,
-        task_id: pendingTask.task_id || null,
-        kind: pendingTask.kind || null,
-        priority: pendingTask.priority || null,
-        summary: pendingTask.summary || null,
-        pending_task_path: path.join(workspace, 'pending-task.json'),
-        reviewee: pendingTask.payload?.reviewee || null,
-        task_status: pendingTask.payload?.task_status || null,
-        task_type: pendingTask.payload?.task_type || null,
-        thread_id: pendingTask.payload?.thread_id || null,
-        reflection_id: pendingTask.payload?.reflection_id || null,
-        pending_payload: pendingTask.payload || null,
-        launch_cooldown_minutes: Number.isInteger(options.cooldown_minutes) && options.cooldown_minutes >= 0
-          ? options.cooldown_minutes
-          : 15,
-      },
-    };
-    const latestSignalRequest = getSignalLaunchRequests(candidate.agent, candidate.dedupe_key)[0] || null;
-    if (shouldArchiveLaunchRequestForWriteback(latestSignalRequest)) continue;
-    candidates.push(candidate);
+    if (pendingTask) {
+      const launchability = inspectPendingTaskLaunchability(workspace, pendingTask);
+      if (launchability.launchable) {
+        const sourceRef = pendingTask.action_id || pendingTask.task_id || entry.agent;
+        const candidate = {
+          agent: entry.agent,
+          workspace,
+          source_type: 'pending_task',
+          source_ref: sourceRef,
+          source_path: path.join(workspace, 'pending-task.json'),
+          dedupe_key: `pending_task:${entry.agent}:${sourceRef}`,
+          summary: `${entry.agent} workspace has pending-task ${pendingTask.task_id || sourceRef}`,
+          guidance: `Wake ${entry.agent} to consume pending-task.json in ${workspace}.`,
+          payload: {
+            assigned_to: pendingTask.assigned_to || entry.agent,
+            action_id: pendingTask.action_id || null,
+            task_id: pendingTask.task_id || null,
+            kind: pendingTask.kind || null,
+            priority: pendingTask.priority || null,
+            summary: pendingTask.summary || null,
+            pending_task_path: path.join(workspace, 'pending-task.json'),
+            reviewee: pendingTask.payload?.reviewee || null,
+            task_status: pendingTask.payload?.task_status || null,
+            task_type: pendingTask.payload?.task_type || null,
+            thread_id: pendingTask.payload?.thread_id || null,
+            reflection_id: pendingTask.payload?.reflection_id || null,
+            pending_payload: pendingTask.payload || null,
+            launch_cooldown_minutes: Number.isInteger(options.cooldown_minutes) && options.cooldown_minutes >= 0
+              ? options.cooldown_minutes
+              : 15,
+          },
+        };
+        const latestSignalRequest = getSignalLaunchRequests(candidate.agent, candidate.dedupe_key)[0] || null;
+        if (!shouldArchiveLaunchRequestForWriteback(latestSignalRequest)) {
+          candidates.push(candidate);
+        }
+      }
+    }
+
+    const pendingMessages = readWorkspacePendingMessageSignals(workspace);
+    for (const signal of pendingMessages) {
+      const messageId = signal.message_id || null;
+      if (!messageId) continue;
+      const messageCandidate = {
+        agent: entry.agent,
+        workspace,
+        source_type: 'message',
+        source_ref: messageId,
+        source_path: signal.signal_path,
+        dedupe_key: `message:${entry.agent}:${messageId}`,
+        summary: signal.summary || `${entry.agent} has pending message ${messageId}`,
+        guidance: signal.guidance || `Open the ATF message inbox/thread for ${signal.task_id || '-'} and acknowledge or reply through ATF.`,
+        payload: {
+          assigned_to: signal.assigned_to || entry.agent,
+          task_id: signal.task_id || null,
+          message_id: messageId,
+          thread_id: signal.thread_id || null,
+          focus_id: signal.focus_id || null,
+          reply_to_message_id: signal.reply_to_message_id || null,
+          from_agent: signal.from_agent || null,
+          to_agent: signal.to_agent || entry.agent,
+          message_type: signal.message_type || null,
+          body: signal.body || null,
+          body_excerpt: signal.body_excerpt || compactText(signal.body, 240),
+          pending_message_path: signal.signal_path,
+          message_path: signal.message_path || null,
+          launch_cooldown_minutes: Number.isInteger(signal.launch_cooldown_minutes) && signal.launch_cooldown_minutes >= 0
+            ? signal.launch_cooldown_minutes
+            : 5,
+        },
+      };
+      const latestMessageRequest = getSignalLaunchRequests(messageCandidate.agent, messageCandidate.dedupe_key)[0] || null;
+      if (shouldArchiveLaunchRequestForWriteback(latestMessageRequest)) continue;
+      candidates.push(messageCandidate);
+    }
   }
   return candidates.sort((a, b) => a.agent.localeCompare(b.agent) || (a.source_ref || '').localeCompare(b.source_ref || ''));
 }
@@ -4157,13 +4292,42 @@ function dispatchLaunchRequest(request, options = {}) {
 }
 
 function buildLaunchWritebackBaseline(request, trackedAt, dueAt = null) {
+  const sourceType = request?.source_type || null;
   const taskId = request?.payload?.task_id || null;
-  if (request?.source_type !== 'pending_task' || !taskId) return null;
+  if (!taskId) return null;
   const ctx = readCtx(taskId);
   const history = readTaskNotificationHistory(taskId);
   const messages = readTaskMessages(taskId);
   const receipts = readTaskReceipts(taskId);
   const reviews = readTaskReviews(taskId);
+  if (sourceType === 'message') {
+    const messageId = request?.payload?.message_id || request?.source_ref || null;
+    const sourceMessage = messageId ? readMessage(taskId, messageId) : null;
+    return {
+      required: true,
+      tracked_at: trackedAt || new Date().toISOString(),
+      due_at: dueAt || null,
+      agent: request.agent || null,
+      task_id: taskId,
+      action_id: null,
+      kind: 'message_delivery',
+      message_id: messageId,
+      thread_id: request?.payload?.thread_id || sourceMessage?.thread_id || null,
+      from_agent: request?.payload?.from_agent || sourceMessage?.from_agent || null,
+      to_agent: request?.payload?.to_agent || sourceMessage?.to_agent || request.agent || null,
+      baseline: {
+        task_status: ctx?.status || null,
+        task_updated_at: ctx?.updated_at || null,
+        source_message_status: effectiveMessageStatus(sourceMessage),
+        source_message_created_at: sourceMessage?.created_at || null,
+        notification_events: history.length,
+        message_count: messages.length,
+        receipt_count: receipts.length,
+        review_count: reviews.length,
+      },
+    };
+  }
+  if (sourceType !== 'pending_task') return null;
   return {
     required: true,
     tracked_at: trackedAt || new Date().toISOString(),
@@ -4224,6 +4388,12 @@ function deriveWritebackResolution(actionKind, evidence, contextStatus = null, o
         resolution_code: 'reply_sent',
       };
     }
+    if (evidence.type === 'message_receipt') {
+      return {
+        resolution: 'resolved',
+        resolution_code: 'receipt_recorded',
+      };
+    }
     if (evidence.type === 'delivered' || terminalStatus) {
       return {
         resolution: 'resolved',
@@ -4250,16 +4420,39 @@ function deriveWritebackResolution(actionKind, evidence, contextStatus = null, o
   }
 
   if (actionKind === 'launch_writeback_follow_up') {
-    if (['message_sent', 'review_added'].includes(evidence.type)) {
+    if (['message_sent', 'message_receipt', 'review_added'].includes(evidence.type)) {
       return {
         resolution: 'resolved',
-        resolution_code: evidence.type === 'message_sent' ? 'writeback_message_recorded' : 'writeback_review_recorded',
+        resolution_code: evidence.type === 'message_sent'
+          ? 'writeback_message_recorded'
+          : evidence.type === 'message_receipt'
+            ? 'writeback_receipt_recorded'
+            : 'writeback_review_recorded',
       };
     }
     if (evidence.type === 'delivered' || terminalStatus) {
       return {
         resolution: 'resolved',
         resolution_code: evidence.type === 'delivered' ? 'delivery_recorded' : 'terminal_status_recorded',
+      };
+    }
+    return {
+      resolution: 'acknowledged',
+      resolution_code: `${evidence.type}_recorded`,
+    };
+  }
+
+  if (actionKind === 'message_delivery') {
+    if (['message_sent', 'message_receipt', 'delivered'].includes(evidence.type) || terminalStatus) {
+      return {
+        resolution: 'resolved',
+        resolution_code: evidence.type === 'message_sent'
+          ? 'reply_sent'
+          : evidence.type === 'message_receipt'
+            ? 'receipt_recorded'
+            : evidence.type === 'delivered'
+              ? 'delivery_recorded'
+              : 'terminal_status_recorded',
       };
     }
     return {
@@ -4311,11 +4504,12 @@ function evaluateLaunchWriteback(request, options = {}) {
   const dispatchedAt = request.dispatched_at;
   const taskId = writeback.task_id;
   const agent = writeback.agent || request.agent || null;
-  const actionKind = writeback.kind || request.payload?.kind || null;
+  const actionKind = writeback.kind || request.payload?.kind || (request.source_type === 'message' ? 'message_delivery' : null);
   const reviewee = writeback.reviewee || request.payload?.reviewee || null;
   const ctx = readCtx(taskId);
   const recentEvents = readTaskNotificationHistory(taskId).filter(event => isTimestampAfter(event.at, dispatchedAt));
   const recentMessages = readTaskMessages(taskId).filter(message => isTimestampAfter(message.created_at, dispatchedAt));
+  const recentReceipts = readTaskReceipts(taskId).filter(receipt => isTimestampAfter(receipt.created_at, dispatchedAt));
   const recentReviews = readTaskReviews(taskId).filter(review => isTimestampAfter(review.created_at, dispatchedAt));
   const baseline = writeback.baseline || {};
   const ageMinutes = computeAgeMinutes(dispatchedAt);
@@ -4353,6 +4547,21 @@ function evaluateLaunchWriteback(request, options = {}) {
       message_id: agentMessage.message_id,
       thread_id: agentMessage.thread_id || null,
     };
+  }
+
+  if (!evidence && request.source_type === 'message') {
+    const originalMessageId = request.payload?.message_id || request.source_ref || null;
+    const receipt = recentReceipts.find(item => item.message_id === originalMessageId && item.from_agent === agent);
+    if (receipt) {
+      evidence = {
+        type: 'message_receipt',
+        confidence: 'confirmed',
+        at: receipt.created_at,
+        by: receipt.from_agent,
+        receipt_id: receipt.receipt_id,
+        receipt_type: receipt.receipt_type || null,
+      };
+    }
   }
 
   if (!evidence && actionKind === 'stale_review_follow_up') {
@@ -5354,6 +5563,15 @@ function findReplyAfterMessage(messages, message) {
   ) || null;
 }
 
+function findReceiptAfterMessage(receipts, message) {
+  if (!message?.message_id || !message?.to_agent) return null;
+  return receipts.find(receipt =>
+    receipt.message_id === message.message_id
+    && receipt.from_agent === message.to_agent
+    && (receipt.created_at || '') > (message.created_at || '')
+  ) || null;
+}
+
 function findDecisionReplyAfter(messages, threadId, createdAt) {
   if (!threadId) return null;
   return messages.find(message =>
@@ -5422,11 +5640,21 @@ function runActionPreflight(taskId, action, ctx, checkedAt = null) {
       });
     }
     const messages = readTaskMessages(taskId);
+    const receipts = readTaskReceipts(taskId);
     const reply = findReplyAfterMessage(messages, originalMessage);
     if (reply) {
       return createActionCheck('preflight', now, false, 'reply_received', `thread already received a reply from ${reply.from_agent}`, {
         original_message_id: originalMessageId,
         reply_message_id: reply.message_id,
+        thread_id: originalMessage.thread_id || null,
+      });
+    }
+    const receipt = findReceiptAfterMessage(receipts, originalMessage);
+    if (receipt) {
+      return createActionCheck('preflight', now, false, 'receipt_recorded', `message already has ${receipt.receipt_type} receipt from ${receipt.from_agent}`, {
+        original_message_id: originalMessageId,
+        receipt_id: receipt.receipt_id,
+        receipt_type: receipt.receipt_type || null,
         thread_id: originalMessage.thread_id || null,
       });
     }
@@ -5743,6 +5971,7 @@ function buildPendingReplyActionCandidates(options = {}) {
   for (const ctx of getAllTasks()) {
     const taskId = ctx.short_id || ctx.task_id;
     const messages = readTaskMessages(taskId);
+    const receipts = readTaskReceipts(taskId);
     for (const message of messages) {
       if (!['request', 'decision_request', 'blocker'].includes(message.message_type)) continue;
       if (message.source_type === 'action' || String(message.from_agent || '').startsWith('adapter-action')) continue;
@@ -5751,6 +5980,8 @@ function buildPendingReplyActionCandidates(options = {}) {
       if (!Number.isInteger(ageHours) || ageHours < messageHours) continue;
       if (!message.to_agent) continue;
       if (ownerFilter && message.to_agent !== ownerFilter) continue;
+      const receipt = findReceiptAfterMessage(receipts, message);
+      if (receipt) continue;
       const replied = findReplyAfterMessage(messages, message);
       if (replied) continue;
 
@@ -10845,7 +11076,7 @@ switch (cmd) {
     if (sub === 'send') {
       const [taskId, fromAgent, toAgent, messageType, ...bodyParts] = restArgs;
       if (!taskId || !fromAgent || !toAgent || !messageType || !bodyParts.length) {
-        console.error('用法: atf msg send <taskId> <from> <to> <type> <内容> [focus=FOC-...] [thread=...] [reply=MSG-...]'); break;
+        console.error('用法: atf msg send <taskId> <from> <to> <type> <内容> [focus=FOC-...] [thread=...] [reply=MSG-...] [wake=true|false]'); break;
       }
       if (!MESSAGE_TYPES.has(messageType)) {
         console.error(`消息类型: ${[...MESSAGE_TYPES].join('|')}`); break;
@@ -10855,11 +11086,13 @@ switch (cmd) {
       let focusId = null;
       let threadId = null;
       let replyToMessageId = null;
+      let wakeMode = null;
       const contentTokens = [];
       for (const part of bodyParts) {
         if (part.startsWith('focus=')) focusId = part.substring('focus='.length);
         else if (part.startsWith('thread=')) threadId = part.substring('thread='.length);
         else if (part.startsWith('reply=')) replyToMessageId = part.substring('reply='.length);
+        else if (part.startsWith('wake=')) wakeMode = part.substring('wake='.length).trim().toLowerCase();
         else contentTokens.push(part);
       }
       if (!contentTokens.length) {
@@ -10900,6 +11133,21 @@ switch (cmd) {
         reconciler: 'msg-send',
         evaluated_at: message.created_at,
       });
+      const autoWake = wakeMode === null
+        ? isRegisteredAgent(toAgent)
+        : ['1', 'true', 'yes', 'on'].includes(wakeMode);
+      const wakeSignal = autoWake && isRegisteredAgent(toAgent)
+        ? writeDirectMessageSignal(taskId, ctx, message, {
+            guidance: `Open the ATF message thread ${message.thread_id} for ${message.task_id}, then acknowledge or reply through ATF.`,
+            summary: `${toAgent} has pending ${message.message_type} message ${message.message_id} from ${fromAgent}`,
+          })
+        : null;
+      if (replyToMessageId) {
+        const repliedMessage = readMessage(taskId, replyToMessageId);
+        if (repliedMessage?.to_agent === fromAgent) {
+          removeWorkspacePendingMessageSignal(fromAgent, repliedMessage.message_id);
+        }
+      }
       const firedTriggers = fireMatchingTriggers(
         taskId,
         trigger => {
@@ -10921,6 +11169,7 @@ switch (cmd) {
       console.log(`   任务: ${message.task_id}  |  ${fromAgent} → ${toAgent}`);
       console.log(`   类型: ${message.message_type}  |  TTL: ${message.ttl_seconds}s`);
       console.log(`   thread: ${message.thread_id}${message.focus_id ? `  |  focus: ${message.focus_id}` : ''}${message.reply_to_message_id ? `  |  reply: ${message.reply_to_message_id}` : ''}`);
+      if (wakeSignal) console.log(`   wake-signal: ${wakeSignal.file_path}`);
       if (firedTriggers.length) console.log(`   trigger fires: ${firedTriggers.map(f => f.fire_id).join(', ')}`);
       break;
     }
@@ -11043,6 +11292,11 @@ switch (cmd) {
       message.last_receipt_at = receipt.created_at;
       message.status = receiptType;
       saveMessage(taskId, message);
+      removeWorkspacePendingMessageSignal(agent, message.message_id);
+      reconcileLaunchWritebacksForTask(taskId, {
+        reconciler: 'msg-ack',
+        evaluated_at: receipt.created_at,
+      });
       console.log(`✅ 已写回执 ${receipt.receipt_id}`);
       console.log(`   消息: ${message.message_id}  |  ${agent} → ${message.from_agent}`);
       console.log(`   类型: ${receipt.receipt_type}${note ? `  |  note: ${note}` : ''}`);

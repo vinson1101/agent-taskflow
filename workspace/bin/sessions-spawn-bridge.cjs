@@ -84,15 +84,22 @@ function readPayload() {
 function buildWritebackInstructions(payload) {
   const taskId = payload.payload?.task_id || '-';
   const actionKind = payload.payload?.kind || null;
+  const sourceType = payload.source_type || null;
   const agent = payload.agent || 'unknown';
   const reviewee = payload.payload?.reviewee || payload.payload?.assigned_to || agent;
-  const pendingTaskPath = payload.payload?.pending_task_path || payload.source_path || 'pending-task.json';
+  const pendingTaskPath = payload.payload?.pending_message_path || payload.payload?.pending_task_path || payload.source_path || 'pending-task.json';
+  const messageId = payload.payload?.message_id || payload.source_ref || null;
+  const threadId = payload.payload?.thread_id || null;
   const lines = [
     'ATF writeback is mandatory. Logs or local notes do not count as completion.',
     `When you change task status via ATF CLI, include by=${agent} so ATF can attribute the writeback.`,
   ];
 
-  if (actionKind === 'stale_review_follow_up' && taskId !== '-') {
+  if (sourceType === 'message' && taskId !== '-' && messageId) {
+    lines.push(`First acknowledge or close the message signal in ATF for ${taskId}.`);
+    lines.push(`If you only need to confirm receipt, use: node atf-cli.js msg ack ${taskId} ${messageId} ${agent} acked`);
+    lines.push(`If you need to respond, send an ATF reply on the same thread${threadId ? ` (${threadId})` : ''}; do not stop at local notes or logs.`);
+  } else if (actionKind === 'stale_review_follow_up' && taskId !== '-') {
     if (agent === reviewee) {
       lines.push('Do not write a self review for your own task. Self review does not close stale review backlog in ATF.');
       lines.push(`Request an external review through ATF for ${taskId}, or otherwise follow up with the coordinator/reviewer via ATF message.`);
@@ -115,23 +122,48 @@ function buildWritebackInstructions(payload) {
 
 function buildPrompt(payload) {
   const writebackInstructions = buildWritebackInstructions(payload);
+  const isMessageLaunch = payload.source_type === 'message';
   const lines = [
-    `Wake agent ${payload.agent || 'unknown'} and let it consume its pending task.`,
+    isMessageLaunch
+      ? `Wake agent ${payload.agent || 'unknown'} and let it consume its pending ATF message.`
+      : `Wake agent ${payload.agent || 'unknown'} and let it consume its pending task.`,
     '',
     `Launch ID: ${payload.launch_id || '-'}`,
     `Task ID: ${payload.payload?.task_id || '-'}`,
     `Action ID: ${payload.payload?.action_id || '-'}`,
     `Workspace: ${payload.workspace || '-'}`,
-    `Pending Task: ${payload.payload?.pending_task_path || payload.source_path || '-'}`,
+    isMessageLaunch
+      ? `Pending Message: ${payload.payload?.pending_message_path || payload.source_path || '-'}`
+      : `Pending Task: ${payload.payload?.pending_task_path || payload.source_path || '-'}`,
     `Summary: ${payload.summary || '-'}`,
     `Guidance: ${payload.guidance || '-'}`,
     '',
     'Instruction:',
-    '1. Open the target workspace and inspect pending-task.json.',
-    '2. Handle the requested follow-up there.',
-    '3. Persist the result back into ATF using the ATF CLI.',
-    '4. Only after ATF writeback succeeds, remove the consumed pending-task.json.',
+    ...(isMessageLaunch
+      ? [
+          '1. Open the target workspace and inspect the pending message signal.',
+          `2. Read the ATF message thread for context${payload.payload?.thread_id ? ` (${payload.payload.thread_id})` : ''}.`,
+          '3. Acknowledge or reply through the ATF message flow, not just local notes.',
+          '4. Only after ATF writeback succeeds, remove the consumed pending message signal.',
+        ]
+      : [
+          '1. Open the target workspace and inspect pending-task.json.',
+          '2. Handle the requested follow-up there.',
+          '3. Persist the result back into ATF using the ATF CLI.',
+          '4. Only after ATF writeback succeeds, remove the consumed pending-task.json.',
+        ]),
     '',
+    ...(isMessageLaunch
+      ? [
+          `Message ID: ${payload.payload?.message_id || '-'}`,
+          `From: ${payload.payload?.from_agent || '-'}`,
+          `To: ${payload.payload?.to_agent || payload.agent || '-'}`,
+          `Thread: ${payload.payload?.thread_id || '-'}`,
+          `Type: ${payload.payload?.message_type || '-'}`,
+          `Body: ${payload.payload?.body || payload.payload?.body_excerpt || '-'}`,
+          '',
+        ]
+      : []),
     ...writebackInstructions.map(item => `- ${item}`),
   ];
   return `${lines.join('\n')}\n`;

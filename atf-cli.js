@@ -3472,6 +3472,9 @@ function executeLaunchSessionsSpawn(request, options = {}, leaseExpiresAt = null
       cwd: LAUNCH_SESSIONS_SPAWN_CWD || WORKSPACE_DIR,
       timeout_ms: LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS,
     });
+    if (bridgeResult?.ok === false || bridgeResult?.accepted === false) {
+      throw new Error('sessions_spawn backend rejected launch');
+    }
     return {
       payload_path: payloadArtifact.payload_path,
       module: modulePath,

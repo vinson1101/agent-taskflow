@@ -187,6 +187,9 @@ function executeBackendModule(payload, context) {
     throw new Error(`ATF_SESSIONS_SPAWN_BACKEND_MODULE must export a function: ${modulePath}`);
   }
   const result = backend(payload, context);
+  if (result?.ok === false || result?.accepted === false) {
+    throw new Error('sessions_spawn backend rejected launch');
+  }
   return {
     mode: 'module',
     module: modulePath,
@@ -217,6 +220,15 @@ function executeBackendCommand(payload, context) {
   if ((child.status ?? 0) !== 0) {
     throw new Error(`backend command exited with status ${child.status}${trimText(child.stderr) ? ` | stderr: ${trimText(child.stderr)}` : ''}`);
   }
+  let result = null;
+  try {
+    result = JSON.parse(child.stdout);
+  } catch (_) {
+    // Backward compatible: successful command backends may print plain text.
+  }
+  if (result?.ok === false || result?.accepted === false) {
+    throw new Error('sessions_spawn backend rejected launch');
+  }
   return {
     mode: 'command',
     command: commandRef,
@@ -226,6 +238,7 @@ function executeBackendCommand(payload, context) {
     timeout_ms: timeoutMs,
     stdout: trimText(child.stdout),
     stderr: trimText(child.stderr),
+    result,
   };
 }
 

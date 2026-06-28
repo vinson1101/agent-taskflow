@@ -249,7 +249,9 @@ module.exports = function sessionsSpawn(payload, context) {
   fs.mkdirSync(eventsDir, { recursive: true });
   const eventPath = path.join(eventsDir, \`\${event.launch_id}.json\`);
   fs.writeFileSync(eventPath, JSON.stringify(event, null, 2));
-  return { ok: true, launch_id: event.launch_id, agent: event.agent, event_path: eventPath };
+  return context?.env?.ATF_MOCK_SESSIONS_SPAWN_REJECT === '1'
+    ? { ok: false, accepted: false, launch_id: event.launch_id }
+    : { ok: true, accepted: true, launch_id: event.launch_id, agent: event.agent, event_path: eventPath };
 };
 `, 'utf8');
 }
@@ -554,11 +556,25 @@ function main() {
   if (reissuedLaunch.attempt !== 2) throw new Error(`expected reissued launch attempt=2, got ${reissuedLaunch.attempt}`);
   if (reissuedLaunch.reissue_of !== firstLaunchRequest.launch_id) throw new Error(`expected reissued launch to point to ${firstLaunchRequest.launch_id}, got ${reissuedLaunch.reissue_of}`);
 
-  const sessionsSpawnDispatch = runCli(['launch', 'dispatch', reissuedLaunch.launch_id, 'dispatcher=phase-d-smoke', 'mode=sessions_spawn', 'lease_minutes=5'], env, options);
-  const spawnedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${reissuedLaunch.launch_id}.json`));
-  const mockSpawnEvent = readJson(path.join(mockSpawnEventsDir, `${reissuedLaunch.launch_id}.json`));
+  runCli(
+    ['launch', 'dispatch', reissuedLaunch.launch_id, 'dispatcher=phase-d-smoke', 'mode=sessions_spawn', 'lease_minutes=5'],
+    { ...env, ATF_MOCK_SESSIONS_SPAWN_REJECT: '1' },
+    options,
+  );
+  const rejectedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${reissuedLaunch.launch_id}.json`));
+  if (rejectedLaunchRequest.status !== 'failed') throw new Error(`expected rejected sessions_spawn request failed, got ${rejectedLaunchRequest.status}`);
+  if (!rejectedLaunchRequest.dispatch?.error?.message?.includes('rejected launch')) throw new Error('expected rejected sessions_spawn error');
+
+  runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=0'], env, options);
+  const acceptedLaunch = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json')).items
+    .find(item => item.reissue_of === reissuedLaunch.launch_id);
+  if (!acceptedLaunch) throw new Error('expected launch reissue after sessions_spawn rejection');
+
+  const sessionsSpawnDispatch = runCli(['launch', 'dispatch', acceptedLaunch.launch_id, 'dispatcher=phase-d-smoke', 'mode=sessions_spawn', 'lease_minutes=5'], env, options);
+  const spawnedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${acceptedLaunch.launch_id}.json`));
+  const mockSpawnEvent = readJson(path.join(mockSpawnEventsDir, `${acceptedLaunch.launch_id}.json`));
   const staleReviewPrompt = bridgeHelpers.buildPrompt({
-    launch_id: reissuedLaunch.launch_id,
+    launch_id: acceptedLaunch.launch_id,
     agent: 'f0x',
     workspace: env.ATF_WORKSPACE_F0X,
     source_path: path.join(env.ATF_WORKSPACE_F0X, 'pending-task.json'),

@@ -1,5 +1,7 @@
 # ATF 自主能力路线图
 
+> 历史说明：本文记录 Phase A/B/C/D 的自主能力演进。2026-07-11 之后的实现顺序以根目录 [PLAN.md](../PLAN.md) 为准；新的主线是事件快路径、跨 session obligation/verifier、Hermes adapter 和 A2A compatibility。
+
 ## 背景
 
 ATF 当前已经具备异步任务派发和状态回写能力，但仍缺少真正的“自主协作层”。

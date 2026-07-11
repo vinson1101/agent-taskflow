@@ -412,6 +412,7 @@ function main() {
     '--action-executor', 'control-plane-smoke',
     '--action-mode', 'pending_task',
     '--writeback-minutes', '5',
+    '--launcher',
     '--launcher-dispatcher', 'control-plane-smoke',
     '--launcher-mode', 'noop',
     '--min-confidence', '0',

@@ -2,7 +2,26 @@
 
 ## 当前一句话状态
 
-ATF 已经打通了基于文件协议和 cron 扫描的异步多 Agent 任务闭环，但还不是实时协作系统，也还没有完整的自主协作层、评价层和激励层。
+ATF v2 已打通事件快路径、跨 session obligation/verifier、OpenClaw/Hermes Runtime Adapter v1、A2A compatibility 和可选只读 Session Context Provider。OpenClaw 是已运行基线；Hermes 已完成官方 Runs API 契约 canary，真实部署 canary 仍依赖目标 endpoint。
+
+## 当前实现与新目标
+
+新产品目标见根目录 [PLAN.md](../PLAN.md)：
+
+**面向 session 型 Agent 的、兼容 A2A 的事件优先可靠性控制面。**
+
+OpenClaw-specific 唤醒已收进 adapter；runtime 记录在 Agent Registry，不进入 task schema。仓库内 smoke 验证同一核心 task 模型可分别走 OpenClaw、Hermes 与 stub adapter。
+
+### v2 可靠性控制面
+
+- assign、message、action、trigger 统一产生 durable event
+- 250ms per-agent debounce、source dedupe 和 event dispatcher 快路径
+- `atf.obligation.v1`、`atf.work-envelope.v1` 与 required write-back
+- 确定性 verifier、retry、DLQ 和 `attention / escalation_required`
+- OpenClaw `sessions_spawn`/command adapter 与 Hermes `POST /v1/runs` adapter
+- A2A inbound、outbound status/artifact 和 push notification 映射
+- 带 provenance、长度限制和敏感信息过滤的只读 session context
+- event-to-dispatch、wake、duplicate、write-back 和 runtime 指标
 
 ## 已实现并已验证
 
@@ -98,7 +117,7 @@ ATF 当前更接近：
 
 - 异步任务协议层
 - 运行保障层
-- OpenClaw 上的多 Agent 编排内核
+- OpenClaw 上已经验证的多 Agent 编排基线
 
 ATF 当前还不是：
 
@@ -107,16 +126,17 @@ ATF 当前还不是：
 - 完整评价系统
 - 完整激励和结算系统
 - 独立持久运行的 Agent 平台
+- 已完成真实 Hermes 生产环境验证的控制面
 
 ## 当前约束
 
-- 依赖 OpenClaw heartbeat 和 cron 扫描
-- 不是实时事件驱动
-- 扫描间隔较长，不适合即时任务
+- OpenClaw 旧链仍可依赖 heartbeat/cron；v2 快路径需要常驻 event dispatcher
 - 已有最小任务线程对象、线程总览和 room adapter，但还没有完整广播 / 订阅模型
 - 已有最小 Agent-to-Agent 消息模型，但还没有跨节点通信层
-- Trigger 执行器目前已支持 `pending_task / message / room / noop`，但还没有直达 session / bot 的 adapter
+- Trigger 执行器支持 `pending_task / message / room / noop`，并通过 durable event 接入 runtime adapter
 - 评价、信誉、激励尚未闭环
+- 真实 Hermes endpoint、认证和模型配置不属于仓库默认值
+- 生产 p95、跨 session 续接成功率和恢复率需要部署后持续采样
 
 注：
 当前已经有最小消息协议、最小自治对象、最小 trigger firing 记录、最小全局 pending 索引、最小 due-trigger scan、最小 firing→reflection 绑定，以及仓库内可见的 watcher v1 执行链，但仍然不是实时会话系统，也还没有完整的多方讨论模型、签名身份、完整的 Trigger action adapter 集，或跨节点通信层。
@@ -134,9 +154,9 @@ ATF 的价值已经不只是“记录任务”，而是：
 
 这说明 ATF 已经具备最小的异步运行保障能力。
 
-## 下一阶段重点
+## 历史阶段说明
 
-当前最值得补齐的不是支付，而是自主协作层：
+此前最值得补齐的自主协作层包括：
 
 1. Focus Items
 2. Trigger Binding
@@ -195,11 +215,9 @@ ATF 的价值已经不只是“记录任务”，而是：
 - 已支持在 `status / assign` 中直接读取 review / reputation / credits 摘要
 - 已支持 `assign recommend` 结合任务画像给内部指派提供排序参考
 
-## 下一阶段
+## v2 完成后的运营阶段
 
-下一阶段建议正式定义为：
-
-**Phase D / 主动运营动作层**
+Phase D 主动运营动作层已经形成 OpenClaw 基线。新的实施阶段不再继续按 Phase 字母扩展对象，而是按根目录 [PLAN.md](../PLAN.md) 的 Milestone 推进。
 
 当前这条线已经不只是概念定义，已形成最小可运行闭环：
 
@@ -209,17 +227,7 @@ ATF 的价值已经不只是“记录任务”，而是：
 - `writeback.post_launch` 已可继续跟踪 launch 归档之后是否出现 resolved evidence
 - `post_launch.follow_up` 已可处理“已 acknowledged，但长期没有 resolved evidence”
 
-这一层当前可以先收口。下一阶段重点不是继续细修 `launch / writeback / post_launch` 本身，而是把当前已有的 `Focus / Trigger / Message / Reflection / review` 信号推进成：
-
-- stale backlog follow-up
-- pending review reminder
-- digest / cleanup 执行层
-- 基于 trigger / message / reflection 的任务自推进动作
-
-收口后已记录的下一批待办：
-
-- 控制面升级 / 升级策略：对重复 `launch_writeback_follow_up` 或 `launch_resolution_follow_up` 的任务，显式打成 `attention / escalation_required`
-- 任务证据治理：明确哪些证据只表示 `acknowledged`，哪些证据可计入 `resolved`，以及谁有权限产生可被系统承认的 resolved evidence
+M0-M6 的仓库实现与 smoke 已完成。下一步是把真实 Hermes canary、生产 p95、跨 session 续接成功率和恢复率写入指标基线，并据此删除与宿主 runtime 或 A2A 重复的能力。
 
 当前仍未完成的部分：
 
@@ -229,6 +237,7 @@ ATF 的价值已经不只是“记录任务”，而是：
 
 当前定位说明：
 
-- 这套能力优先服务 `claw army` 内部调度
-- 当前目标是让完成度和反馈更可统计、review 闭环更轻、历史表现更可读，并给内部积分反馈与轻量任务画像
-- 更重的市场化设计会后移到未来商用化阶段
+- 当前实现继续优先服务内部 Agent Team Ops。
+- OpenClaw 是已验证基线，Hermes 是首个新增一等 runtime。
+- A2A 用于标准互操作，ATF 不发展成另一套外部通信协议。
+- 共享 session 只作为可选上下文来源，不承担 task truth。

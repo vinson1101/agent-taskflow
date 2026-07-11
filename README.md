@@ -1,8 +1,8 @@
 # AgentTaskFlow (ATF)
 
-> OpenClaw 上的异步多 Agent 协作控制层。它提供任务协议、协作对象、主动动作和统一控制面，让多个 agent 能在共享任务仓库上稳定协作。
+> 面向 OpenClaw、Hermes 等 session 型 Agent 的事件优先可靠性控制面。它在 session 外持久保存任务责任，并通过 runtime adapter 完成唤醒、回写验证和失败恢复。
 
-**状态：Phase A / B / C / D 主干已完成，当前进入 merge / rollout / ops 观察阶段。**
+**当前状态：v2 事件优先可靠性控制面已落地；OpenClaw 与 Hermes adapter、跨 session obligation/verifier、A2A compatibility 和只读 Session Context Provider 均有默认 smoke。真实 Hermes 环境仍需配置 API endpoint 后执行部署 canary。详见 [PLAN.md](./PLAN.md)。**
 
 ## 项目简介
 
@@ -10,7 +10,7 @@ ATF 不是“又一个任务管理器”，也不是一个独立的 Agent 平台
 
 它的定位更准确地说是：
 
-**面向 OpenClaw 多 Agent 场景的协议层、控制层和运行保障层。**
+**面向 session 型 Agent 的、兼容 A2A 的可靠性控制层。**
 
 ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作里更难、也更长期的问题：
 
@@ -19,54 +19,62 @@ ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作�
 - 协作上下文如何沉淀
 - 超时、阻塞和遗漏如何被发现
 - follow-up、review 和唤醒动作如何形成闭环
+- session 结束后任务责任如何继续存在
+- 如何避免高频轮询浪费与低频轮询延迟
 - 历史表现如何沉淀为组织能力
 
 它把这些问题收敛成一组可落地的本地协议对象和控制面能力，而不是交给 prompt 或人工流程去隐式兜底。
 
 ## 当前定位
 
-当前 ATF 的产品定位是：
+ATF 的目标产品定位是：
 
-**OpenClaw 上的异步多 Agent 协作内核**
+**A2A-compatible Reliability Control Plane for Session-based Agents**
 
 它由四层能力组成：
 
-1. **任务协议层**：任务 schema、状态机、DRI、超时、DLQ、交付确认
-2. **协作对象层**：`focus / trigger / message / reflection / shared context`
-3. **反馈与评估层**：`review / credits / reputation / backlog`
-4. **主动执行层**：`action / launcher / sessions_spawn / control-plane`
+1. **持久责任层**：task、DRI、obligation、message、artifact reference
+2. **事件与恢复层**：event、dedupe、lease、retry、DLQ、escalation
+3. **Runtime Adapter 层**：OpenClaw、Hermes，以及后续其他 session runtime
+4. **验证与运营层**：required write-back、verifier、audit、review、运行指标
 
-这四层共同组成一个“可审计、可恢复、可逐步自治”的异步协作系统。
+A2A 用于外部互操作；ATF 不以替代 A2A 或重新发明通用 Agent 通信协议为目标。
 
 ## 架构图
 
 ```mermaid
 flowchart LR
-  Repo["Task Repository<br/>ctx / focus / trigger / review / action / messages"] --> Control["Control Plane<br/>atf-cli + watcher + action watcher + launcher"]
-  Data["ATF_DATA_DIR<br/>pending indexes / inboxes / launch queue / payloads"] --> Control["Control Plane<br/>atf-cli + watcher + action watcher + launcher"]
-  Control --> Runtime["Wakeup Runtime<br/>sessions_spawn bridge + real backend"]
-  Runtime --> Agents["Worker Agents<br/>huntmind / acestock / f0x / ..."]
-  Agents --> Workspace["Agent Workspaces<br/>action pending-task / runtime files"]
-  Workspace --> Data
-  Agents --> Writeback["ATF Write-back<br/>status / review / receipts / reflections"]
-  Writeback --> Repo
+  Input["CLI / MCP / A2A input"] --> Truth["ATF durable truth<br/>task / obligation / event"]
+  Truth --> Fast["Event fast path"]
+  Truth --> Slow["Low-frequency reconciler"]
+  Fast --> Adapter["Runtime Adapter"]
+  Slow --> Adapter
+  Adapter --> OpenClaw["OpenClaw session"]
+  Adapter --> Hermes["Hermes session"]
+  OpenClaw --> Writeback["ATF write-back"]
+  Hermes --> Writeback
+  Writeback --> Verify["Verifier"]
+  Verify --> Truth
 ```
 
-这张图对应 ATF 当前的真实运行方式：
+这张图对应 ATF v2 的当前运行方式：
 
 - 任务事实和协作对象主要沉淀在任务仓库
 - `ATF_DATA_DIR` 主要沉淀 pending 索引、agent inbox、launch queue、dispatch payload 和部分可重建投影
-- control-plane 负责扫描、补漏、动作执行和 launch dispatch
-- runtime 只负责按需唤醒 agent，不承担 ATF 的状态真相
+- `atf-event-dispatcher` 监听 durable event 并执行快路径；control-plane 保留为低频 reconciler
+- runtime adapter 只负责创建或恢复 session，不承担 ATF 的状态真相
 - worker 完成动作后必须回写 ATF，闭环才算成立
+- assign、message、action、trigger 会统一产生 `atf.event.v1`，并关联 required write-back obligation
 
 **当前标准链路术语：**
 
 - `trigger pending_task -> <taskDir>/pending-task.json`
 - `action pending_task -> <agentWorkspace>/pending-task.json`
 - `launch -> ATF_DATA_DIR/pending-launch-requests.json / launch-inboxes/<agent>.json / launch-dispatch-payloads/<launchId>.json + env bridge`
+- `event -> ATF_DATA_DIR/events/*.json -> atf.work-envelope.v1 -> runtime adapter`
+- `write-back -> atf.obligation.v1 -> deterministic verifier -> resolved / retry / escalation_required`
 
-更细的 truth / queue / projection / audit 划分，见 [docs/ATF_STORAGE_MODEL.md](./docs/ATF_STORAGE_MODEL.md)。
+运行与接入方法见 [docs/ATF_RELIABILITY_CONTROL_PLANE.md](./docs/ATF_RELIABILITY_CONTROL_PLANE.md)，更细的 truth / queue / projection / audit 划分见 [docs/ATF_STORAGE_MODEL.md](./docs/ATF_STORAGE_MODEL.md)。
 
 ## 非目标
 
@@ -74,6 +82,8 @@ flowchart LR
 
 - 实时聊天系统
 - 即时多 Agent 讨论平台
+- A2A 的替代协议
+- 跨产品 session transcript 的统一数据库
 - 支付优先产品
 - 完整的 Agent 市场
 - 重型多租户平台
@@ -84,12 +94,13 @@ flowchart LR
 
 以下文档用于沉淀当前阶段的产品判断和未来方向：
 
+- [PLAN.md](./PLAN.md) - 当前项目目标、里程碑和完成标准的唯一主计划
 - [docs/README.md](./docs/README.md) - 指导文档索引
 - [docs/ATF_PRODUCT_GUIDE.md](./docs/ATF_PRODUCT_GUIDE.md) - 当前产品定义与边界
 - [docs/ATF_BUSINESS_STRATEGY.md](./docs/ATF_BUSINESS_STRATEGY.md) - 商业价值与演进路径
-- [docs/ATF_AUTONOMY_ROADMAP.md](./docs/ATF_AUTONOMY_ROADMAP.md) - 自主能力缺口与路线图
+- [docs/ATF_AUTONOMY_ROADMAP.md](./docs/ATF_AUTONOMY_ROADMAP.md) - 历史自主能力路线图
 - [docs/ATF_CAPABILITY_EVOLUTION.md](./docs/ATF_CAPABILITY_EVOLUTION.md) - 从当前实现到长期能力体系的演进图
-- [docs/ATF_EXTERNAL_REFERENCES.md](./docs/ATF_EXTERNAL_REFERENCES.md) - Clawith、BotCord 等外部参考及可吸收点
+- [docs/ATF_EXTERNAL_REFERENCES.md](./docs/ATF_EXTERNAL_REFERENCES.md) - AgentRQ、A2A、Hermes 和 session 工具等外部参考
 - [docs/ATF_STORAGE_MODEL.md](./docs/ATF_STORAGE_MODEL.md) - task repo / `ATF_DATA_DIR` / workspace 的存储模型
 - [docs/ATF_DISPATCH_MATRIX.md](./docs/ATF_DISPATCH_MATRIX.md) - trigger / watcher / action / launch 的接口矩阵
 - [docs/ATF_INVARIANTS.md](./docs/ATF_INVARIANTS.md) - 当前已落地与未硬保证的不变量
@@ -98,6 +109,7 @@ flowchart LR
 - [docs/ATF_FORMAL_REVIEW.md](./docs/ATF_FORMAL_REVIEW.md) - 可直接对外使用的正式评审稿
 - [docs/ATF_EVIDENCE_MAP.md](./docs/ATF_EVIDENCE_MAP.md) - 正式评审常用结论到证据的对照表
 - [docs/ATF_RUNTIME_USAGE.md](./docs/ATF_RUNTIME_USAGE.md) - 当前 CLI 的实际调用说明
+- [docs/ATF_RELIABILITY_CONTROL_PLANE.md](./docs/ATF_RELIABILITY_CONTROL_PLANE.md) - v2 事件、obligation、runtime、A2A 与指标运行说明
 - [docs/ATF_REPUTATION_LAYER.md](./docs/ATF_REPUTATION_LAYER.md) - Phase C Lite / 内部调度信誉层设计
 - [docs/ATF_WATCHER_INTEGRATION.md](./docs/ATF_WATCHER_INTEGRATION.md) - cron / watcher / heartbeat 集成说明
 - [docs/ATF_ACTION_LAYER.md](./docs/ATF_ACTION_LAYER.md) - Phase D / 主动运营动作层设计
@@ -590,4 +602,4 @@ node atf-cli.js revise <taskId> <反馈>  # 打回重做
 
 ---
 
-*最后更新：2026-04-20*
+*最后更新：2026-07-11*

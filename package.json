@@ -1,7 +1,7 @@
 {
   "name": "AgentTaskFlow",
-  "version": "1.0.0",
-  "description": "Async multi-agent coordination kernel and control plane for OpenClaw",
+  "version": "2.0.0",
+  "description": "A2A-compatible reliability control plane for session-based agents",
   "author": "PinchyMeow",
   "main": "index.js",
   "bin": {
@@ -19,23 +19,24 @@
     "atf:control-plane": "node workspace/bin/atf-control-plane.cjs",
     "atf:control-plane:dry": "node workspace/bin/atf-control-plane.cjs --dry-run",
     "atf:control-plane:smoke": "node workspace/bin/atf-control-plane-smoke.cjs",
+    "atf:event-dispatcher": "node workspace/bin/atf-event-dispatcher.cjs",
     "atf:phasec:smoke": "node workspace/bin/atf-phasec-smoke.cjs",
     "atf:phased:smoke": "node workspace/bin/atf-phased-smoke.cjs",
-    "test": "node workspace/bin/atf-phased-smoke.cjs --cleanup"
+    "atf:reliability:smoke": "node workspace/bin/atf-reliability-smoke.cjs",
+    "test": "node workspace/bin/atf-phasec-smoke.cjs --cleanup --quiet && node workspace/bin/atf-watcher-smoke.cjs --cleanup --quiet && node workspace/bin/atf-control-plane-smoke.cjs --cleanup --quiet && node workspace/bin/atf-phased-smoke.cjs --cleanup --quiet && node workspace/bin/atf-reliability-smoke.cjs"
   },
   "keywords": [
     "openclaw",
+    "hermes-agent",
+    "a2a",
     "taskflow",
     "multi-agent",
     "coordination",
     "control-plane",
     "orchestration"
   ],
-  "dependencies": {
-    "ethers": "^6.16.0",
-    "viem": "^2.46.3"
-  },
+  "dependencies": {},
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

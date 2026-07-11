@@ -10,6 +10,8 @@ const path = require('path');
 const os = require('os');
 const { randomBytes } = require('crypto');
 const { execSync, spawnSync } = require('child_process');
+const { atomicWriteJson } = require('./workspace/lib/atf-storage.cjs');
+const reliability = require('./workspace/lib/atf-reliability.cjs');
 
 // ============================================================
 // 统一配置
@@ -49,7 +51,7 @@ const LAUNCH_SESSIONS_SPAWN_TIMEOUT_MS = (() => {
 })();
 const PENDING_DECISIONS_MD = process.env.ATF_PENDING_DECISIONS_MD || `${WORKSPACE_DIR}/pending-decisions.md`;
 const PENDING_DECISIONS_JSON = process.env.ATF_PENDING_DECISIONS_JSON || `${WORKSPACE_DIR}/pending-decisions.json`;
-const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || `${WORKSPACE_DIR}/bin/learnings-promote.cjs`;
+const LEARNINGS_PROMOTE_SCRIPT = process.env.ATF_LEARNINGS_PROMOTE_SCRIPT || path.join(__dirname, 'workspace', 'bin', 'learnings-promote.cjs');
 const DEFAULT_AGENT_WORKSPACE = process.env.ATF_DEFAULT_AGENT_WORKSPACE || WORKSPACE_DIR;
 function buildConfiguredAgentWorkspaces() {
   const workspaces = {};
@@ -94,6 +96,7 @@ const REVIEW_SCORE_FIELDS = ['overall', 'quality', 'timeliness', 'communication'
 const TASK_PROFILE_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
 const HANDOFF_CONTEXT_LIMIT = 5;
 const HANDOFF_REFLECTION_LIMIT = 2;
+const AGENT_RUNTIMES = new Set(['openclaw', 'hermes', 'stub']);
 
 if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR))  fs.mkdirSync(DATA_DIR,   { recursive: true });
@@ -111,9 +114,7 @@ function loadJson(f) {
   try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return null; }
 }
 function saveJson(f, d) {
-  const dir = path.dirname(f);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(f, JSON.stringify(d, null, 2));
+  atomicWriteJson(f, d);
 }
 function ctxPath(taskId)    { const d=dirOfTaskId(taskId);return `${TASKS_DIR}/${d}/ctx.json`; }
 function latestPath(taskId) { return `${TASKS_DIR}/${taskId}/latest.json`; }
@@ -913,6 +914,7 @@ function normalizeAgentRegistryItem(agent, value = null, fallbackSource = 'regis
     return {
       agent: normalized,
       workspace: value || inferAgentWorkspace(normalized),
+      runtime: 'openclaw',
       source: fallbackSource,
       enabled: true,
     };
@@ -922,6 +924,7 @@ function normalizeAgentRegistryItem(agent, value = null, fallbackSource = 'regis
   return {
     agent: normalized,
     workspace: item.workspace || inferAgentWorkspace(normalized),
+    runtime: AGENT_RUNTIMES.has(item.runtime) ? item.runtime : 'openclaw',
     source: item.source || fallbackSource,
     enabled: item.enabled !== false,
   };
@@ -1005,6 +1008,7 @@ function upsertAgentRegistryEntry(agent, options = {}) {
   const nextEntry = {
     agent: normalized,
     workspace: options.workspace || existing?.workspace || inferAgentWorkspace(normalized),
+    runtime: options.runtime || existing?.runtime || 'openclaw',
     source: options.source || existing?.source || 'manual',
     enabled: options.enabled === undefined ? (existing ? existing.enabled !== false : true) : options.enabled !== false,
   };
@@ -1514,7 +1518,14 @@ function triggerInboxPath(agent) {
 }
 
 function resolveAgentWorkspace(agent) {
-  return inferAgentWorkspace(agent);
+  const normalized = normalizeAgentName(agent);
+  if (!normalized) return DEFAULT_AGENT_WORKSPACE;
+  const registered = loadAgentRegistry().agents.find(entry => entry.agent === normalized && entry.enabled !== false);
+  return registered?.workspace || inferAgentWorkspace(normalized);
+}
+
+function publishReliabilityEvent(input) {
+  return reliability.emitEvent({ dataDir: DATA_DIR, tasksDir: TASKS_DIR }, input);
 }
 
 function directWorkspacePendingTaskPath(agent) {
@@ -1612,7 +1623,7 @@ function writeDirectMessageSignal(taskId, ctx, message, options = {}) {
       message_path: messagePath(taskId, message.message_id),
     },
   };
-  fs.writeFileSync(target.file_path, JSON.stringify(signal, null, 2));
+  saveJson(target.file_path, signal);
   return {
     workspace: target.workspace,
     dir_path: target.dir_path,
@@ -1657,7 +1668,7 @@ function writeDirectTaskPendingSignal(taskId, ctx, payload = {}) {
     created_at: now,
     ...payload,
   };
-  fs.writeFileSync(target.file_path, JSON.stringify(pendingTask, null, 2));
+  saveJson(target.file_path, pendingTask);
   removeLegacyTaskDirPendingTask(taskId);
   return {
     workspace: target.workspace,
@@ -1920,7 +1931,7 @@ function executeTriggerFire(taskId, fire, trigger, ctx, options = {}) {
         deliveryTarget,
         handoff,
       });
-      fs.writeFileSync(pendingTaskPath, JSON.stringify(pendingTask, null, 2));
+      saveJson(pendingTaskPath, pendingTask);
       execution.payload = {
         handoff,
         pending_task: pendingTask,
@@ -1995,6 +2006,13 @@ function executeTriggerFire(taskId, fire, trigger, ctx, options = {}) {
       at: now,
     });
 
+    publishReliabilityEvent({
+      event_type: 'trigger',
+      agent: execution.owner_agent,
+      task_id: execution.task_id,
+      source_ref: fire.fire_id,
+      guidance: `Handle trigger ${trigger.trigger_id} and write the result back to ATF.`,
+    });
     settleTriggerFire(taskId, fire, trigger, 'consumed', execution.executor, `executed:${mode}`);
     return execution;
   } catch (error) {
@@ -6384,7 +6402,7 @@ function executeAction(taskId, action, ctx, options = {}) {
       created_by: executor,
       created_at: now,
     };
-    fs.writeFileSync(filePath, JSON.stringify(pendingTask, null, 2));
+    saveJson(filePath, pendingTask);
     execution.status = 'executed';
     execution.artifacts.pending_task_path = filePath;
   } else {
@@ -6419,6 +6437,15 @@ function executeAction(taskId, action, ctx, options = {}) {
     at: now,
   });
   refreshActionIndexes();
+  if (execution.status === 'executed') {
+    publishReliabilityEvent({
+      event_type: 'action',
+      agent: toAgent,
+      task_id: ctx.short_id || ctx.task_id,
+      source_ref: action.action_id,
+      guidance: action.guidance || action.summary,
+    });
+  }
   return action;
 }
 
@@ -7547,6 +7574,8 @@ atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch qu
   atf learnings list                     查看所有 learnings
   atf learnings scan                    扫描可 promote 条目
   atf learnings promote                 执行 promote → MEMORY
+  atf event|obligation|envelope|verify|reconcile  事件、义务、Work Envelope 与 verifier
+  atf a2a|context|metrics               A2A、session context 与运行指标
   atf block <taskId> <question>         阻塞任务，等待 Vinson 决策
   atf decide <taskId> <answer>          Vinson 回答，继续执行
   atf revise <taskId> <feedback>        Vinson 不满意，打回重做
@@ -7555,6 +7584,21 @@ atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch qu
 }
 
 switch (cmd) {
+  case 'event':
+  case 'obligation':
+  case 'envelope':
+  case 'verify':
+  case 'reconcile':
+  case 'a2a':
+  case 'context':
+  case 'metrics': {
+    const script = path.join(__dirname, 'workspace', 'bin', 'atf-reliability.cjs');
+    const result = spawnSync(process.execPath, [script, cmd, ...args], { encoding: 'utf8', env: process.env });
+    if (result.stdout) console.log(result.stdout.trimEnd());
+    if (result.stderr) console.error(result.stderr.trimEnd());
+    if (result.status) process.exitCode = result.status;
+    break;
+  }
   case 'list': {
     const tasks = getAllTasks().sort((a, b) => (a.taskNum||0)-(b.taskNum||0));
     console.log(`\n任务列表 (共 ${tasks.length} 个)\n`);
@@ -7730,8 +7774,16 @@ switch (cmd) {
       created_at: now
     };
     const delivery = writeDirectTaskPendingSignal(taskId, ctx, pending);
+    const event = publishReliabilityEvent({
+      event_type: 'assign',
+      agent,
+      task_id: ctx.short_id || ctx.task_id,
+      source_ref: `${ctx.short_id || ctx.task_id}:assign:${now}`,
+      guidance: `Accept and execute ${ctx.short_id || ctx.task_id}, then write status back to ATF.`,
+    });
     console.log(`✅ 已指派 ${taskId} → ${agent}`);
     console.log(`   pending-task.json → ${delivery.file_path}`);
+    console.log(`   event: ${event.event_id}`);
     console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
     if (hasTaskProfile(ctx)) console.log(`   task_profile: ${formatTaskProfileSummary(ctx)}`);
     const assigneeReputation = findAgentReputation(agent, loadReputationIndex());
@@ -10935,10 +10987,10 @@ switch (cmd) {
       const registry = loadAgentRegistry({ persistIfMissing: false });
       if (!registry.agents.length) { console.log('当前暂无注册 agent'); break; }
       console.log(`\nRegistered Agents (${registry.agents.length})\n`);
-      console.log('agent           enabled  source      workspace');
-      console.log('-'.repeat(88));
+      console.log('agent           enabled  runtime    source      workspace');
+      console.log('-'.repeat(100));
       for (const entry of registry.agents) {
-        console.log(`${entry.agent.padEnd(15)} ${String(entry.enabled !== false).padEnd(8)} ${String(entry.source || '-').padEnd(10)} ${entry.workspace || '-'}`);
+        console.log(`${entry.agent.padEnd(15)} ${String(entry.enabled !== false).padEnd(8)} ${String(entry.runtime || 'openclaw').padEnd(10)} ${String(entry.source || '-').padEnd(10)} ${entry.workspace || '-'}`);
       }
       console.log('');
       break;
@@ -10996,7 +11048,7 @@ switch (cmd) {
     if (sub === 'register') {
       const [agentRaw, ...optionParts] = restArgs;
       if (!agentRaw) {
-        console.error('用法: atf agent register <agent> [workspace=/path] [source=x] [enabled=true|false]');
+        console.error('用法: atf agent register <agent> [workspace=/path] [runtime=openclaw|hermes] [source=x] [enabled=true|false]');
         break;
       }
       const agentName = normalizeAgentName(agentRaw);
@@ -11006,6 +11058,7 @@ switch (cmd) {
       }
       let workspace = null;
       let source = null;
+      let runtime = null;
       let enabled;
       let invalidArgs = false;
       for (const part of optionParts.filter(Boolean)) {
@@ -11015,6 +11068,11 @@ switch (cmd) {
         }
         if (part.startsWith('source=')) {
           source = part.substring('source='.length);
+          continue;
+        }
+        if (part.startsWith('runtime=')) {
+          runtime = part.substring('runtime='.length).trim().toLowerCase();
+          if (!AGENT_RUNTIMES.has(runtime)) invalidArgs = true;
           continue;
         }
         if (part.startsWith('enabled=')) {
@@ -11028,13 +11086,14 @@ switch (cmd) {
         break;
       }
       if (invalidArgs) {
-        console.error('用法: atf agent register <agent> [workspace=/path] [source=x] [enabled=true|false]');
+        console.error('用法: atf agent register <agent> [workspace=/path] [runtime=openclaw|hermes] [source=x] [enabled=true|false]');
         break;
       }
-      const result = upsertAgentRegistryEntry(agentName, { workspace, source, enabled });
+      const result = upsertAgentRegistryEntry(agentName, { workspace, runtime, source, enabled });
       console.log('\nAgent Register\n');
       console.log(`agent=${result.entry.agent}  created=${result.created}  updated=${result.updated}  enabled=${result.entry.enabled !== false}  source=${result.entry.source || '-'}`);
       console.log(`workspace=${result.entry.workspace || '-'}`);
+      console.log(`runtime=${result.entry.runtime || 'openclaw'}`);
       console.log(`registry_total=${result.registry.agents.length}`);
       console.log('');
       break;
@@ -11176,6 +11235,13 @@ switch (cmd) {
             summary: `${toAgent} has pending ${message.message_type} message ${message.message_id} from ${fromAgent}`,
           })
         : null;
+      const wakeEvent = wakeSignal ? publishReliabilityEvent({
+        event_type: 'message',
+        agent: toAgent,
+        task_id: message.task_id,
+        source_ref: message.message_id,
+        guidance: `Acknowledge or reply to ${message.message_id} through ATF.`,
+      }) : null;
       if (replyToMessageId) {
         const repliedMessage = readMessage(taskId, replyToMessageId);
         if (repliedMessage?.to_agent === fromAgent) {
@@ -11204,6 +11270,7 @@ switch (cmd) {
       console.log(`   类型: ${message.message_type}  |  TTL: ${message.ttl_seconds}s`);
       console.log(`   thread: ${message.thread_id}${message.focus_id ? `  |  focus: ${message.focus_id}` : ''}${message.reply_to_message_id ? `  |  reply: ${message.reply_to_message_id}` : ''}`);
       if (wakeSignal) console.log(`   wake-signal: ${wakeSignal.file_path}`);
+      if (wakeEvent) console.log(`   event: ${wakeEvent.event_id}`);
       if (firedTriggers.length) console.log(`   trigger fires: ${firedTriggers.map(f => f.fire_id).join(', ')}`);
       break;
     }
@@ -11476,7 +11543,11 @@ switch (cmd) {
   // =============================================================
   case 'learnings': {
     const [sub, ...restArgs] = args;
-    const WORKSPACES = [...new Set([WORKSPACE_DIR, ...Object.values(AGENT_WORKSPACES)])];
+    const WORKSPACES = [...new Set([
+      WORKSPACE_DIR,
+      ...Object.values(AGENT_WORKSPACES),
+      ...loadAgentRegistry().agents.map(entry => entry.workspace).filter(Boolean),
+    ])];
     const TYPES = {
       errors: { file: 'ERRORS.md', name: 'ERROR' },
       learnings: { file: 'LEARNINGS.md', name: 'LEARN' },
@@ -11758,5 +11829,5 @@ ${body}\n`;
 
   default:
     console.error(`未知命令: ${cmd}`);
-    console.error('用法: atf create|list|status|stats|profile|assign|update|fan-out|focus|trigger|reflect|review|action|credits|reputation|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
+    console.error('用法: atf create|list|status|stats|profile|assign|update|fan-out|focus|trigger|reflect|review|action|event|obligation|envelope|verify|reconcile|a2a|context|metrics|credits|reputation|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
 }

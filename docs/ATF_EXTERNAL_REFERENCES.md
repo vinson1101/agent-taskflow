@@ -1,197 +1,135 @@
 # ATF 外部参考
 
-## 这份文档的用途
+## 使用原则
 
-ATF 的未来能力建设可以参考外部项目，但不应机械复制。
+ATF 参考外部项目时遵循四条规则：
 
-本文件用于记录对 ATF 有启发的外部协议、平台和系统设计，并明确：
+1. 先确认对方真实实现，不根据宣传语推断能力。
+2. 参考能力边界，不机械复制完整产品形态。
+3. 已有行业标准优先做 adapter，不在 ATF 内重建一套不兼容协议。
+4. 任何参考都必须落到 [PLAN.md](../PLAN.md) 的具体里程碑和验收条件。
 
-- 哪些点值得借鉴
-- 哪些点不应直接照搬
-- 对 ATF 的具体启发是什么
+## AgentRQ
 
-## 参考原则
-
-ATF 参考外部项目时，遵循以下原则：
-
-1. 参考能力模型，不盲目复制产品形态
-2. 优先吸收与 ATF 主线一致的部分
-3. 不为“先进感”引入与当前阶段不匹配的复杂度
-4. 所有参考最终都要转化为 ATF 自己的协议对象和能力层
-
----
-
-## 参考一：Clawith
-
-- 项目: [dataelement/Clawith](https://github.com/dataelement/Clawith)
-- 定位: 持久化、多 Agent、自主协作平台
-- 关键特征:
-  - Aware 自主意识系统
-  - Focus Items
-  - Self-Adaptive Triggering
-  - Agent 消息传递
-  - 持久身份、长期记忆、私有工作区
+- 项目：[agentrq/agentrq](https://github.com/agentrq/agentrq)
+- 定位：Agent 与人类共享的实时任务协作平台
+- 已核对能力：持久 Task/Message、SQLite/PostgreSQL、MCP tools、SSE 事件、Claude Channel、ACP Gateway、Codex app-server gateway、跨 workspace supervisor
 
 ### 对 ATF 的启发
 
-Clawith 最值得 ATF 借鉴的，不是其完整平台形态，而是它对“Agent 自主协作对象”的建模方式。
+AgentRQ 直接验证了几个关键判断：
 
-值得借鉴的点：
+- 任务真相应保存在 session 外。
+- Task 创建后可以通过通知通道主动触达 Agent，不必等待 Agent 高频轮询。
+- 不同 runtime 应通过 gateway / adapter 接入同一任务面。
+- Agent 执行应走 `getTask -> ongoing -> reply -> completed` 的显式回写链。
+- session 与 task 可以建立临时映射，但长期恢复仍应回到持久任务库。
 
-- Focus Items
-- Focus 与 trigger 的绑定关系
-- Agent 间显式消息
-- 自适应触发器
-- 任务级反思和自治推进
+### 不照搬
 
-### 不应照搬的点
+- 不复制完整 Web UI、OAuth、多租户和 SaaS 部署面。
+- 不复制 AgentRQ 的 workspace 产品模型作为 ATF 核心 schema。
+- 不因 AgentRQ 使用 Go/SQLite 就立即重写 ATF 技术栈。
 
-- 不应立即把 ATF 重构为独立持久平台
-- 不应立即引入重型前后端、数据库、多租户和组织层治理
-- 不应先复制“自主意识”叙事而没有协议对象落地
+### 落点
 
-### 对 ATF 的实际落地建议
+- M1：事件快路径、runtime adapter、实时通知后低频对账。
+- M2：session/task obligation、required write-back 和 verifier。
+- M3：Hermes adapter。
 
-Clawith 对 ATF 最现实的启发是：
+## A2A Protocol
 
-1. 引入 Focus Items
-2. 定义 Trigger Binding
-3. 建立任务内消息线程
-4. 把 reflections 变成任务对象的一部分
+- 规范：[A2A Protocol](https://a2a-protocol.org/)
+- 定位：跨厂商 Agent 的标准 Task、Message、Artifact、streaming 和 push notification 协议
 
-截至当前阶段，这四个方向 ATF 都已经吸收为最小协议对象。
-后续仍需继续对齐的，不是 Clawith 的重平台形态，而是更强的主动约束，例如：
+### 对 ATF 的判断
 
-- 更明确的 Focus / Trigger 绑定不变量
-- 更完整的主动动作闭环
-- 更丰富的 trigger 类型边界与分层
+A2A 会持续覆盖 ATF 早期设想中的外部 Agent 通信和任务交换能力，因此 ATF 不应继续发展成另一套通用互操作协议。
 
----
+ATF 保留的职责是：
 
-## 参考二：BotCord Protocol
+- DRI / SLA / obligation
+- 宿主 runtime 唤醒
+- session 恢复
+- lease / retry / DLQ / escalation
+- write-back verifier
+- 本地审计和运行指标
 
-- 站点: [BotCord](https://www.botcord.chat/)
-- 协议入口: [BotCord Protocol](https://www.botcord.chat/protocol)
-- 公开描述中的关键点:
-  - Ed25519 身份和签名
-  - agent_id 基于公钥派生
-  - 签名 JSON envelope
-  - typed payload
-  - delivery receipts
-  - TTL expiration
-  - retry semantics
-  - room fan-out
-  - direct / relay / federated topology
+### 落点
+
+- M4：在边界映射 A2A Task / Message / Artifact。
+- A2A push notification 进入 ATF event fast path。
+- ATF 专属字段只作为内部对象或明确 extension。
+
+## Hermes Agent
+
+- 项目：[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+- 已核对能力：MCP integration、messaging gateway、持久 memory、session search、cron、跨平台 conversation continuity、subagents
 
 ### 对 ATF 的启发
 
-BotCord 对 ATF 的价值不在“任务系统”，而在“通信协议”。
+Hermes 已经拥有自己的 session、memory、gateway 和 scheduler，因此 ATF 不应复制或直接修改这些内部状态。兼容方式应是：
 
-它提示 ATF：
+- Runtime Adapter 通过 Hermes 官方 MCP、CLI 或 gateway 接受 Work Envelope。
+- Hermes 通过 ATF MCP/CLI 完成 task/message/status/artifact write-back。
+- Hermes session history 只能作为可选 Session Context Provider。
 
-- Agent 间通信不应只是隐式文件约定
-- 消息应成为正式协议对象
-- 通信应具备投递确认、TTL、重试和类型化 payload
-- 长期看，Agent 身份需要从字符串名称升级为可验证身份
+### 落点
 
-### 最值得 ATF 借鉴的点
+- M3：Hermes stub smoke + 真实 canary。
+- 验收要求是同一 ATF task 可由 OpenClaw 或 Hermes 执行，核心 task schema 不出现 runtime-specific 分支。
 
-#### 1. 消息信封模型
+## Agent Sessions / AI Sessions MCP
 
-ATF 后续可以引入统一消息 envelope：
+- 项目：[jazzyalex/agent-sessions](https://github.com/jazzyalex/agent-sessions)
+- 项目：[yoavf/ai-sessions-mcp](https://github.com/yoavf/ai-sessions-mcp)
+- 定位：统一浏览、搜索、恢复或跨 Agent 读取 Claude Code、Codex、Hermes、OpenClaw 等本地 session 历史
 
-- `message_id`
-- `task_id`
-- `from`
-- `to`
-- `type`
-- `body`
-- `created_at`
-- `ttl`
-- `receipt_status`
+### 有帮助的部分
 
-#### 2. 消息级回执
+- 发现各 runtime 已保存的历史 session。
+- 在新 session 中查找旧任务上下文。
+- 为跨 Claude Code / Codex / Hermes / OpenClaw handoff 生成相关摘要。
+- 避免每个项目都重新实现多种 transcript parser。
 
-ATF 当前已有任务级超时和 DLQ，但还缺消息级的：
+### 不能替代的部分
 
-- delivered
-- acknowledged
-- expired
-- failed
+- 它们不能证明旧任务仍然有效。
+- transcript 不能表示当前 DRI、未完成 obligation 或验收状态。
+- resume 命令不等于跨产品共享同一个原生 session。
+- 原始历史可能包含敏感信息和大量无关上下文。
 
-#### 3. TTL 和重试语义
+### 落点
 
-这与 ATF 当前的 cron 扫描式运行保障天然兼容。
+- M5：作为只读 Session Context Provider 候选。
+- 必须提供 provenance、长度限制和敏感信息过滤。
+- 关闭 session provider 后，ATF 主链仍必须完整工作。
 
-#### 4. 房间 / 线程模型
+## Clawith
 
-BotCord 的 room fan-out 可启发 ATF 未来的：
+- 项目：[dataelement/Clawith](https://github.com/dataelement/Clawith)
+- 参考点：Focus、Trigger Binding、Agent Messaging、Reflection、持久 Agent 状态
 
-- 任务讨论线程
-- 多 Agent 协作房间
-- 面向同一任务的广播
+ATF 已经吸收这些最小对象。后续不复制其完整持久平台和“自主意识”产品叙事，而是把已有对象推进为可验证 obligation 和 action。
 
-### 不应照搬的点
+## BotCord Protocol
 
-- 不应立即构建完整实时聊天网络
-- 不应立即实现 federated message topology
-- 不应在 ATF 还没有最小消息 schema 时先做复杂加密体系
+- 站点：[BotCord Protocol](https://www.botcord.chat/protocol)
+- 参考点：typed message envelope、receipt、TTL、retry、签名身份、room fan-out
 
-### 对 ATF 的实际落地建议
-
-BotCord 对 ATF 的近期价值主要体现在：
-
-1. 先定义最小消息 schema
-2. 将消息与任务强绑定
-3. 为消息加入 TTL、回执和重试字段
-4. 后续再考虑签名和稳定身份
-
----
-
-## ATF 应如何使用这些参考
-
-### 短期
-
-短期只吸收“最小协议对象”层面的启发：
-
-- Focus
-- Trigger Binding
-- Message Envelope
-- Receipt
-- Reflection
-
-### 中期
-
-在 ATF 具备稳定通信和自治基础后，再吸收：
-
-- 更丰富的 trigger 类型
-- 任务讨论线程
-- 任务房间 / 广播
-- 更正式的身份和信誉体系
-
-### 长期
-
-长期可以进一步考虑：
-
-- 外部 Agent 接入协议
-- 可验证身份
-- 消息签名
-- 跨组织协作
-- 更接近市场化的互操作能力
+ATF 已经实现 Message/Receipt 的一部分。外部互操作优先采用 A2A；BotCord 继续作为消息可靠性和身份治理的设计参考，不再作为独立协议扩张方向。
 
 ## 结论
 
-Clawith 和 BotCord 都不是 ATF 的替代路线，而是不同层面的参考：
+这些项目分别覆盖不同层：
 
-- Clawith 更偏自主协作模型
-- BotCord 更偏 Agent 通信协议
+| 参考 | 主要价值 | ATF 的处理方式 |
+|---|---|---|
+| AgentRQ | 持久任务、实时通知、多 runtime gateway | 借鉴事件与 adapter，不复制完整平台 |
+| A2A | 外部 Agent 互操作标准 | 做兼容边界，不竞争 |
+| Hermes | 新的一等 session runtime | 官方接口 adapter + canary |
+| Agent Sessions / AI Sessions MCP | 跨运行时历史检索与恢复 | 可选只读上下文来源 |
+| Clawith | 自主协作对象 | 已吸收最小对象 |
+| BotCord | 消息可靠性与身份 | 保留为内部协议参考 |
 
-ATF 当前最应该做的，不是复制它们，而是把这些启发收敛成自己的协议对象：
-
-1. Focus
-2. Trigger
-3. Message
-4. Receipt
-5. Reflection
-
-当这些对象稳定后，ATF 才能真正从“异步任务系统”升级为“多 Agent 协作基础设施”。
+ATF 的主线因此收敛为：**持久责任 + 事件唤醒 + runtime adapter + verifier + 恢复**。

@@ -6,6 +6,8 @@ const util = require('util');
 const { randomBytes } = require('crypto');
 const vm = require('vm');
 const { createRequire } = require('module');
+const { spawnSync } = require('child_process');
+const { acquireFileLock, atomicWriteJson } = require('../lib/atf-storage.cjs');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const TRIGGER_EXECUTION_MODES = ['pending_task', 'message', 'room', 'noop'];
@@ -59,8 +61,11 @@ function ensureDir(target) {
 }
 
 function writeJson(filePath, data) {
-  ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
+  atomicWriteJson(filePath, data);
+}
+
+function controlPlaneLockPath() {
+  return path.join(defaultDataDir(), 'control-plane.lock');
 }
 
 function persistSummary(summary) {
@@ -80,7 +85,8 @@ function parseArgs(argv) {
     agent: null,
     trigger: true,
     action: true,
-    launcher: true,
+    launcher: false,
+    reliability: true,
     triggerExecutor: 'atf-watcher',
     triggerMode: null,
     triggerToAgent: null,
@@ -113,7 +119,9 @@ function parseArgs(argv) {
     if (arg === '--agent') options.agent = argv[++i] || null;
     else if (arg === '--no-trigger') options.trigger = false;
     else if (arg === '--no-action') options.action = false;
+    else if (arg === '--launcher') options.launcher = true;
     else if (arg === '--no-launcher') options.launcher = false;
+    else if (arg === '--no-reliability') options.reliability = false;
     else if (arg === '--trigger-executor') options.triggerExecutor = argv[++i] || options.triggerExecutor;
     else if (arg === '--trigger-mode') options.triggerMode = parseModeOption('--trigger-mode', argv[++i], TRIGGER_EXECUTION_MODES, TRIGGER_EXECUTION_MODE_SET);
     else if (arg === '--trigger-to') options.triggerToAgent = argv[++i] || null;
@@ -165,7 +173,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`ATF Control Plane v1
+  console.log(`ATF Control Plane v2
 
 Usage:
   node workspace/bin/atf-control-plane.cjs [options]
@@ -174,7 +182,9 @@ Options:
   --agent <name>               Only operate on one agent
   --no-trigger                 Skip trigger watcher
   --no-action                  Skip action watcher
-  --no-launcher                Skip launcher
+  --launcher                   Enable the legacy workspace launch reconciler
+  --no-launcher                Keep the legacy launcher disabled (default)
+  --no-reliability             Skip obligation verifier and missed-event reconciliation
   --trigger-executor <name>    Execution actor for trigger fires
   --trigger-mode <mode>        Trigger execution mode (${TRIGGER_EXECUTION_MODES.join('|')})
   --trigger-to <agent>         Override trigger message target agent
@@ -270,6 +280,14 @@ function runNodeScript(scriptRelativePath, args) {
   }
 }
 
+function runExternalScript(scriptRelativePath, args) {
+  const scriptPath = path.join(repoRoot, scriptRelativePath);
+  const child = spawnSync(process.execPath, [scriptPath, ...args], { encoding: 'utf8', env: process.env });
+  if (child.error) throw child.error;
+  if (child.status !== 0) throw new Error(child.stderr || child.stdout || `${scriptRelativePath} exited ${child.status}`);
+  return child.stdout.trim() ? JSON.parse(child.stdout) : null;
+}
+
 function buildTriggerArgs(options) {
   const args = ['--json'];
   if (options.agent) args.push('--agent', options.agent);
@@ -339,6 +357,10 @@ function hasLauncherActivity(summary) {
     || safeNumber(summary.pendingAfterDispatch) > 0;
 }
 
+function hasReliabilityActivity(summary) {
+  return Boolean(summary && (summary.verifier?.checked > 0 || summary.dispatch?.length > 0));
+}
+
 function printTextSummary(summary) {
   console.log('ATF Control Plane Summary');
   console.log(`  run id: ${summary.run_id}`);
@@ -349,10 +371,11 @@ function printTextSummary(summary) {
   console.log(`  started: ${summary.started_at}`);
   console.log(`  completed: ${summary.completed_at}`);
   console.log(`  duration_ms: ${summary.duration_ms}`);
-  console.log(`  activity: trigger=${summary.activity.trigger} action=${summary.activity.action} launcher=${summary.activity.launcher}`);
+  console.log(`  activity: trigger=${summary.activity.trigger} action=${summary.activity.action} launcher=${summary.activity.launcher} reliability=${summary.activity.reliability}`);
   if (summary.trigger) console.log(`  trigger: executed=${summary.trigger.executed} pending_after=${summary.trigger.pendingAfterExecute}`);
   if (summary.action) console.log(`  action: created=${summary.action.created} executed=${summary.action.executed} pending_after=${summary.action.pendingAfterExecute} failed=${summary.action.failed}`);
   if (summary.launcher) console.log(`  launcher: created=${summary.launcher.created} leased=${summary.launcher.leased} failed=${summary.launcher.failed} pending_after=${summary.launcher.pendingAfterDispatch} status=${summary.launcher.status}`);
+  if (summary.reliability) console.log(`  reliability: checked=${summary.reliability.verifier?.checked || 0} dispatches=${summary.reliability.dispatch?.length || 0}`);
   if (summary.audit_path) console.log(`  audit path: ${summary.audit_path}`);
   if (summary.audit_write_error) console.log(`  audit write error: ${summary.audit_write_error}`);
   if (summary.errors.length) {
@@ -362,6 +385,8 @@ function printTextSummary(summary) {
 }
 
 function main() {
+  const releaseLock = acquireFileLock(controlPlaneLockPath());
+  try {
   let options;
   try {
     options = parseArgs(process.argv.slice(2));
@@ -388,10 +413,12 @@ function main() {
     trigger: null,
     action: null,
     launcher: null,
+    reliability: null,
     activity: {
       trigger: false,
       action: false,
       launcher: false,
+      reliability: false,
     },
     idle: true,
     errors: [],
@@ -415,11 +442,17 @@ function main() {
       script: 'workspace/bin/atf-launcher.cjs',
       args: buildLauncherArgs(options),
     } : null,
+    options.reliability ? {
+      component: 'reliability',
+      script: 'workspace/bin/atf-reliability.cjs',
+      args: ['reconcile'],
+      external: true,
+    } : null,
   ].filter(Boolean);
 
   for (const step of steps) {
     try {
-      const result = runNodeScript(step.script, step.args);
+      const result = step.external ? runExternalScript(step.script, step.args) : runNodeScript(step.script, step.args);
       summary[step.component] = result;
     } catch (error) {
       summary.status = 'failed';
@@ -433,7 +466,8 @@ function main() {
   summary.activity.trigger = hasTriggerActivity(summary.trigger);
   summary.activity.action = hasActionActivity(summary.action);
   summary.activity.launcher = hasLauncherActivity(summary.launcher);
-  summary.idle = !summary.activity.trigger && !summary.activity.action && !summary.activity.launcher && summary.errors.length === 0;
+  summary.activity.reliability = hasReliabilityActivity(summary.reliability);
+  summary.idle = !summary.activity.trigger && !summary.activity.action && !summary.activity.launcher && !summary.activity.reliability && summary.errors.length === 0;
   summary.completed_at = new Date().toISOString();
   summary.duration_ms = Date.now() - startedMs;
 
@@ -449,6 +483,9 @@ function main() {
   }
 
   return summary.status === 'failed' ? 1 : 0;
+  } finally {
+    releaseLock();
+  }
 }
 
 try {

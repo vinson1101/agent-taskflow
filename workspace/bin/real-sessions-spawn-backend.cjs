@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { atomicWriteJson } = require('../lib/atf-storage.cjs');
 const { spawnSync } = require('child_process');
 
 function trimText(value, limit = 2000) {
@@ -138,8 +139,7 @@ function buildExecutionContext(payload, context = {}) {
 }
 
 function writeEvent(eventPath, event) {
-  fs.mkdirSync(path.dirname(eventPath), { recursive: true });
-  fs.writeFileSync(eventPath, `${JSON.stringify(event, null, 2)}\n`, 'utf8');
+  atomicWriteJson(eventPath, event);
 }
 
 function buildEventBase(payload, context, mode) {

@@ -7,6 +7,7 @@ const util = require('util');
 const vm = require('vm');
 const { randomBytes } = require('crypto');
 const { createRequire } = require('module');
+const { atomicWriteJson } = require('../lib/atf-storage.cjs');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const atfCliPath = path.join(repoRoot, 'atf-cli.js');
@@ -75,8 +76,7 @@ function readJson(filePath) {
 }
 
 function writeJson(filePath, data) {
-  ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
+  atomicWriteJson(filePath, data);
 }
 
 function generateRunId() {

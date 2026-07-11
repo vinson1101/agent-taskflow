@@ -2,124 +2,140 @@
 
 ## 一句话定义
 
-ATF 是运行在 OpenClaw 之上的异步多 Agent 协作控制层。
+ATF 是面向 OpenClaw、Hermes 等 session 型 Agent 的、兼容 A2A 的事件优先可靠性控制面。
 
-它不是独立的 Agent 平台，也不是支付工具，而是为多 Agent 协作提供任务协议、状态流转、责任边界和失败恢复机制。
+它不是独立 Agent 平台，也不是新的通用 Agent 通信标准。ATF 在 session 外持久保存任务责任，负责事件投递、运行时唤醒、回写验证和失败恢复。
 
-## 项目初衷
+## 为什么调整定位
 
-ATF 最早面向未来的 agent-to-agent 场景设计，目标是为 Agent 协作市场提供底层协议能力，包括：
+当前 OpenClaw 主链已经证明文件协议、任务状态、follow-up、launch 和审计回写可以工作，但也暴露了三个结构性问题：
 
-- 任务派发
-- 签收与接单
-- 执行跟踪
-- 交付确认
-- 评价与信誉
-- 激励与结算
+1. 高频轮询浪费资源，低频轮询增加任务等待时间。
+2. Agent 依赖 session；session 退出后，未持久化的意图和通信义务不可靠。
+3. A2A 和上层协作平台正在覆盖 Task、Message、Artifact 与跨 Agent 互操作，ATF 不应继续把自建外部通信协议作为核心价值。
 
-在实际推进中，项目范围被主动缩小到一个更现实的切口：
+因此，ATF 的核心从“让 Agent 通过轮询发现任务”调整为“让持久控制面主动驱动一次性 session，并验证结果回写”。
 
-- 先服务于 `claw-army` 这类私有多 Agent 协作场景
-- 解决 OpenClaw 本身缺少显式多 Agent 协作讨论和任务编排的问题
-- 先建立异步协作链路，再扩展到评价、激励和市场机制
+## 产品边界
 
-## 当前定位
+### ATF 负责
 
-当前 ATF 的真实定位应定义为：
+- Task、DRI 和 obligation 的持久状态
+- 事件生成、去重、debounce 和 dispatch
+- OpenClaw / Hermes runtime adapter
+- Work Envelope 和跨 session 任务恢复
+- required write-back 与 verifier
+- timeout、retry、lease、DLQ 和 escalation
+- 审计、review 和运行质量指标
+- A2A 边界映射
 
-**OpenClaw 上的异步多 Agent 协作内核**
+### 宿主 Runtime 负责
 
-当前已经验证的主链路是：
+- 创建、恢复或接收 session
+- 模型推理和工具执行
+- 返回 runtime session reference
+- 通过 ATF 工具或协议完成正式回写
 
-1. 通过 CLI 创建任务
-2. 将任务指派给 Agent
-3. 通过文件信号让 Agent 在后续 heartbeat / cron 扫描中发现任务
-4. Agent 执行任务并更新状态
-5. 通过 cron 驱动的 watch / scan 脚本补充超时检测、催办、DLQ 和归档
+### A2A 负责
 
-这意味着 ATF 已经证明：
+- 外部 Agent 能力发现
+- 标准 Task / Message / Artifact 交换
+- 跨系统状态更新、streaming 和 push notification
 
-- 异步任务派发可行
-- 任务状态回写可行
-- 文件驱动的 Agent 协作协议可行
-- 失败恢复与重试机制具备基础雏形
-- 基于 cron 扫描的运行保障链路可行
+ATF 专属的 DRI、obligation、verifier、DLQ 和 escalation 可以作为内部能力或明确 extension，但不应复制一套不兼容的 A2A 外部协议。
 
-## 当前不是 ATF 的东西
+## 核心运行模型
 
-为了避免方向漂移，当前阶段需要明确以下非目标：
+### 事件快路径
 
-- 不是实时聊天系统
-- 不是实时多 Agent 讨论平台
-- 不是完整的 Agent 市场
-- 不是支付优先的产品
-- 不是独立部署的重型多租户平台
+当 Task、Message、Trigger 或 Action 产生可执行义务时，ATF 立即生成 durable event，通过对应 runtime adapter 唤醒 Agent。
 
-这些方向可能在未来出现，但不应主导当前阶段的设计。
+同一 Agent 的短时间事件应合并和去重；如果 runtime 支持向活跃 session 投递，应优先复用，否则创建新 session。
 
-## 当前最有价值的能力
+### 低频 Reconciler
 
-ATF 当前最值得保留和强化的能力不是“更聪明的 Agent”，而是“更稳定的协作秩序”：
+轮询仍然保留，但只承担：
 
-- 任务协议
-- 签收与状态流转
-- DRI / 责任边界
-- 超时检测
-- DLQ / 重试 / 取消
-- 交付确认
-- learnings / lessons 沉淀
+- 漏投递修复
+- 超时和失效 lease 检查
+- 未回写 obligation 检查
+- 可重建索引修复
 
-这些能力决定了多 Agent 系统能否长期工作，而不是单次跑通。
+空闲 reconciler 不能唤醒 LLM。
 
-## ATF 为什么重要
+### Session 外持久状态
 
-在单 Agent 阶段，核心问题是“它能不能完成任务”。
+Session 不拥有任务真相。每次执行由 Work Envelope 提供：
 
-在多 Agent 阶段，核心问题变成：
+- 唤醒原因
+- 当前任务和 DRI
+- 未读消息与待处理 obligation
+- 必要的上下文摘要和引用
+- required write-backs
+- verifier 检查项
 
-- 谁负责
-- 谁接单
-- 什么时候交接
-- 卡住时谁决策
-- 错误怎么恢复
-- 产出怎么验证
-- 历史如何沉淀为组织能力
+原始 transcript 可以作为可选上下文来源，但不能代替正式 Task、Artifact 或 write-back。
 
-ATF 正在解决的是后一类问题。这一层是未来多 Agent 系统真正的基础设施层。
+## 首批兼容范围
 
-## 当前约束
+### OpenClaw
 
-ATF 当前仍受到宿主环境限制：
+现有文件协议、launcher、`sessions_spawn` bridge 和 control-plane 是当前基线。后续将其包装为 Runtime Adapter v1，并保持既有 smoke 不回归。
 
-- 依托 OpenClaw heartbeat / cron 驱动，不是实时系统
-- 扫描间隔长，不适合即时任务
-- watch 本质上是 cron 扫描，不是常驻事件驱动 watcher
-- 已有最小 Agent 间消息通道，但还不是跨节点实时通信层
-- 已有最小任务内讨论线程，但还没有完整广播 / 订阅模型
-- 评价与信誉闭环已在内部场景下跑通，但激励 / 结算仍未形成闭环
-- 一部分旧代码和黑客松材料仍在仓库中，容易干扰当前定位
+### Hermes Agent
 
-## 当前阶段的核心目标
+Hermes 是明确的一等兼容目标。集成必须使用 Hermes 官方 MCP、CLI 或 gateway 能力，不直接修改 Hermes 内部数据库。Hermes 应能接收 Work Envelope，并通过 ATF MCP/CLI 回写任务状态、消息、ack 和 artifact reference。
 
-当前阶段不应急于做市场，而应优先把异步协作协议做实。
+### 其他 Coding Agents
 
-优先级如下：
+Claude Code、Codex、Gemini CLI 等可以通过 MCP、ACP、app-server gateway 或 A2A adapter 接入。ATF 不要求它们共享同一个原生 session；只要求能读取相关 Work Envelope 并完成可验证回写。
 
-1. 固化任务 schema 和状态机
-2. 补齐 Agent Registry 和依赖关系
-3. 完善阻塞、决策、恢复闭环
-4. 建立更清晰的共享上下文与审计
-5. 再逐步引入评价、信誉与激励
+## 共享 Session 的定位
 
-## 长期愿景
+现有 session 浏览、搜索、恢复和跨 Agent 历史读取项目对上下文恢复有帮助，但它们解决的是“找回过去说过什么”，不是“现在谁必须做什么”。
 
-ATF 的长期愿景不是“又一个任务管理器”，而是：
+ATF 只把这些能力作为可选的 Session Context Provider：
 
-**面向 agent-to-agent 协作时代的协议层和控制层**
+- 只读
+- 按任务检索
+- 输出小摘要和 provenance
+- 可关闭，不影响主链
 
-如果这条路走通，ATF 可以从当前的异步协作内核，逐步发展为：
+## 非目标
 
-- 多 Agent 团队的协作控制台
-- Agent Team Ops 基础设施
-- 企业内部 Agent 执行编排层
-- 最终支持信誉、评价、结算的 Agent 协作市场底层协议
+- 自建 A2A 替代协议
+- 完整实时聊天产品
+- 全量复制各运行时 transcript
+- 统一所有产品的原生 session ID
+- 重型多租户协作 SaaS
+- 支付、结算和开放 Agent 市场
+- 在没有真实压力前引入 broker 或分布式架构
+
+## 当前实现状态
+
+当前已经具备：
+
+- 文件化 Task / Message / Trigger / Action / Launch 对象
+- OpenClaw 侧 launcher 与 bridge
+- lease、retry、DLQ、write-back audit
+- watcher 和 control-plane smoke
+- 事件快路径
+- runtime-neutral adapter contract
+- durable obligation 和 Work Envelope
+- session 结束后的 verifier
+- Hermes Runs API contract canary
+- A2A compatibility smoke
+
+真实 Hermes 部署 canary、跨运行时长期续接成功率实验和生产指标基线依赖目标环境，不能由仓库内 stub 代替。具体完成边界见根目录 [PLAN.md](../PLAN.md)。
+
+## 长期判断
+
+ATF 的长期价值不取决于拥有多少自定义对象，而取决于它是否能稳定降低：
+
+- 任务发现延迟
+- 无效轮询成本
+- session 退出后的遗忘率
+- 缺失回写率
+- 人工催办和异常恢复时间
+
+当宿主 runtime 或标准平台已经可靠覆盖某项能力时，ATF 应删除重复实现或退化为 adapter / policy。

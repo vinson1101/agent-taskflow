@@ -4180,7 +4180,11 @@ function scanLaunchRequests(options = {}) {
       duplicates += 1;
       if (state.blocker === 'cooldown_active') cooldownBlocked += 1;
       if (state.blocker === 'pending_exists' || state.blocker === 'lease_active') activeBlocked += 1;
-      if (state.blocker === 'attempts_exhausted') attemptsExhausted += 1;
+      if (state.blocker === 'attempts_exhausted') {
+        attemptsExhausted += 1;
+        archiveLaunchRequest(state.latest_request, planner, 'automated retry attempts exhausted');
+        archived += 1;
+      }
       continue;
     }
     if (state.latest_request && ['leased', 'failed'].includes(state.latest_request.status)) {

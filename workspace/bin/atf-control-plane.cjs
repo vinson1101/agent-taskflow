@@ -335,6 +335,7 @@ function hasLauncherActivity(summary) {
   if (!summary) return false;
   return safeNumber(summary.created) > 0
     || safeNumber(summary.leased) > 0
+    || safeNumber(summary.failed) > 0
     || safeNumber(summary.pendingAfterDispatch) > 0;
 }
 
@@ -351,7 +352,7 @@ function printTextSummary(summary) {
   console.log(`  activity: trigger=${summary.activity.trigger} action=${summary.activity.action} launcher=${summary.activity.launcher}`);
   if (summary.trigger) console.log(`  trigger: executed=${summary.trigger.executed} pending_after=${summary.trigger.pendingAfterExecute}`);
   if (summary.action) console.log(`  action: created=${summary.action.created} executed=${summary.action.executed} pending_after=${summary.action.pendingAfterExecute} failed=${summary.action.failed}`);
-  if (summary.launcher) console.log(`  launcher: created=${summary.launcher.created} leased=${summary.launcher.leased} pending_after=${summary.launcher.pendingAfterDispatch} status=${summary.launcher.status}`);
+  if (summary.launcher) console.log(`  launcher: created=${summary.launcher.created} leased=${summary.launcher.leased} failed=${summary.launcher.failed} pending_after=${summary.launcher.pendingAfterDispatch} status=${summary.launcher.status}`);
   if (summary.audit_path) console.log(`  audit path: ${summary.audit_path}`);
   if (summary.audit_write_error) console.log(`  audit write error: ${summary.audit_write_error}`);
   if (summary.errors.length) {

@@ -269,6 +269,7 @@ function printTextSummary(summary) {
   console.log(`  pending after dispatch: ${summary.pendingAfterDispatch}`);
   console.log(`  created: ${summary.created}`);
   console.log(`  leased: ${summary.leased}`);
+  console.log(`  failed: ${summary.failed}`);
   console.log(`  archived: ${summary.archived}`);
   if (summary.scanCommand) console.log(`  scan command: ${summary.scanCommand}`);
   if (summary.dispatchCommand) console.log(`  dispatch command: ${summary.dispatchCommand}`);
@@ -310,6 +311,7 @@ function main() {
     pendingAfterDispatch: null,
     created: 0,
     leased: 0,
+    failed: 0,
     archived: 0,
     scanCommand: null,
     dispatchCommand: null,
@@ -336,9 +338,15 @@ function main() {
       summary.dispatchCommand = `node atf-cli.js ${dispatchArgs.join(' ')}`;
       const output = runAtfCli(dispatchArgs).stdout;
       const leasedMatch = output.match(/leased:(\d+)/);
+      const failedMatch = output.match(/failed:(\d+)/);
       const archivedMatch = output.match(/archived:(\d+)/);
       summary.leased = leasedMatch ? Number(leasedMatch[1]) : 0;
+      summary.failed = failedMatch ? Number(failedMatch[1]) : 0;
       summary.archived += archivedMatch ? Number(archivedMatch[1]) : 0;
+      if (summary.failed > 0) {
+        summary.status = 'failed';
+        summary.error = { message: `${summary.failed} launch dispatch request(s) failed` };
+      }
     }
   } catch (error) {
     summary.status = 'failed';

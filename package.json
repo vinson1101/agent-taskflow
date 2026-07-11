@@ -21,7 +21,7 @@
     "atf:control-plane:smoke": "node workspace/bin/atf-control-plane-smoke.cjs",
     "atf:phasec:smoke": "node workspace/bin/atf-phasec-smoke.cjs",
     "atf:phased:smoke": "node workspace/bin/atf-phased-smoke.cjs",
-    "test": "jest"
+    "test": "node workspace/bin/atf-phased-smoke.cjs --cleanup"
   },
   "keywords": [
     "openclaw",

@@ -556,15 +556,27 @@ function main() {
   if (reissuedLaunch.attempt !== 2) throw new Error(`expected reissued launch attempt=2, got ${reissuedLaunch.attempt}`);
   if (reissuedLaunch.reissue_of !== firstLaunchRequest.launch_id) throw new Error(`expected reissued launch to point to ${firstLaunchRequest.launch_id}, got ${reissuedLaunch.reissue_of}`);
 
-  runCli(
-    ['launch', 'dispatch', reissuedLaunch.launch_id, 'dispatcher=phase-d-smoke', 'mode=sessions_spawn', 'lease_minutes=5'],
+  const rejectedLauncherRunOutput = JSON.parse(runLauncher(
+    ['--agent', 'f0x', '--no-scan', '--mode', 'sessions_spawn', '--dispatcher', 'phase-d-smoke', '--lease-minutes', '5', '--json'],
     { ...env, ATF_MOCK_SESSIONS_SPAWN_REJECT: '1' },
     options,
-  );
+  ));
   const rejectedLaunchRequest = readJson(path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${reissuedLaunch.launch_id}.json`));
+  const rejectedLauncherRun = readJson(path.join(env.ATF_DATA_DIR, 'launcher-runs', 'latest.json'));
+  if (rejectedLauncherRunOutput.status !== 'failed') throw new Error(`expected rejected launcher output failed, got ${rejectedLauncherRunOutput.status}`);
+  if (rejectedLauncherRun.status !== 'failed') throw new Error(`expected rejected launcher run failed, got ${rejectedLauncherRun.status}`);
+  if (rejectedLauncherRun.failed !== 1) throw new Error(`expected rejected launcher failed=1, got ${rejectedLauncherRun.failed}`);
   if (rejectedLaunchRequest.status !== 'failed') throw new Error(`expected rejected sessions_spawn request failed, got ${rejectedLaunchRequest.status}`);
   if (!rejectedLaunchRequest.dispatch?.error?.message?.includes('rejected launch')) throw new Error('expected rejected sessions_spawn error');
 
+  const rejectedLaunchPath = path.join(env.ATF_DATA_DIR, 'agent-launch-requests', `${reissuedLaunch.launch_id}.json`);
+  rejectedLaunchRequest.attempt = 3;
+  writeJson(rejectedLaunchPath, rejectedLaunchRequest);
+  const exhaustedLaunchScan = runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=0'], env, options);
+  assertIncludes(exhaustedLaunchScan, 'created=0', 'launch retry cap');
+  assertIncludes(exhaustedLaunchScan, 'exhausted=1', 'launch retry cap');
+  rejectedLaunchRequest.attempt = 2;
+  writeJson(rejectedLaunchPath, rejectedLaunchRequest);
   runCli(['launch', 'scan', 'f0x', 'cooldown_minutes=0'], env, options);
   const acceptedLaunch = readJson(path.join(env.ATF_DATA_DIR, 'pending-launch-requests.json')).items
     .find(item => item.reissue_of === reissuedLaunch.launch_id);

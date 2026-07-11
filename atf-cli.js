@@ -79,6 +79,7 @@ const ACTION_WATCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCHER_RUN_STATUSES = new Set(['completed', 'failed']);
 const CONTROL_PLANE_RUN_STATUSES = new Set(['completed', 'failed']);
 const LAUNCH_REQUEST_STATUSES = new Set(['pending', 'leased', 'failed', 'archived']);
+const MAX_AUTOMATED_REISSUE_ATTEMPTS = 3;
 const LAUNCH_DISPATCH_MODES = new Set(['manual', 'noop', 'sessions_spawn']);
 const TASK_STATUSES = new Set(['created', 'pending', 'assigned', 'confirmed', 'active', 'executing', 'paused', 'blocked', 'completed', 'delivered', 'cancelled', 'archived', 'unknown']);
 const TASK_STATUS_ALIASES = {
@@ -3730,6 +3731,7 @@ function buildLauncherWatcherStatus(options = {}) {
       dry_run: Boolean(latestRun.dryRun),
       created: latestRun.created ?? 0,
       leased: latestRun.leased ?? 0,
+      failed: latestRun.failed ?? 0,
       archived: latestRun.archived ?? 0,
       pending_after_scan: latestRun.pendingAfterScan ?? 0,
       pending_after_dispatch: latestRun.pendingAfterDispatch ?? 0,
@@ -4041,6 +4043,15 @@ function buildLaunchRequestState(candidate, referenceTime = null) {
       blocker: 'pending_exists',
     };
   }
+  if (attempt > MAX_AUTOMATED_REISSUE_ATTEMPTS) {
+    return {
+      blocked: true,
+      attempt,
+      latest_request: latestRequest,
+      cooldown_minutes: cooldownMinutes,
+      blocker: 'attempts_exhausted',
+    };
+  }
     if (latestRequest.status === 'leased') {
       const leaseExpiresAt = parseIsoTimestamp(latestRequest.lease_expires_at);
       if (leaseExpiresAt && leaseExpiresAt.getTime() > reference.getTime()) {
@@ -4140,6 +4151,7 @@ function scanLaunchRequests(options = {}) {
   let duplicates = 0;
   let cooldownBlocked = 0;
   let activeBlocked = 0;
+  let attemptsExhausted = 0;
   let archived = 0;
   const scanNow = new Date().toISOString();
   const observedKeys = new Set(candidates.map(candidate => `${candidate.agent}::${candidate.dedupe_key}`));
@@ -4168,6 +4180,7 @@ function scanLaunchRequests(options = {}) {
       duplicates += 1;
       if (state.blocker === 'cooldown_active') cooldownBlocked += 1;
       if (state.blocker === 'pending_exists' || state.blocker === 'lease_active') activeBlocked += 1;
+      if (state.blocker === 'attempts_exhausted') attemptsExhausted += 1;
       continue;
     }
     if (state.latest_request && ['leased', 'failed'].includes(state.latest_request.status)) {
@@ -4191,6 +4204,7 @@ function scanLaunchRequests(options = {}) {
     archived,
     cooldown_blocked: cooldownBlocked,
     active_blocked: activeBlocked,
+    attempts_exhausted: attemptsExhausted,
   };
 }
 
@@ -5362,6 +5376,15 @@ function buildActionReissueState(taskId, candidate, referenceTime = null) {
       blocker: 'pending_exists',
     };
   }
+  if (attempt > MAX_AUTOMATED_REISSUE_ATTEMPTS) {
+    return {
+      blocked: true,
+      attempt,
+      latest_action: latestAction,
+      cooldown_hours: cooldownHours,
+      blocker: 'attempts_exhausted',
+    };
+  }
 
   const latestAt = latestAction.executed_at || latestAction.updated_at || latestAction.created_at || null;
   const ageHours = latestAt ? computeAgeHours(latestAt, parseIsoTimestamp(referenceTime) || new Date()) : null;
@@ -6215,6 +6238,7 @@ function scanActions(options = {}) {
   let duplicates = 0;
   let cooldownBlocked = 0;
   let pendingBlocked = 0;
+  let attemptsExhausted = 0;
   const scanNow = new Date().toISOString();
 
   for (const candidate of candidates) {
@@ -6223,6 +6247,7 @@ function scanActions(options = {}) {
     if (reissue.blocked) {
       if (reissue.blocker === 'cooldown_active') cooldownBlocked += 1;
       if (reissue.blocker === 'pending_exists') pendingBlocked += 1;
+      if (reissue.blocker === 'attempts_exhausted') attemptsExhausted += 1;
       duplicates += 1;
       continue;
     }
@@ -6241,6 +6266,7 @@ function scanActions(options = {}) {
     duplicates,
     cooldown_blocked: cooldownBlocked,
     pending_blocked: pendingBlocked,
+    attempts_exhausted: attemptsExhausted,
   };
 }
 
@@ -9008,10 +9034,10 @@ switch (cmd) {
         planner: 'cli',
       });
       if (!result.created.length) {
-        console.log(`action scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.pending_blocked ? `  pending=${result.pending_blocked}` : ''}`);
+        console.log(`action scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.pending_blocked ? `  pending=${result.pending_blocked}` : ''}${result.attempts_exhausted ? `  exhausted=${result.attempts_exhausted}` : ''}`);
         break;
       }
-      console.log(`action scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.pending_blocked ? `  pending=${result.pending_blocked}` : ''}`);
+      console.log(`action scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.pending_blocked ? `  pending=${result.pending_blocked}` : ''}${result.attempts_exhausted ? `  exhausted=${result.attempts_exhausted}` : ''}`);
       for (const action of result.created) {
         console.log(`- [${action.task_id}] ${action.action_id}  ${action.kind}  owner=${action.owner_agent || '-'}  try=${action.attempt || 1}  priority=${action.priority}  conf=${action.confidence ?? '-'}  risk=${action.policy?.risk_level || '-'}`);
         console.log(`  ${action.summary}`);
@@ -9461,10 +9487,10 @@ switch (cmd) {
         planner: 'cli',
       });
       if (!result.created.length) {
-        console.log(`launch scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.active_blocked ? `  active=${result.active_blocked}` : ''}${result.archived ? `  archived=${result.archived}` : ''}`);
+        console.log(`launch scan completed  |  scanned=${result.scanned}  created=0  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.active_blocked ? `  active=${result.active_blocked}` : ''}${result.attempts_exhausted ? `  exhausted=${result.attempts_exhausted}` : ''}${result.archived ? `  archived=${result.archived}` : ''}`);
         break;
       }
-      console.log(`launch scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.active_blocked ? `  active=${result.active_blocked}` : ''}${result.archived ? `  archived=${result.archived}` : ''}`);
+      console.log(`launch scan completed  |  scanned=${result.scanned}  created=${result.created.length}  duplicates=${result.duplicates}${result.cooldown_blocked ? `  cooldown=${result.cooldown_blocked}` : ''}${result.active_blocked ? `  active=${result.active_blocked}` : ''}${result.attempts_exhausted ? `  exhausted=${result.attempts_exhausted}` : ''}${result.archived ? `  archived=${result.archived}` : ''}`);
       for (const request of result.created) {
         console.log(`- ${request.launch_id}  agent=${request.agent}  try=${request.attempt || 1}  source=${request.source_type}  cooldown=${request.cooldown_minutes}m`);
         console.log(`  ${request.summary}`);
@@ -9728,8 +9754,9 @@ switch (cmd) {
         break;
       }
       const leasedCount = results.filter(request => request.status === 'leased').length;
+      const failedCount = results.filter(request => request.status === 'failed').length;
       const archivedCount = results.filter(request => request.status === 'archived').length;
-      console.log(`Processed ${results.length} launch requests  |  leased:${leasedCount}  archived:${archivedCount}`);
+      console.log(`Processed ${results.length} launch requests  |  leased:${leasedCount}  failed:${failedCount}  archived:${archivedCount}`);
       for (const request of results) {
         console.log(`   ${request.launch_id}  agent:${request.agent}  status:${request.status}  mode:${request.dispatch_mode || request.dispatch?.mode || mode || 'manual'}`);
         if (request.lease_expires_at) console.log(`      lease_until: ${request.lease_expires_at}`);

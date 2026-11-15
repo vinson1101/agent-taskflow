@@ -26,6 +26,7 @@
     "atf:dsh:hardening:test": "node --test workspace/bin/atf-dsh-hardening-test.cjs",
     "atf:dsh:handoff:smoke": "node workspace/bin/atf-dsh-handoff-smoke.cjs",
     "atf:dsh:integrated:smoke": "node workspace/bin/atf-dsh-integrated-smoke.cjs",
+    "atf:standalone:operator:test": "node --test workspace/bin/atf-standalone-operator-test.cjs",
     "atf:u0:standalone:smoke": "node workspace/bin/atf-u0-standalone-smoke.cjs",
     "atf:dsh:public-research:test": "node --test workspace/bin/atf-public-research-test.cjs",
     "atf:release:packlist": "node workspace/bin/atf-release-packlist.cjs",

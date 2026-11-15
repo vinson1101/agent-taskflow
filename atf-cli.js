@@ -5,6 +5,11 @@
  * 每个任务目录包含: ctx.json, latest.json, README.md, progress.md, research/, notifications/
  */
 
+// Operator bootstrap/status are filesystem-only and must not initialize legacy defaults.
+if (require.main === module && process.argv[2] === 'standalone') {
+  try { process.exitCode = require('./workspace/lib/atf-standalone-operator.cjs').run(process.argv.slice(3)); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
+} else {
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -11897,3 +11902,5 @@ ${body}\n`;
     console.error(`未知命令: ${cmd}`);
     console.error('用法: atf create|list|status|stats|profile|assign|update|fan-out|focus|trigger|reflect|review|action|event|obligation|envelope|verify|reconcile|a2a|context|metrics|credits|reputation|shared|msg|dlq|learnings|delivered|dri|ctx|nextnum|block|decide|revise');
 }
+
+} // ordinary CLI entrypoint

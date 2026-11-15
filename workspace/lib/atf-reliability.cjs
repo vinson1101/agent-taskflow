@@ -273,8 +273,11 @@ async function dispatchEvents(config, options = {}) {
     throw error;
   }
   try {
-    const selected = collection(p.events).filter(event => (event.status === 'pending' || event.status === 'retry')
-      && (!options.eventId || event.event_id === options.eventId));
+    const selected = collection(p.events).filter(event => {
+      if (options.eventId && event.event_id !== options.eventId) return false;
+      if (event.status === 'pending' || event.status === 'retry') return true;
+      return Boolean(options.eventId) && event.runtime === 'dsh' && event.status === 'blocked_review_dispatch';
+    });
     const groups = new Map();
     for (const event of selected) {
       const key = event.runtime === 'dsh' ? event.event_id : `${event.runtime}:${event.agent}`;
@@ -292,6 +295,12 @@ async function dispatchEvents(config, options = {}) {
           event.error = { message: 'DSH requires a staged review event', at: nowIso() };
           writeRecord(p.events, event.event_id, event);
           results.push({ event_ids: [event.event_id], accepted: false, dsh_state: 'unsupported_event' });
+          continue;
+        }
+        if (event.status === 'blocked_review_dispatch' && dshReview.hasDurableIntent(module.exports, config, event.event_id)) {
+          // Manual remediation is for pre-send failures only. If storage
+          // already contains an intent, use the ordinary settle/reconcile path.
+          results.push({ event_ids: [event.event_id], accepted: false, dsh_state: 'intent_exists_reconcile' });
           continue;
         }
         let outcome;

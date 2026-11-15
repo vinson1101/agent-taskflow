@@ -74,6 +74,10 @@ async function main() {
     output(dshReview.makeReview(core, config, rest[0], inputJson(rest[1])));
     return;
   }
+  if (command === 'dsh-review' && sub === 'handoff') {
+    output(dshReview.handoff(core, config, rest[0], rest[1], rest[2], rest.slice(3).join(' ') || undefined));
+    return;
+  }
   if (command === 'dsh-review' && sub === 'settle') {
     output(await dshReview.settle(core, config, rest[0]));
     return;

@@ -14,3 +14,28 @@
 - 没有匹配时保留待对账，不尝试重新 POST。已写 intent 但查不到 relay 记录，不能区分崩溃发生在请求发出之前还是之后；待操作人用原请求、会话和 relay 证据明确处置，不得自动猜测或清除意图后重发。Case 卡住要保留隔离原始证据，不把新请求冒充恢复，也不报告已验收。成功摘要不含会话 ID、令牌或原会话正文。试点尚未规定生产迁移、自动返工、权限体系或公网 API。
 
 独立链路使用 `atf reconcile`。旧 control-plane 在 standalone 模式会在创建锁前拒绝。任务原件先持久化、事件后入队；若中断，使用完全相同的来源事件与版本重放即可修复缺失记录，不另开任务。有派发意图却无可归属 relay 回执时，不自动补投。CI 中仅跑合成回归和模拟 relay，不连接真实 DSH。
+
+### 本机派发前检查失败
+
+事件为 `blocked_review_dispatch` 时，`atf reconcile` 或不带 ID 的 `atf event dispatch` 不会自动重试。先核对并修正隔离配置、已批准的 reviewer 绑定或产物，再用 `atf event dispatch <完整 event ID>` 显式恢复同一事件。只有在没有持久派发意图时才会重新尝试；意图记录存在但无法读取或解析，也按已有意图处理。若返回 `intent_exists_reconcile`，或事件已处于 `awaiting_reconcile`，保留原记录，改用 `atf dsh-review settle <同一 event ID>`；不要删除意图、换 ID 或重发。
+
+无 relay task ID 的 ACK 对账固定只读取指定专用会话的 `/tasks?sessionId=…&limit=100`。如果结果列表超过 100 条、已截断、没有相符记录或有多条相符记录，当前实现保持 `pending_reconcile`；不是未派发的证明。由操作人结合原始请求及 relay 审计人工查证，不能因此再次 POST。
+
+### 换验收人，不开新任务
+
+在隔离模式中，原任务的当前产物评审仍待验时，可执行：
+
+```sh
+atf dsh-review handoff <task-id> <当前-event-id> <已登记的接手者> [理由]
+atf event dispatch <返回的新-event-id>
+atf dsh-review settle <返回的新-event-id>
+atf verify <原-task-id>
+```
+
+接手者必须是已启用的 DSH reviewer，并绑定本次义务此前未用过的专用会话。命令不接受端点或会话替换参数。它保留任务 ID、待验义务 ID、版本和 SHA-256；仅换当前评审尝试，旧、新事件及请求各自留痕。换人命令不直接调用 DSH，随后才派发新事件。若出错，先按原命令的相同事件 ID、接手者、理由重放以完成写入；过期的另一请求不会覆盖后续的接手者。若检测到交接还未写完，新版本提交会被阻止，先重放该交接。
+
+交接**不取消或重发**原尝试。原尝试已获响应或回执未知时，仍可用原事件 ID 查询中继并记录本地对账结果（仅当其原会话仍获授权）；原尝试结果不能当作接手者回执，也不会阻塞不同会话的接手。原尝试曾通过但尚未被 verifier 应用时，交接生效后同样不再有权关单。验收只认当前事件、验收人、专用会话和原产物版本；已取消或归档的任务不会再派发。该试点不变更服务或公网权限。
+
+双会话实测使用同样的本地已授权 relay 和新 0700 空目录。操作者先在 relay 上核验两个专用测试会话分别绑定不同的隔离工作区；禁止使用默认或真实工作会话。将 opt-in 写作 `ATF_DSH_LIVE_PILOT=two-dedicated-test-sessions`，分别通过 `ATF_DSH_TEST_SESSION_ID` 和 `ATF_DSH_HANDOFF_TEST_SESSION_ID` 提供两会话，沿用上述 token 注入方式，然后运行 `node workspace/bin/atf-dsh-handoff-canary.cjs`。实际读回须显示两个归因准确的 relay 记录各一条、ATF 原任务和义务各一条，旧结果不关单，且当前验收者的有效回执只能由 verifier 结案。
+
+`npm run atf:dsh:handoff:smoke` 是同一 runner 的模拟模式；通过不等于真实 DSH 验收。

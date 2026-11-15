@@ -7,6 +7,9 @@ const digest = x => createHash('sha256').update(x).digest('hex');
 const iso = () => new Date().toISOString();
 const same = (a, b) => !!b && Object.keys(a).every(k => a[k] === b[k]);
 const fields = x => ({ task_id: x.task_id, obligation_id: x.obligation_id, reviewer: x.reviewer, revision: x.revision, sha256: x.sha256 });
+const attemptRef = x => ({ ...fields(x), event_id: x.event_id, session_id: x.session_id, source_event_id: x.source_event_id });
+const sameAttempt = (a, b) => !!a && !!b && same(fields(a), b) &&
+  a.event_id === b.event_id && a.session_id === b.session_id;
 function text(x, max, label) {
   if (typeof x !== 'string' || !x.trim() || Buffer.byteLength(x) > max) throw new Error('invalid ' + label);
   return x;
@@ -137,7 +140,7 @@ function makeReview(core, config, taskId, input) {
     const ref = { task_id, reviewer, revision: input.revision, sha256: digest(artifact), obligation_id: 'OBL-DSH-' + seed,
       session_id: sessionId, source_event_id: origin, event_id: eventId };
     const old = ctx.dsh_review;
-    if (old && (old.reviewer !== reviewer || old.criterion !== criterion)) throw new Error('reviewer and criterion cannot change in this pilot');
+    if (old && old.criterion !== criterion) throw new Error('review criterion cannot change in this pilot');
     const recorded = core.readJson(path.join(core.paths(config).events, eventId + '.json'));
     if (recorded && (!same(fields(recorded.required_writebacks?.[0]?.ref || {}), ref) ||
         recorded.required_writebacks?.[0]?.ref?.session_id !== sessionId))
@@ -150,6 +153,18 @@ function makeReview(core, config, taskId, input) {
         sha256: ref.sha256, duplicate: true, status: ctx.status };
     }
     if (core.TERMINAL_TASKS.has(ctx.status)) throw new Error('task cannot be reviewed');
+    if (old && old.reviewer !== reviewer) throw new Error('use an explicit DSH handoff to change reviewer');
+    if (old && old.revision < ref.revision) {
+      const handoff = (ctx.dsh_review_handoffs || []).find(row => row.to.event_id === old.event_id);
+      if (handoff) {
+        const p = core.paths(config);
+        const activeEvent = core.readJson(path.join(p.events, old.event_id + '.json'));
+        const activeObligation = core.readJson(path.join(p.obligations, old.obligation_id + '.json'));
+        if (!sameAttempt(old, activeEvent?.required_writebacks?.[0]?.ref) ||
+            !sameAttempt(old, activeObligation?.ref))
+          throw new Error('replay the exact current DSH handoff before submitting a new revision');
+      }
+    }
     if (old && (old.revision > ref.revision || (old.revision === ref.revision && (!same(fields(old), ref) || old.session_id !== sessionId))))
       throw new Error('stale or conflicting revision');
     if (!old || old.revision !== ref.revision) {
@@ -173,8 +188,111 @@ function makeReview(core, config, taskId, input) {
       sha256: ref.sha256, duplicate: event.duplicate === true, status: ctx.status };
   } finally { release(); }
 }
+function handoffResult(row, duplicate) {
+  return { task_id: row.to.task_id, obligation_id: row.to.obligation_id, revision: row.to.revision,
+    sha256: row.to.sha256, from_event_id: row.from.event_id, event_id: row.to.event_id, duplicate };
+}
+function finishHandoff(core, config, dir, task, row) {
+  const p = core.paths(config);
+  repairProjection(core, dir, task);
+  const obligation = core.readJson(path.join(p.obligations, row.to.obligation_id + '.json'));
+  if (!obligation || obligation.status !== 'pending' || obligation.kind !== 'dsh_artifact_review' ||
+      (!sameAttempt(row.from, obligation.ref) && !sameAttempt(row.to, obligation.ref)))
+    throw new Error('cannot project handoff onto its original pending review obligation');
+  if (!sameAttempt(row.to, obligation.ref)) {
+    obligation.ref = row.to;
+    obligation.agent = row.to.reviewer;
+    // Verification/attention for the previous attempt is no longer current.
+    obligation.last_verifier = null;
+    obligation.recovery_state = null;
+    core.writeRecord(p.obligations, obligation.obligation_id, obligation);
+  }
+  const former = core.readJson(path.join(p.events, row.from.event_id + '.json'));
+  if (!former || former.runtime !== 'dsh' || !sameAttempt(row.from, former.required_writebacks?.[0]?.ref))
+    throw new Error('previous DSH event record missing or inconsistent');
+  if (former.status !== 'superseded') {
+    former.previous_dispatch_status = former.status;
+    former.status = 'superseded';
+    former.superseded_by_event_id = row.to.event_id;
+    former.superseded_at = row.at;
+    core.writeRecord(p.events, former.event_id, former);
+  } else if (former.superseded_by_event_id !== row.to.event_id) {
+    throw new Error('previous DSH event already linked to a different handoff');
+  }
+  const next = core.readJson(path.join(p.events, row.to.event_id + '.json'));
+  const dedupeKey = row.to.event_id.slice('EVT-DSH-'.length);
+  if (next && (!sameAttempt(row.to, next.required_writebacks?.[0]?.ref) ||
+      next.runtime !== 'dsh' || next.dedupe_key !== dedupeKey))
+    throw new Error('successor DSH event record inconsistent');
+  if (!next || !core.readJson(path.join(p.dedupe, dedupeKey + '.json'))) {
+    core.emitEvent(config, { event_id: row.to.event_id, event_type: 'dsh_artifact_review', runtime: 'dsh',
+      task_id: row.to.task_id, agent: row.to.reviewer, source_ref: 'handoff:' + row.from.event_id,
+      dedupe_key: dedupeKey,
+      required_writebacks: [{ kind: 'dsh_artifact_review', obligation_id: row.to.obligation_id, ref: row.to }] });
+  }
+}
+function handoff(core, config, taskId, expected, successor, reason = 'Operator reassigned review') {
+  requireIsolation(config);
+  fileId(expected);
+  successor = identifier(successor, 'successor reviewer');
+  reason = text(reason, 1000, 'handoff reason');
+  const dir = core.taskDir(config, taskId);
+  if (!dir) throw new Error('ATF task not found');
+  const release = acquireFileLock(path.join(config.dataDir, 'runtime-dispatch.lock'));
+  try {
+    const task = core.readJson(path.join(dir, 'ctx.json'));
+    const gate = task?.dsh_review;
+    const history = task?.dsh_review_handoffs || [];
+    if (!gate || !Array.isArray(history)) throw new Error('no active DSH review');
+    const recorded = history.find(row => row.from.event_id === expected);
+    if (recorded) {
+      if (recorded.to.reviewer !== successor || recorded.reason !== reason)
+        throw new Error('handoff request conflicts with its prior recorded successor or reason');
+      if (sameAttempt(recorded.to, gate) && gate.status === 'awaiting_review' && !core.TERMINAL_TASKS.has(task.status))
+        finishHandoff(core, config, dir, task, recorded);
+      return handoffResult(recorded, true);
+    }
+    if (gate.event_id !== expected) throw new Error('handoff expected event is not the current DSH attempt');
+    if (core.TERMINAL_TASKS.has(task.status) || gate.status !== 'awaiting_review' || !currentArtifact(task, gate))
+      throw new Error('handoff requires an unresolved current artifact review');
+    const p = core.paths(config);
+    const obligation = core.readJson(path.join(p.obligations, gate.obligation_id + '.json'));
+    const event = core.readJson(path.join(p.events, gate.event_id + '.json'));
+    if (obligation?.status !== 'pending' || obligation.kind !== 'dsh_artifact_review' || !sameAttempt(gate, obligation.ref) ||
+        event?.runtime !== 'dsh' || !sameAttempt(gate, event.required_writebacks?.[0]?.ref))
+      throw new Error('repair current submission or resolve its obligation before handoff');
+    const session = registeredReviewerSession(core, config, successor);
+    if (!session || successor === gate.reviewer || session === gate.session_id)
+      throw new Error('handoff requires a distinct, enabled enrolled reviewer and dedicated session');
+    if (history.some(row => row.from.obligation_id === gate.obligation_id && row.from.session_id === session))
+      throw new Error('cannot return to an earlier session for the same review obligation');
+    const seed = digest(JSON.stringify(['atf.dsh.handoff.v1', expected, successor, session]));
+    const row = { schema: 'atf.dsh-review-handoff.v1', from: attemptRef(gate),
+      to: { ...attemptRef(gate), reviewer: successor, session_id: session, event_id: 'EVT-DSH-' + seed },
+      reason, at: iso() };
+    // Canonical selection is the first write. On interruption it invalidates
+    // the old attempt immediately; an exact replay completes projections.
+    task.dsh_review_handoffs = [...history, row];
+    task.dsh_review = { ...gate, ...row.to };
+    task.updated_at = iso();
+    writeCanonical(dir, task);
+    finishHandoff(core, config, dir, task, row);
+    return handoffResult(row, false);
+  } finally { release(); }
+}
 function intentPath(core, config, eventId) {
   return path.join(core.paths(config).dispatches, 'dsh-' + fileId(eventId) + '.json');
+}
+function hasDurableIntent(core, config, eventId) {
+  const file = intentPath(core, config, eventId);
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch (error) {
+    // Only an explicit absence permits dispatch. Unreadable/indeterminate
+    // storage must never allow a second POST.
+    return error.code !== 'ENOENT';
+  }
 }
 function match(row, intent) {
   return !!row && row.requestId === intent.request_id && row.sessionId === intent.session_id &&
@@ -198,24 +316,25 @@ function resultFor(i) {
     dispatched_at: i.accepted_at || null, runtime_session_ref: i.relay_task_id || null,
     dsh_state: i.state, request_id: i.request_id, injected_accept_ack_loss: i.injected_accept_ack_loss === true, error: null };
 }
-async function dispatch(core, config, event, relay = runtimeRelay()) {
+async function dispatch(core, config, event, relay) {
   requireIsolation(config);
   const file = intentPath(core, config, event.event_id);
-  const former = core.readJson(file);
-  if (former) return resultFor(former); // never POST twice, including after a process crash
   const ref = event.required_writebacks?.[0]?.ref;
   const task = core.taskContext(config, event.task_id);
-  if (!ref || !same(fields(ref), task?.dsh_review) || task.dsh_review.session_id !== ref.session_id) {
-    const value = { state: 'stale', event_id: event.event_id };
-    atomicWriteJson(file, value);
-    return resultFor(value);
-  }
+  if (!sameAttempt(ref, task?.dsh_review) || ref.event_id !== event.event_id)
+    return resultFor({ state: 'stale', event_id: event.event_id });
+  const former = core.readJson(file);
+  if (former) return resultFor(former); // never POST twice, including after a process crash
+  if (hasDurableIntent(core, config, event.event_id)) throw new Error('DSH dispatch intent is unreadable');
+  if (core.TERMINAL_TASKS.has(task.status) || task.dsh_review.status !== 'awaiting_review')
+    return resultFor({ state: 'stale', event_id: event.event_id });
   if (!registeredReviewer(core, config, ref.reviewer, ref.session_id)) throw new Error('designated reviewer disabled or no longer registered');
   if (core.collection(core.paths(config).dispatches).some(i => i.schema === 'atf.dsh-dispatch.v1' &&
        i.session_id === ref.session_id && !['review_recorded', 'failed'].includes(i.state)))
     return { accepted: false, dsh_state: 'waiting_for_session' };
   const content = task.outputs?.review_artifact?.text;
   if (!currentArtifact(task, ref)) throw new Error('artifact content does not match active revision');
+  relay ||= runtimeRelay();
   const intent = beginEvidence(ref, event);
   atomicWriteJson(file, intent);
   try {
@@ -253,7 +372,10 @@ async function settle(core, config, eventId, relay = runtimeRelay()) {
       return { state: 'reviewer_not_authorized', request_id: intent.request_id };
     const event = core.readJson(path.join(core.paths(config).events, eventId + '.json'));
     if (!event || event.runtime !== 'dsh') throw new Error('no associated ATF event');
-    if (['review_recorded', 'failed'].includes(intent.state)) return { state: intent.state, decision: intent.decision, request_id: intent.request_id };
+    const current = core.taskContext(config, intent.task_id)?.dsh_review;
+    const active = sameAttempt(intent, current);
+    if (['review_recorded', 'failed'].includes(intent.state))
+      return { state: intent.state, decision: !active && intent.state === 'review_recorded' ? 'stale' : intent.decision, request_id: intent.request_id };
     let row;
     try {
       if (!intent.relay_task_id) {
@@ -272,15 +394,14 @@ async function settle(core, config, eventId, relay = runtimeRelay()) {
     } catch { return { state: 'pending_reconcile', request_id: intent.request_id }; }
     event.runtime_session_ref = intent.relay_task_id;
     event.dispatched_at = intent.accepted_at;
-    event.status = 'dispatched';
+    if (active && event.status !== 'superseded') event.status = 'dispatched';
     core.writeRecord(core.paths(config).events, eventId, event);
     if (row.status === 'failed') intent.state = 'failed';
     else if (row.status !== 'completed') return { state: 'pending_review', request_id: intent.request_id };
     else {
       intent.state = 'review_recorded';
       intent.verdict = responseDecision(intent, row);
-      const current = core.taskContext(config, intent.task_id)?.dsh_review;
-      intent.decision = same(fields(intent), current) && current.session_id === intent.session_id ? intent.verdict : 'stale';
+      intent.decision = active ? intent.verdict : 'stale';
       intent.observed_at = iso();
     }
     atomicWriteJson(file, intent);
@@ -296,7 +417,9 @@ function verify(core, config, obligation) {
   const p = path.join(d, 'ctx.json');
   const task = core.readJson(p);
   const gate = task?.dsh_review;
-  if (!gate || !same(fields(ref), gate) || gate.session_id !== ref.session_id) return { decision: 'stale', status: 'superseded',
+  if (gate && !sameAttempt(ref, gate) && gate.obligation_id === ref.obligation_id)
+    return null; // Canonical handoff has not yet projected onto this same obligation.
+  if (!sameAttempt(ref, gate)) return { decision: 'stale', status: 'superseded',
     ...(intent?.decision === 'stale' ? { request_id: intent.request_id, relay_task_id: intent.relay_task_id, at: intent.observed_at } : {}) };
   if (!registeredReviewer(core, config, ref.reviewer, ref.session_id)) return { decision: 'reviewer_not_authorized', status: 'escalation_required' };
   if (!intent || !['review_recorded', 'failed'].includes(intent.state)) return null;
@@ -328,4 +451,4 @@ function verify(core, config, obligation) {
   return { decision: intent.verdict, status: approved ? 'resolved' : 'rejected', ...gate.receipt };
 }
 
-module.exports = { hasVerifiedAcceptance, requireIsolation, makeReview, dispatch, settle, verify, safeRelay, runtimeRelay };
+module.exports = { hasDurableIntent, hasVerifiedAcceptance, requireIsolation, makeReview, handoff, dispatch, settle, verify, safeRelay, runtimeRelay };

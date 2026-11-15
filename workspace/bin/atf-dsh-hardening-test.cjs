@@ -58,10 +58,13 @@ function fakeRelay({ discard = false, verdict = 'pass' } = {}) {
         status: 'completed', attribution: 'rpc-turn-segment',
         result: { empty: false, truncated: false, text: JSON.stringify({ ...identity, verdict }) } };
       rows.push(row);
-      if (discard) throw new Error('test dispatch response not captured');
+      if (discard && rows.length === 1) throw new Error('test dispatch response not captured');
       return row;
     }
-    if (p === '/tasks') return { total: rows.length, tasks: rows.filter(x => x.sessionId === q.sessionId) };
+    if (p === '/tasks') {
+      const tasks = rows.filter(x => x.sessionId === q.sessionId);
+      return { total: tasks.length, tasks };
+    }
     if (p.startsWith('/tasks/')) return { task: rows.find(x => x.taskId === p.split('/')[2]) };
     throw new Error('unexpected fake call');
   }
@@ -246,4 +249,223 @@ test('A-B-A identical artifact bytes do not let the earlier version close the cu
   assert.equal(core.verifyObligations(config, { taskId }).resolved, 1);
   assert.equal(core.taskContext(config, taskId).dsh_review.receipt.revision, 3);
   assert.equal(core.taskContext(config, taskId).status, 'completed');
+});
+
+test('corrected DSH preflight recovers only by explicit exact event ID and dispatches once', async t => {
+  const { config, run, submit } = fixture(t);
+  const staged = submit();
+  const fake = fakeRelay();
+  run('agent', 'register', 'dsh-fixture', 'enabled=false');
+  const [blocked] = await core.dispatchEvents(config, { dshRelay: fake.relay });
+  assert.equal(blocked.dsh_state, 'blocked_review_dispatch');
+  assert.deepEqual(fake.calls, []);
+  run('agent', 'register', 'dsh-fixture', 'enabled=true');
+  assert.deepEqual(await core.dispatchEvents(config, { dshRelay: fake.relay }), []);
+  assert.deepEqual(await core.dispatchEvents(config, { eventId: staged.event_id.slice(0, -1), dshRelay: fake.relay }), []);
+  assert.deepEqual(fake.calls, []);
+  const [resumed] = await core.dispatchEvents(config, { eventId: staged.event_id, dshRelay: fake.relay });
+  assert.equal(resumed.accepted, true);
+  assert.deepEqual(await core.dispatchEvents(config, { eventId: staged.event_id, dshRelay: fake.relay }), []);
+  assert.deepEqual(fake.calls, ['/send']);
+});
+
+test('blocked event with a durable ambiguous intent cannot POST on manual recovery', async t => {
+  const { config, run, submit } = fixture(t);
+  const staged = submit();
+  const p = core.paths(config);
+  const fake = fakeRelay({ discard: true });
+  run('agent', 'register', 'dsh-fixture', 'enabled=false');
+  await core.dispatchEvents(config, { dshRelay: fake.relay });
+  const file = path.join(p.events, staged.event_id + '.json');
+  const preflightSnapshot = core.readJson(file);
+  assert.equal(preflightSnapshot.status, 'blocked_review_dispatch');
+  run('agent', 'register', 'dsh-fixture', 'enabled=true');
+  const [lost] = await core.dispatchEvents(config, { eventId: staged.event_id, dshRelay: fake.relay });
+  assert.equal(lost.dsh_state, 'unknown');
+  // Simulated interruption before the event status update. Persisted intent remains authoritative.
+  atomicWriteJson(file, preflightSnapshot);
+  const [manual] = await core.dispatchEvents(config, { eventId: staged.event_id, dshRelay: fake.relay });
+  assert.equal(manual.dsh_state, 'intent_exists_reconcile');
+  assert.deepEqual(fake.calls, ['/send']);
+  assert.deepEqual(core.readJson(file), preflightSnapshot);
+  const settled = await dsh.settle(core, config, staged.event_id, fake.relay);
+  assert.equal(settled.decision, 'pass');
+  assert.equal(settled.request_id, lost.request_id);
+  assert.deepEqual(fake.calls, ['/send', '/tasks', '/tasks/mock-task-1']);
+});
+
+test('an unreadable intent record is not evidence of its absence', async t => {
+  const { config, submit } = fixture(t);
+  const staged = submit();
+  const p = core.paths(config);
+  const fake = fakeRelay();
+  const file = path.join(p.events, staged.event_id + '.json');
+  // A broken local checkpoint must not allow a POST, even before the event reports the block.
+  fs.mkdirSync(p.dispatches, { recursive: true });
+  const intent = path.join(p.dispatches, 'dsh-' + staged.event_id + '.json');
+  fs.writeFileSync(intent, '{');
+  assert.equal((await core.dispatchEvents(config, { dshRelay: fake.relay }))[0].dsh_state, 'blocked_review_dispatch');
+  assert.equal(core.readJson(file).status, 'blocked_review_dispatch');
+  assert.deepEqual(await core.dispatchEvents(config, { dshRelay: fake.relay }), []);
+  assert.equal((await core.dispatchEvents(config, { eventId: staged.event_id, dshRelay: fake.relay }))[0].dsh_state,
+    'intent_exists_reconcile');
+  assert.deepEqual(fake.calls, []);
+  assert.equal(fs.readFileSync(intent, 'utf8'), '{');
+});
+
+function enrolledSuccessor(run) {
+  run('agent', 'register', 'dsh-successor', 'runtime=dsh', 'dsh-session=fixture-successor');
+}
+function operatorHandoff(f, former, successor = 'dsh-successor', reason = 'Synthetic handoff') {
+  return JSON.parse(f.run('dsh-review', 'handoff', f.taskId, former.event_id, successor, reason));
+}
+
+test('before-send handoff explicitly changes reviewer but keeps task, artifact and obligation unchanged', async t => {
+  const f = fixture(t);
+  const { config, submit, input, run, env, taskId } = f;
+  const first = submit();
+  enrolledSuccessor(run);
+  const guarded = [
+    ['dsh-review', 'handoff', taskId, first.event_id, 'missing-reviewer'],
+    ['dsh-review', 'handoff', taskId, first.event_id, 'dsh-fixture'],
+    ['dsh-review', 'handoff', taskId, 'EVT-DSH-' + 'a'.repeat(64), 'dsh-successor'],
+    ['dsh-review', 'submit', taskId, JSON.stringify({ ...input, reviewer: 'dsh-successor', source_event_id: 'other-source' })],
+  ];
+  for (const cmd of guarded) assert.notEqual(invoke(env, ...cmd).status, 0);
+  assert.equal(core.taskContext(config, taskId).dsh_review.event_id, first.event_id);
+  const next = operatorHandoff(f, first);
+  assert.equal(next.duplicate, false);
+  assert.notEqual(first.event_id, next.event_id);
+  for (const k of ['task_id', 'obligation_id', 'revision', 'sha256']) assert.equal(first[k], next[k]);
+  assert.equal(operatorHandoff(f, first).duplicate, true);
+  assert.equal(submit().duplicate, true); // original source input cannot restore the old reviewer
+  assert.notEqual(invoke(env, 'dsh-review', 'handoff', taskId, first.event_id, 'dsh-successor', 'different reason').status, 0);
+  assert.equal(core.collection(core.paths(config).obligations).length, 1);
+  const owed = JSON.parse(run('obligation', 'show', next.obligation_id));
+  assert.equal(owed.status, 'pending');
+  assert.equal(owed.ref.event_id, next.event_id);
+  assert.equal(owed.agent, 'dsh-successor');
+  assert.equal(core.taskContext(config, taskId).dsh_review_handoffs.length, 1);
+  const fake = fakeRelay();
+  assert.deepEqual(await core.dispatchEvents(config, { eventId: first.event_id, dshRelay: fake.relay }), []);
+  assert.equal((await core.dispatchEvents(config, { eventId: next.event_id, dshRelay: fake.relay }))[0].accepted, true);
+  assert.deepEqual(await core.dispatchEvents(config, { eventId: next.event_id, dshRelay: fake.relay }), []);
+  assert.deepEqual(fake.calls, ['/send']);
+  assert.equal(fake.rows[0].sessionId, 'fixture-successor');
+  assert.equal((await dsh.settle(core, config, next.event_id, fake.relay)).decision, 'pass');
+  assert.equal(core.verifyObligations(config, { taskId }).resolved, 1);
+  const final = core.taskContext(config, taskId);
+  assert.equal(final.status, 'completed');
+  assert.equal(final.dsh_review.receipt.sha256, first.sha256);
+  assert.equal(final.dsh_review.receipt.reviewer, 'dsh-successor');
+});
+
+test('unknown old send remains reconcilable without blocking the successor or repeating either POST', async t => {
+  const f = fixture(t);
+  const { config, taskId } = f;
+  const first = f.submit();
+  enrolledSuccessor(f.run);
+  const fake = fakeRelay({ discard: true });
+  const [oldIntent] = await core.dispatchEvents(config, { eventId: first.event_id, dshRelay: fake.relay });
+  assert.equal(oldIntent.dsh_state, 'unknown');
+  const next = operatorHandoff(f, first);
+  const [nextIntent] = await core.dispatchEvents(config, { eventId: next.event_id, dshRelay: fake.relay });
+  assert.equal(nextIntent.accepted, true);
+  assert.notEqual(oldIntent.request_id, nextIntent.request_id);
+  assert.equal((await dsh.settle(core, config, first.event_id, fake.relay)).decision, 'stale');
+  assert.equal(core.verifyObligations(config, { taskId }).pending, 1);
+  assert.equal(core.taskContext(config, taskId).status, 'active');
+  assert.equal((await dsh.settle(core, config, next.event_id, fake.relay)).decision, 'pass');
+  assert.equal(core.verifyObligations(config, { taskId }).resolved, 1);
+  assert.equal(core.taskContext(config, taskId).dsh_review.receipt.request_id, nextIntent.request_id);
+  assert.equal((await dsh.settle(core, config, first.event_id, fake.relay)).decision, 'stale');
+  assert.deepEqual(await core.dispatchEvents(config, { eventId: first.event_id, dshRelay: fake.relay }), []);
+  assert.deepEqual(await core.dispatchEvents(config, { eventId: next.event_id, dshRelay: fake.relay }), []);
+  assert.equal(fake.calls.filter(call => call === '/send').length, 2);
+  const formerEvent = core.readJson(path.join(core.paths(config).events, first.event_id + '.json'));
+  assert.equal(formerEvent.status, 'superseded');
+  assert.equal(formerEvent.previous_dispatch_status, 'awaiting_reconcile');
+  assert.equal(formerEvent.superseded_by_event_id, next.event_id);
+});
+
+test('already recorded old pass cannot close after handoff, including when replay arrives after new completion', async t => {
+  const f = fixture(t);
+  const { config, taskId } = f;
+  const old = f.submit();
+  enrolledSuccessor(f.run);
+  const fake = fakeRelay();
+  await core.dispatchEvents(config, { eventId: old.event_id, dshRelay: fake.relay });
+  assert.equal((await dsh.settle(core, config, old.event_id, fake.relay)).decision, 'pass');
+  const next = operatorHandoff(f, old);
+  assert.equal(core.verifyObligations(config, { taskId }).pending, 1);
+  assert.equal(core.taskContext(config, taskId).status, 'active');
+  await core.dispatchEvents(config, { eventId: next.event_id, dshRelay: fake.relay });
+  assert.equal((await dsh.settle(core, config, next.event_id, fake.relay)).decision, 'pass');
+  assert.equal(core.verifyObligations(config, { taskId }).resolved, 1);
+  const final = core.taskContext(config, taskId);
+  assert.equal((await dsh.settle(core, config, old.event_id, fake.relay)).decision, 'stale');
+  assert.equal(operatorHandoff(f, old).duplicate, true);
+  assert.deepEqual(core.taskContext(config, taskId), final);
+  assert.equal(fake.calls.filter(call => call === '/send').length, 2);
+});
+
+test('exact operator replay repairs interruption between canonical handoff and obligation/event projection', async t => {
+  const f = fixture(t);
+  const { config, taskId } = f;
+  const old = f.submit();
+  enrolledSuccessor(f.run);
+  const p = core.paths(config);
+  const oldEventFile = path.join(p.events, old.event_id + '.json');
+  const obligationFile = path.join(p.obligations, old.obligation_id + '.json');
+  const originalEvent = core.readJson(oldEventFile);
+  const originalObligation = core.readJson(obligationFile);
+  const next = operatorHandoff(f, old);
+  const nextEventFile = path.join(p.events, next.event_id + '.json');
+  const dedupeKey = core.readJson(nextEventFile).dedupe_key;
+  // Restore only synthetic previous projection to model a stopped writer.
+  atomicWriteJson(oldEventFile, originalEvent);
+  atomicWriteJson(obligationFile, originalObligation);
+  fs.unlinkSync(nextEventFile);
+  fs.unlinkSync(path.join(p.dedupe, dedupeKey + '.json'));
+  const fake = fakeRelay();
+  assert.equal(core.verifyObligations(config, { taskId }).pending, 1);
+  assert.equal(core.readJson(obligationFile).status, 'pending'); // not superseded
+  assert.equal(core.readJson(obligationFile).ref.event_id, old.event_id);
+  const newRevision = invoke(f.env, 'dsh-review', 'submit', taskId, JSON.stringify({
+    ...f.input, reviewer: 'dsh-successor', source_event_id: 'premature-v2', revision: 2,
+  }));
+  assert.notEqual(newRevision.status, 0);
+  assert.match(newRevision.stderr, /replay the exact current DSH handoff/);
+  assert.equal((await core.dispatchEvents(config, { eventId: old.event_id, dshRelay: fake.relay }))[0].dsh_state, 'stale');
+  assert.deepEqual(fake.calls, []);
+  const replay = operatorHandoff(f, old);
+  assert.equal(replay.duplicate, true);
+  assert.equal(replay.event_id, next.event_id);
+  assert.equal(core.readJson(obligationFile).ref.event_id, next.event_id);
+  assert.equal(core.readJson(oldEventFile).status, 'superseded');
+  assert.equal(core.readJson(nextEventFile).status, 'pending');
+  const index = path.join(p.dedupe, dedupeKey + '.json');
+  fs.unlinkSync(index);
+  assert.equal(operatorHandoff(f, old).duplicate, true);
+  assert.equal(core.readJson(index).event_id, next.event_id);
+  assert.equal(core.collection(p.obligations).length, 1);
+  assert.equal(core.taskContext(config, taskId).dsh_review_handoffs.length, 1);
+});
+
+
+test('queued successor is never dispatched after canonical task is cancelled or archived', async t => {
+  for (const status of ['cancelled', 'archived']) {
+    await t.test(status, async sub => {
+      const f = fixture(sub);
+      const old = f.submit();
+      enrolledSuccessor(f.run);
+      const next = operatorHandoff(f, old);
+      const fake = fakeRelay();
+      f.run('update', f.taskId, status);
+      const [dispatch] = await core.dispatchEvents(f.config, { eventId: next.event_id, dshRelay: fake.relay });
+      assert.equal(dispatch.dsh_state, 'stale');
+      assert.deepEqual(fake.calls, []);
+      assert.equal(core.taskContext(f.config, f.taskId).status, status);
+    });
+  }
 });

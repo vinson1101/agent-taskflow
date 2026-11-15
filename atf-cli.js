@@ -7623,6 +7623,7 @@ atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch qu
   atf learnings promote                 执行 promote → MEMORY
   atf event|obligation|envelope|verify|reconcile  事件、义务、Work Envelope 与 verifier
   atf dsh-review submit <taskId> <JSON|file> | settle <eventId>  隔离 DSH 评审
+  atf dsh-review handoff <taskId> <expectedEventId> <successorReviewer> [reason]  保留义务并显式换验收人
   atf a2a|context|metrics               A2A、session context 与运行指标
   atf block <taskId> <question>         阻塞任务，等待 Vinson 决策
   atf decide <taskId> <answer>          Vinson 回答，继续执行

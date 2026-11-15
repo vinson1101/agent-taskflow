@@ -1,94 +1,39 @@
 # AgentTaskFlow (ATF)
 
-> 面向 OpenClaw、Hermes 等 session 型 Agent 的事件优先可靠性控制面。它在 session 外持久保存任务责任，并通过 runtime adapter 完成唤醒、回写验证和失败恢复。
+> **跨 Agent 的任务交付层。** Agent 执行工作，ATF 保证同一任务有人接、换人能续、交付能验。
 
-**当前状态：v2 事件优先可靠性控制面已落地；OpenClaw 与 Hermes adapter、跨 session obligation/verifier、A2A compatibility 和只读 Session Context Provider 均有默认 smoke。真实 Hermes 环境仍需配置 API endpoint 后执行部署 canary。详见 [PLAN.md](./PLAN.md)。**
+任务不会随某个会话结束而消失。ATF 在会话之外保留任务、责任人（DRI）、待完成义务、产物引用和验收记录。它适合已经在用多个 Agent、但仍靠人追进度和搬运上下文的团队。
 
-## 项目简介
+## 当前实现与升级目标
 
-ATF 不是“又一个任务管理器”，也不是一个独立的 Agent 平台。
+- **现有实现（v2）**：仓库已有持久事件、低频对账、跨会话义务与回写验证，以及 OpenClaw / Hermes 适配代码和 A2A 兼容层。OpenClaw 是现有部署的主要入口；Hermes 有 stub / HTTP 契约测试，但真实环境验证仍待完成。现有产物存在性检查不等于精确版本验收。
+- **升级目标**：把 ATF 做成可独立部署的任务服务。ATF 自己保管事件信箱、任务状态和验收历史；OpenClaw、DSH、Hermes 等通过各自受支持的接口接入。独立部署不要求独立机器，但 ATF 的进程和数据不应以 OpenClaw 在线为前提。DSH 尚未完成 ATF 端到端集成。
+- **第一阶段**：在隔离环境停用 OpenClaw，仅用 ATF 与 DSH 跑通派单、回执、验收和恢复。以合成材料为默认输入，也可人工导入一份获准使用的公开产物；不要求 Grok 自动回传、A2A 或新的公网入口。具体门槛见 [PLAN.md](./PLAN.md)。
 
-它的定位更准确地说是：
+## 架构与边界
 
-**面向 session 型 Agent 的、兼容 A2A 的可靠性控制层。**
-
-ATF 解决的不是“单个 Agent 会不会做事”，而是多 Agent 协作里更难、也更长期的问题：
-
-- 任务如何被明确派发
-- 谁对结果负责
-- 协作上下文如何沉淀
-- 超时、阻塞和遗漏如何被发现
-- follow-up、review 和唤醒动作如何形成闭环
-- session 结束后任务责任如何继续存在
-- 如何避免高频轮询浪费与低频轮询延迟
-- 历史表现如何沉淀为组织能力
-
-它把这些问题收敛成一组可落地的本地协议对象和控制面能力，而不是交给 prompt 或人工流程去隐式兜底。
-
-## 当前定位
-
-ATF 的目标产品定位是：
-
-**A2A-compatible Reliability Control Plane for Session-based Agents**
-
-它由四层能力组成：
-
-1. **持久责任层**：task、DRI、obligation、message、artifact reference
-2. **事件与恢复层**：event、dedupe、lease、retry、DLQ、escalation
-3. **Runtime Adapter 层**：OpenClaw、Hermes，以及后续其他 session runtime
-4. **验证与运营层**：required write-back、verifier、audit、review、运行指标
-
-A2A 用于外部互操作；ATF 不以替代 A2A 或重新发明通用 Agent 通信协议为目标。
-
-## 架构图
+以下是**目标链路**，不代表各适配器和跨机器交付已经上线：
 
 ```mermaid
 flowchart LR
-  Input["CLI / MCP / A2A input"] --> Truth["ATF durable truth<br/>task / obligation / event"]
-  Truth --> Fast["Event fast path"]
-  Truth --> Slow["Low-frequency reconciler"]
-  Fast --> Adapter["Runtime Adapter"]
-  Slow --> Adapter
-  Adapter --> OpenClaw["OpenClaw session"]
-  Adapter --> Hermes["Hermes session"]
-  OpenClaw --> Writeback["ATF write-back"]
-  Hermes --> Writeback
-  Writeback --> Verify["Verifier"]
-  Verify --> Truth
+  Source["邮件 / Webhook / 定时器 / 人工导入"] --> Inbox["事件信箱：持久接收、去重"]
+  Inbox --> ATF["ATF：任务责任、当前版本、验收条件"]
+  ATF --> Adapter["适配层：派发、查询、回执归一"]
+  Adapter --> Agent["执行 / 验收 Agent"]
+  Agent --> Receipt["产物 / 验收回执"]
+  Receipt --> ATF
+  ATF --> View["工作台：只读展示"]
 ```
 
-这张图对应 ATF v2 的当前运行方式：
+**事件被处理、执行已结束、任务通过验收，是三个不同状态。** 例如简报 v2 已提交，随后到达的 v1 通过回执只能留作历史，不能关闭 v2 的任务。退回修订也沿用原任务，不因换工具或会话重开一张单。
 
-- 任务事实和协作对象主要沉淀在任务仓库
-- `ATF_DATA_DIR` 主要沉淀 pending 索引、agent inbox、launch queue、dispatch payload 和部分可重建投影
-- `atf-event-dispatcher` 监听 durable event 并执行快路径；control-plane 保留为低频 reconciler
-- runtime adapter 只负责创建或恢复 session，不承担 ATF 的状态真相
-- worker 完成动作后必须回写 ATF，闭环才算成立
-- assign、message、action、trigger 会统一产生 `atf.event.v1`，并关联 required write-back obligation
+外部 Agent 只需要拿到最小任务上下文、经授权可读的产物，以及提交回执的方式；不需要理解其他 Agent 的接口，也不应直接写 ATF 存储或共享完整会话。CLI、MCP、HTTP 和 A2A 都是接入方式，不是任务真相。
 
-**当前标准链路术语：**
-
-- `trigger pending_task -> <taskDir>/pending-task.json`
-- `action pending_task -> <agentWorkspace>/pending-task.json`
-- `launch -> ATF_DATA_DIR/pending-launch-requests.json / launch-inboxes/<agent>.json / launch-dispatch-payloads/<launchId>.json + env bridge`
-- `event -> ATF_DATA_DIR/events/*.json -> atf.work-envelope.v1 -> runtime adapter`
-- `write-back -> atf.obligation.v1 -> deterministic verifier -> resolved / retry / escalation_required`
-
-运行与接入方法见 [docs/ATF_RELIABILITY_CONTROL_PLANE.md](./docs/ATF_RELIABILITY_CONTROL_PLANE.md)，更细的 truth / queue / projection / audit 划分见 [docs/ATF_STORAGE_MODEL.md](./docs/ATF_STORAGE_MODEL.md)。
+现有部署的事件快路径、低频对账、存储及回写方式见 [可靠性控制面](./docs/ATF_RELIABILITY_CONTROL_PLANE.md) 和 [存储模型](./docs/ATF_STORAGE_MODEL.md)。后文的安装与命令仍描述当前实现；不是独立部署教程。
 
 ## 非目标
 
-为了避免方向漂移，当前阶段 ATF 明确不是：
-
-- 实时聊天系统
-- 即时多 Agent 讨论平台
-- A2A 的替代协议
-- 跨产品 session transcript 的统一数据库
-- 支付优先产品
-- 完整的 Agent 市场
-- 重型多租户平台
-
-这些方向未来可能成立，但不应主导当前主线。
+不另做 Agent 运行时、聊天或会议桌，不另造通用通信协议，不统一采集会话，不以重型多租户平台或任务看板为第一阶段目标。已有成熟入口能复用就复用；ATF 自己掌握的是任务交付和验收状态。
 
 ## 指导文档
 
@@ -96,7 +41,7 @@ flowchart LR
 
 - [PLAN.md](./PLAN.md) - 当前项目目标、里程碑和完成标准的唯一主计划
 - [docs/README.md](./docs/README.md) - 指导文档索引
-- [docs/ATF_PRODUCT_GUIDE.md](./docs/ATF_PRODUCT_GUIDE.md) - 当前产品定义与边界
+- [docs/ATF_PRODUCT_GUIDE.md](./docs/ATF_PRODUCT_GUIDE.md) - v2 产品定义与边界参考
 - [docs/ATF_BUSINESS_STRATEGY.md](./docs/ATF_BUSINESS_STRATEGY.md) - 商业价值与演进路径
 - [docs/ATF_AUTONOMY_ROADMAP.md](./docs/ATF_AUTONOMY_ROADMAP.md) - 历史自主能力路线图
 - [docs/ATF_CAPABILITY_EVOLUTION.md](./docs/ATF_CAPABILITY_EVOLUTION.md) - 从当前实现到长期能力体系的演进图

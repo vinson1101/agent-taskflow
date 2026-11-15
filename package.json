@@ -26,6 +26,9 @@
     "atf:dsh:hardening:test": "node --test workspace/bin/atf-dsh-hardening-test.cjs",
     "atf:dsh:handoff:smoke": "node workspace/bin/atf-dsh-handoff-smoke.cjs",
     "atf:dsh:integrated:smoke": "node workspace/bin/atf-dsh-integrated-smoke.cjs",
+    "atf:u0:standalone:smoke": "node workspace/bin/atf-u0-standalone-smoke.cjs",
+    "atf:dsh:public-research:test": "node --test workspace/bin/atf-public-research-test.cjs",
+    "atf:release:packlist": "node workspace/bin/atf-release-packlist.cjs",
     "test": "node workspace/bin/atf-phasec-smoke.cjs --cleanup --quiet && node workspace/bin/atf-watcher-smoke.cjs --cleanup --quiet && node workspace/bin/atf-control-plane-smoke.cjs --cleanup --quiet && node workspace/bin/atf-phased-smoke.cjs --cleanup --quiet && node workspace/bin/atf-reliability-smoke.cjs"
   },
   "keywords": [
@@ -41,5 +44,14 @@
   "dependencies": {},
   "engines": {
     "node": ">=22.0.0"
-  }
+  },
+  "files": [
+    "atf-cli.js",
+    "index.js",
+    "PLAN.md",
+    "docs/",
+    "workspace/bin/",
+    "workspace/lib/",
+    "skill-config.json"
+  ]
 }

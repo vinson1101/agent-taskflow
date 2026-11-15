@@ -18,6 +18,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run atf:u0:standalone:smoke
       - run: npm run atf:dsh:hardening:test
       - run: npm run atf:dsh:integrated:smoke
       - run: npm run atf:dsh:handoff:smoke
+      - run: npm run atf:dsh:public-research:test
+      - run: npm run atf:release:packlist

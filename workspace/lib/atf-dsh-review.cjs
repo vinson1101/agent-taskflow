@@ -115,7 +115,7 @@ function writeCanonical(d, ctx) {
   atomicWriteJson(path.join(d, 'latest.json'), ctx);
 }
 
-function makeReview(core, config, taskId, input) {
+function makeReview(core, config, taskId, input, verifySource = null) {
   requireIsolation(config);
   const d = core.taskDir(config, taskId);
   if (!d) throw new Error('ATF task not found');
@@ -130,6 +130,9 @@ function makeReview(core, config, taskId, input) {
     const ctxPath = path.join(d, 'ctx.json');
     const ctx = core.readJson(ctxPath);
     if (!ctx) throw new Error('task cannot be reviewed');
+    if (!verifySource && (ctx.dsh_public_research?.length || origin.startsWith('public-research:')))
+      throw new Error('use public-import with exact approval for this task source');
+    const importedSource = verifySource ? verifySource(ctx) : null;
     const sessionId = registeredReviewerSession(core, config, reviewer);
     if (!sessionId) throw new Error('register an enabled DSH reviewer with a dedicated session binding first');
     if (claimedSession !== null && claimedSession !== sessionId)
@@ -173,6 +176,7 @@ function makeReview(core, config, taskId, input) {
         ...ctx.outputs?.review_artifacts, [ref.revision]: snapshot,
       } };
       ctx.dsh_review = { ...ref, criterion, status: 'awaiting_review' };
+      if (importedSource) ctx.dsh_public_research = [...(ctx.dsh_public_research || []), importedSource];
       ctx.status = 'active';
       if (ctx.decision?.status === 'needs_revision') delete ctx.decision;
       ctx.updated_at = iso();
@@ -183,6 +187,7 @@ function makeReview(core, config, taskId, input) {
     }
     const event = core.emitEvent(config, { event_id: eventId, event_type: 'dsh_artifact_review', runtime: 'dsh',
       task_id, agent: reviewer, source_ref: origin, dedupe_key: seed,
+      ...(importedSource ? { context_refs: [importedSource.source_url], manual_dispatch_only: true } : {}),
       required_writebacks: [{ kind: 'dsh_artifact_review', obligation_id: ref.obligation_id, ref }] });
     return { task_id, event_id: event.event_id, obligation_id: ref.obligation_id, revision: ref.revision,
       sha256: ref.sha256, duplicate: event.duplicate === true, status: ctx.status };
@@ -227,6 +232,7 @@ function finishHandoff(core, config, dir, task, row) {
   if (!next || !core.readJson(path.join(p.dedupe, dedupeKey + '.json'))) {
     core.emitEvent(config, { event_id: row.to.event_id, event_type: 'dsh_artifact_review', runtime: 'dsh',
       task_id: row.to.task_id, agent: row.to.reviewer, source_ref: 'handoff:' + row.from.event_id,
+      context_refs: former.context_refs || [], manual_dispatch_only: former.manual_dispatch_only === true,
       dedupe_key: dedupeKey,
       required_writebacks: [{ kind: 'dsh_artifact_review', obligation_id: row.to.obligation_id, ref: row.to }] });
   }
@@ -244,6 +250,8 @@ function handoff(core, config, taskId, expected, successor, reason = 'Operator r
     const gate = task?.dsh_review;
     const history = task?.dsh_review_handoffs || [];
     if (!gate || !Array.isArray(history)) throw new Error('no active DSH review');
+    if (task.dsh_public_research?.length || String(gate.source_event_id).startsWith('public-research:'))
+      throw new Error('public research approval is limited to the exact registered reviewer and session; handoff unavailable');
     const recorded = history.find(row => row.from.event_id === expected);
     if (recorded) {
       if (recorded.to.reviewer !== successor || recorded.reason !== reason)
@@ -334,6 +342,8 @@ async function dispatch(core, config, event, relay) {
     return { accepted: false, dsh_state: 'waiting_for_session' };
   const content = task.outputs?.review_artifact?.text;
   if (!currentArtifact(task, ref)) throw new Error('artifact content does not match active revision');
+  if (task.dsh_public_research?.length || String(ref.source_event_id).startsWith('public-research:'))
+    require('./atf-public-research.cjs').requireDispatchApproval(config, task, ref);
   relay ||= runtimeRelay();
   const intent = beginEvidence(ref, event);
   atomicWriteJson(file, intent);
@@ -451,4 +461,4 @@ function verify(core, config, obligation) {
   return { decision: intent.verdict, status: approved ? 'resolved' : 'rejected', ...gate.receipt };
 }
 
-module.exports = { hasDurableIntent, hasVerifiedAcceptance, requireIsolation, makeReview, handoff, dispatch, settle, verify, safeRelay, runtimeRelay };
+module.exports = { registeredReviewerSession, hasDurableIntent, hasVerifiedAcceptance, requireIsolation, makeReview, handoff, dispatch, settle, verify, safeRelay, runtimeRelay };

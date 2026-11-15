@@ -7,8 +7,8 @@
 ## 当前实现与升级目标
 
 - **现有实现（v2）**：仓库已有持久事件、低频对账、跨会话义务与回写验证，以及 OpenClaw / Hermes 适配代码和 A2A 兼容层。OpenClaw 是现有部署的主要入口；Hermes 有 stub / HTTP 契约测试，但真实环境验证仍待完成。现有产物存在性检查不等于精确版本验收。
-- **升级目标**：把 ATF 做成可独立部署的任务服务。ATF 自己保管事件信箱、任务状态和验收历史；OpenClaw、DSH、Hermes 等通过各自受支持的接口接入。独立部署不要求独立机器，但 ATF 的进程和数据不应以 OpenClaw 在线为前提。DSH 尚未完成 ATF 端到端集成。
-- **第一阶段**：在隔离环境停用 OpenClaw，仅用 ATF 与 DSH 跑通派单、回执、验收和恢复。以合成材料为默认输入，也可人工导入一份获准使用的公开产物；不要求 Grok 自动回传、A2A 或新的公网入口。具体门槛见 [PLAN.md](./PLAN.md)。
+- **独立试点已验收（U0–U2）**：在不依赖 OpenClaw 的隔离环境验证了独立启动与持久状态；实际 DSH 试点通过了换验收会话、迟到回执拒绝和丢回执对账。另用一条获准的 Cue 公开研究派生稿，验证人工批准、手工派发和原任务结案。证据见 [U1](https://github.com/vinson1101/agent-taskflow/pull/1) 和 [U2](https://github.com/vinson1101/agent-taskflow/pull/2)。
+- **仍未上线**：U1/U2 默认关闭。未自动接入 Cue 邮箱，未配置 Grok、未迁移 OpenClaw，未验证多用户或跨机器部署。U2 结论仅覆盖一条明确批准的研究稿，不覆盖原始交付全量。当前门槛及后续边界见 [PLAN.md](./PLAN.md)。
 
 ## 架构与边界
 
@@ -40,6 +40,7 @@ flowchart LR
 以下文档用于沉淀当前阶段的产品判断和未来方向：
 
 - [PLAN.md](./PLAN.md) - 当前项目目标、里程碑和完成标准的唯一主计划
+- [独立试点发布与回退](./docs/ATF_RELEASE_ROLLBACK.md) - 代码合并、分发与生产激活的独立门槛
 - [docs/README.md](./docs/README.md) - 指导文档索引
 - [docs/ATF_PRODUCT_GUIDE.md](./docs/ATF_PRODUCT_GUIDE.md) - v2 产品定义与边界参考
 - [docs/ATF_BUSINESS_STRATEGY.md](./docs/ATF_BUSINESS_STRATEGY.md) - 商业价值与演进路径

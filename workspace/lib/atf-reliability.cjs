@@ -124,6 +124,7 @@ function emitEvent(config, input) {
       context_refs: input.context_refs || [],
       guidance: input.guidance || null,
       required_writebacks: writebacks,
+      ...(input.manual_dispatch_only === true ? { manual_dispatch_only: true } : {}),
       dedupe_key: dedupeKey,
       status: 'pending',
       attempts: 0,
@@ -275,6 +276,7 @@ async function dispatchEvents(config, options = {}) {
   try {
     const selected = collection(p.events).filter(event => {
       if (options.eventId && event.event_id !== options.eventId) return false;
+      if (event.manual_dispatch_only === true && !options.eventId) return false;
       if (event.status === 'pending' || event.status === 'retry') return true;
       return Boolean(options.eventId) && event.runtime === 'dsh' && event.status === 'blocked_review_dispatch';
     });

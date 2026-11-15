@@ -70,6 +70,12 @@ function findMapping(a2aTaskId) {
 async function main() {
   if (process.env.ATF_STANDALONE_ROOT) dshReview.requireIsolation(config);
   const [command, sub, ...rest] = process.argv.slice(2);
+  if (command === 'dsh-review' && ['public-approve', 'public-import'].includes(sub)) {
+    if (rest.length !== 3) throw new Error('specify task ID, manifest filename and complete artifact filename in the private inbox');
+    const intake = require('../lib/atf-public-research.cjs');
+    output(await intake[sub === 'public-approve' ? 'approve' : 'importPublic'](core, config, dshReview, rest));
+    return;
+  }
   if (command === 'dsh-review' && sub === 'submit') {
     output(dshReview.makeReview(core, config, rest[0], inputJson(rest[1])));
     return;

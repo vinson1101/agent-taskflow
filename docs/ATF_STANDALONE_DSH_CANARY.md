@@ -4,6 +4,19 @@
 
 本分支不是生产配置。不安装或修改任何系统组件，不注册新账号，不开放公网端口，不停用户已有服务。只用合成材料和现有获准的 DSH 专用测试会话；限 loopback relay 0.6.3。用新的 0700 空目录独立运行，不复制任何实际项目资料或令牌。专用会话由操作者执行 `atf agent register <reviewer> runtime=dsh dsh-session=<dedicated-session-id>` 登记在隔离 registry，runner 会做这一步。验收提交只指定 reviewer，不能改选会话；派发、回执读取和验收重新核对登记与启用状态。变更会话须以新的 reviewer 单独登记；不往任务提交参数传真实凭据。若模型回执无法按 RPC 归因，停止验收，不放宽判定。只验证隔离链路；独立 verifier 不调用既有生产触发器、积分或声誉副作用。
 
+## 本机操作者启动与状态
+
+`npm start` 不带参数只显示入口帮助，不是后台进程。用已安装的 CLI，在已存在的父目录下选一个新目录：
+
+```sh
+atf standalone init "$HOME/atf-isolated-pilot" --prepare-cue-inbox
+atf standalone status "$HOME/atf-isolated-pilot"
+```
+
+`init` 创建独立的 0700 根目录及 `workspace`、`tasks`、`data`；可省略 `--prepare-cue-inbox`，该选项只创建空目录，不启用 Cue。命令不接管或覆盖已有根目录，不配置或启动任何 Agent、relay 或服务。请将结果中 `env` 的五个路径在**干净的专用终端**逐项设置（不要把 JSON 当成 shell 脚本执行），再使用正常 `atf` CLI；环境不会写入配置。只有确已核对专用 DSH 会话并获得授权后才登记 reviewer。Cue 另按[手工导入方式](./ATF_PUBLIC_RESEARCH_IMPORT.md)显式启用，相关批准与派发仍分开。
+
+`status` 只读验目录和最多 100 项、每项最多 8192 字节的本地事件状态计数。它不输出任务正文、回执内容或凭据，也不连接 relay；`snapshot_complete: false` 代表部分统计，不能当完整队列或实时运行状态。查看具体任务用 `atf ctx <task-id>`；已有待对账派发用 `atf dsh-review settle <原事件ID>`，核对后才用 `atf verify <task-id>`。资料不全时按下文恢复，不猜测重发。
+
 ## 核查
 
 - `npm test` 检查既有五组公开 smoke。

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const core = require('../lib/atf-reliability.cjs');
+const dshReview = require('../lib/atf-dsh-review.cjs');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const config = {
@@ -67,7 +68,20 @@ function findMapping(a2aTaskId) {
 }
 
 async function main() {
+  if (process.env.ATF_STANDALONE_ROOT) dshReview.requireIsolation(config);
   const [command, sub, ...rest] = process.argv.slice(2);
+  if (command === 'dsh-review' && sub === 'submit') {
+    output(dshReview.makeReview(core, config, rest[0], inputJson(rest[1])));
+    return;
+  }
+  if (command === 'dsh-review' && sub === 'handoff') {
+    output(dshReview.handoff(core, config, rest[0], rest[1], rest[2], rest.slice(3).join(' ') || undefined));
+    return;
+  }
+  if (command === 'dsh-review' && sub === 'settle') {
+    output(await dshReview.settle(core, config, rest[0]));
+    return;
+  }
   if (command === 'event' && sub === 'emit') {
     const [eventType, agent, taskId, ...optionParts] = rest;
     const parsed = options(optionParts);
@@ -80,6 +94,14 @@ async function main() {
   }
   if (command === 'event' && (sub === 'list' || !sub)) {
     output(core.collection(core.paths(config).events));
+    return;
+  }
+  if (command === 'obligation' && sub === 'show') {
+    const [id] = rest;
+    if (!/^OBL-[a-zA-Z0-9-]+$/.test(id || '')) throw new Error('invalid obligation ID');
+    const row = core.readJson(path.join(core.paths(config).obligations, id + '.json'));
+    if (!row) throw new Error('obligation not found');
+    output(row);
     return;
   }
   if (command === 'obligation' && (sub === 'list' || !sub)) {

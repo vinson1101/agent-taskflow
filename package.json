@@ -23,6 +23,9 @@
     "atf:phasec:smoke": "node workspace/bin/atf-phasec-smoke.cjs",
     "atf:phased:smoke": "node workspace/bin/atf-phased-smoke.cjs",
     "atf:reliability:smoke": "node workspace/bin/atf-reliability-smoke.cjs",
+    "atf:dsh:hardening:test": "node --test workspace/bin/atf-dsh-hardening-test.cjs",
+    "atf:dsh:handoff:smoke": "node workspace/bin/atf-dsh-handoff-smoke.cjs",
+    "atf:dsh:integrated:smoke": "node workspace/bin/atf-dsh-integrated-smoke.cjs",
     "test": "node workspace/bin/atf-phasec-smoke.cjs --cleanup --quiet && node workspace/bin/atf-watcher-smoke.cjs --cleanup --quiet && node workspace/bin/atf-control-plane-smoke.cjs --cleanup --quiet && node workspace/bin/atf-phased-smoke.cjs --cleanup --quiet && node workspace/bin/atf-reliability-smoke.cjs"
   },
   "keywords": [

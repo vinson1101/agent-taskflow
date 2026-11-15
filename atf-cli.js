@@ -10,7 +10,7 @@ const path = require('path');
 const os = require('os');
 const { randomBytes } = require('crypto');
 const { execSync, spawnSync } = require('child_process');
-const { atomicWriteJson } = require('./workspace/lib/atf-storage.cjs');
+const { acquireFileLock, atomicWriteJson } = require('./workspace/lib/atf-storage.cjs');
 const reliability = require('./workspace/lib/atf-reliability.cjs');
 
 // ============================================================
@@ -96,7 +96,11 @@ const REVIEW_SCORE_FIELDS = ['overall', 'quality', 'timeliness', 'communication'
 const TASK_PROFILE_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
 const HANDOFF_CONTEXT_LIMIT = 5;
 const HANDOFF_REFLECTION_LIMIT = 2;
-const AGENT_RUNTIMES = new Set(['openclaw', 'hermes', 'stub']);
+const AGENT_RUNTIMES = new Set(['openclaw', 'hermes', 'stub', 'dsh']);
+
+// A partial standalone environment must not touch any inherited OpenClaw defaults.
+if (process.env.ATF_STANDALONE_ROOT)
+  require('./workspace/lib/atf-dsh-review.cjs').requireIsolation({ dataDir: DATA_DIR, tasksDir: TASKS_DIR });
 
 if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR))  fs.mkdirSync(DATA_DIR,   { recursive: true });
@@ -186,12 +190,38 @@ function dirOfTaskId(taskId) {
   return taskId; // fallback
 }
 
+let standaloneWriterActive = false;
+function withStandaloneWriter(operation) {
+  if (!process.env.ATF_STANDALONE_ROOT || standaloneWriterActive) return operation();
+  require('./workspace/lib/atf-dsh-review.cjs').requireIsolation({ dataDir: DATA_DIR, tasksDir: TASKS_DIR });
+  const release = acquireFileLock(path.join(DATA_DIR, 'runtime-dispatch.lock'));
+  standaloneWriterActive = true;
+  try { return operation(); } finally { standaloneWriterActive = false; release(); }
+}
+
 function writeCtx(taskId, ctx) {
   const dir = dirOfTaskId(taskId);
   const normalized = normalizeTaskCtx(ctx);
-  normalized.updated_at = new Date().toISOString();
-  saveJson(ctxPath(dir), normalized);
-  saveJson(latestPath(dir), normalized);
+  const persist = () => {
+    const previous = process.env.ATF_STANDALONE_ROOT || normalized.dsh_review ? loadJson(ctxPath(dir)) : null;
+    if (previous?.dsh_review) {
+      if (JSON.stringify(previous.dsh_review) !== JSON.stringify(normalized.dsh_review) ||
+          previous.updated_at !== normalized.updated_at)
+        throw new Error('gated ATF task changed; reload before updating');
+      if (previous.dsh_review.status === 'accepted' && ['completed', 'delivered'].includes(previous.status) &&
+          !isResolvedTaskStatus(normalized.status))
+        throw new Error('completed gated ATF task cannot reopen through a generic status update');
+      if (['completed', 'delivered'].includes(normalized.status) &&
+          !require('./workspace/lib/atf-dsh-review.cjs').hasVerifiedAcceptance(reliability, { dataDir: DATA_DIR }, normalized))
+        throw new Error('gated ATF task requires valid DSH verification before completion or delivery');
+    }
+    normalized.updated_at = new Date().toISOString();
+    saveJson(ctxPath(dir), normalized);
+    saveJson(latestPath(dir), normalized);
+  };
+  if (normalized.dsh_review && !process.env.ATF_STANDALONE_ROOT)
+    throw new Error('gated ATF writes require the standalone profile');
+  withStandaloneWriter(persist);
 }
 
 function isResolvedTaskStatus(status) {
@@ -925,6 +955,7 @@ function normalizeAgentRegistryItem(agent, value = null, fallbackSource = 'regis
     agent: normalized,
     workspace: item.workspace || inferAgentWorkspace(normalized),
     runtime: AGENT_RUNTIMES.has(item.runtime) ? item.runtime : 'openclaw',
+    ...(item.runtime === 'dsh' && typeof item.dsh_session_id === 'string' ? { dsh_session_id: item.dsh_session_id } : {}),
     source: item.source || fallbackSource,
     enabled: item.enabled !== false,
   };
@@ -1005,10 +1036,26 @@ function upsertAgentRegistryEntry(agent, options = {}) {
   if (!normalized) throw new Error('非法 agent 名');
   const registry = loadAgentRegistry({ persistIfMissing: true });
   const existing = registry.agents.find(entry => entry.agent === normalized) || null;
+  const runtime = options.runtime || existing?.runtime || 'openclaw';
+  const session = options.dshSessionId ?? existing?.dsh_session_id;
+  if (existing?.runtime === 'dsh' && existing.dsh_session_id && runtime !== 'dsh')
+    throw new Error('cannot replace an enrolled DSH reviewer with another runtime; disable it instead');
+  if (runtime === 'dsh') {
+    require('./workspace/lib/atf-dsh-review.cjs').requireIsolation({ dataDir: DATA_DIR, tasksDir: TASKS_DIR });
+    if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,159}$/.test(session))
+      throw new Error('DSH reviewer enrollment requires an explicit valid dsh-session binding');
+    if (existing?.dsh_session_id && session !== existing.dsh_session_id)
+      throw new Error('cannot rebind a DSH reviewer; enroll a new dedicated reviewer instead');
+    if (registry.agents.some(row => row.agent !== normalized && row.runtime === 'dsh' && row.dsh_session_id === session))
+      throw new Error('DSH dedicated session already enrolled for another reviewer');
+  } else if (options.dshSessionId !== undefined) {
+    throw new Error('dsh-session is only supported for a standalone DSH reviewer');
+  }
   const nextEntry = {
     agent: normalized,
     workspace: options.workspace || existing?.workspace || inferAgentWorkspace(normalized),
-    runtime: options.runtime || existing?.runtime || 'openclaw',
+    runtime,
+    ...(runtime === 'dsh' ? { dsh_session_id: session } : {}),
     source: options.source || existing?.source || 'manual',
     enabled: options.enabled === undefined ? (existing ? existing.enabled !== false : true) : options.enabled !== false,
   };
@@ -7575,6 +7622,8 @@ atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch qu
   atf learnings scan                    扫描可 promote 条目
   atf learnings promote                 执行 promote → MEMORY
   atf event|obligation|envelope|verify|reconcile  事件、义务、Work Envelope 与 verifier
+  atf dsh-review submit <taskId> <JSON|file> | settle <eventId>  隔离 DSH 评审
+  atf dsh-review handoff <taskId> <expectedEventId> <successorReviewer> [reason]  保留义务并显式换验收人
   atf a2a|context|metrics               A2A、session context 与运行指标
   atf block <taskId> <question>         阻塞任务，等待 Vinson 决策
   atf decide <taskId> <answer>          Vinson 回答，继续执行
@@ -7586,6 +7635,7 @@ atf launch status [agent] [warn_after_minutes=N] [json]         查看 launch qu
 switch (cmd) {
   case 'event':
   case 'obligation':
+  case 'dsh-review':
   case 'envelope':
   case 'verify':
   case 'reconcile':
@@ -7623,8 +7673,8 @@ switch (cmd) {
     const description = parsed.descriptionTokens.join(' ');
     if (!description) { console.error('用法: atf create <描述> [type=x] [difficulty=1-5] [priority=x] [tags=a,b] [--timeout=1h] [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
     const protocolTimeouts = expandUnifiedProtocolTimeouts(timeoutParsed.protocol);
-    const num = getNextTaskNum();
-    const { taskId, dirName, ctx } = initCtx(num, description, { task_profile: parsed.profile, ...protocolTimeouts });
+    const { taskId, dirName, ctx } = withStandaloneWriter(() =>
+      initCtx(getNextTaskNum(), description, { task_profile: parsed.profile, ...protocolTimeouts }));
     console.log(`\n✅ 任务已创建: ${dirName}`);
     console.log(`   task_id: ${ctx.task_id}  |  status: ${ctx.status}`);
     console.log(`   confirm_timeout: ${ctx.protocol.confirm_timeout}s  |  final_timeout: ${ctx.protocol.final_timeout}s`);
@@ -7749,6 +7799,8 @@ switch (cmd) {
     const timeoutParsed = parseProtocolTimeoutArgs(rest);
     if (timeoutParsed.errors.length) { console.error(`❌ ${timeoutParsed.errors.join('；')}`); break; }
     if (!taskId || !agent) { console.error('用法: atf assign <taskId> <agent> [--timeout=1h] [--confirm-timeout=40m] [--final-timeout=2h]'); break; }
+    if (process.env.ATF_STANDALONE_ROOT && loadAgentRegistry().agents.some(row => row.agent === normalizeAgentName(agent) && row.runtime === 'dsh'))
+      throw new Error('DSH reviewer requires dsh-review submit, not generic assign');
     const ctx = readCtx(taskId);
     if (!ctx) { console.error(`❌ 任务不存在: ${taskId}`); break; }
     const now = new Date().toISOString();
@@ -11048,7 +11100,7 @@ switch (cmd) {
     if (sub === 'register') {
       const [agentRaw, ...optionParts] = restArgs;
       if (!agentRaw) {
-        console.error('用法: atf agent register <agent> [workspace=/path] [runtime=openclaw|hermes] [source=x] [enabled=true|false]');
+        console.error('用法: atf agent register <agent> [workspace=/path] [runtime=openclaw|hermes|dsh] [dsh-session=<dedicated-session-id>] [source=x] [enabled=true|false]');
         break;
       }
       const agentName = normalizeAgentName(agentRaw);
@@ -11059,6 +11111,7 @@ switch (cmd) {
       let workspace = null;
       let source = null;
       let runtime = null;
+      let dshSessionId;
       let enabled;
       let invalidArgs = false;
       for (const part of optionParts.filter(Boolean)) {
@@ -11075,6 +11128,12 @@ switch (cmd) {
           if (!AGENT_RUNTIMES.has(runtime)) invalidArgs = true;
           continue;
         }
+        if (part.startsWith('dsh-session=')) {
+          if (dshSessionId !== undefined) invalidArgs = true;
+          dshSessionId = part.substring('dsh-session='.length);
+          if (!dshSessionId) invalidArgs = true;
+          continue;
+        }
         if (part.startsWith('enabled=')) {
           const value = part.substring('enabled='.length).toLowerCase();
           if (['true', '1', 'yes'].includes(value)) enabled = true;
@@ -11086,10 +11145,13 @@ switch (cmd) {
         break;
       }
       if (invalidArgs) {
-        console.error('用法: atf agent register <agent> [workspace=/path] [runtime=openclaw|hermes] [source=x] [enabled=true|false]');
+        console.error('用法: atf agent register <agent> [workspace=/path] [runtime=openclaw|hermes|dsh] [dsh-session=<dedicated-session-id>] [source=x] [enabled=true|false]');
         break;
       }
-      const result = upsertAgentRegistryEntry(agentName, { workspace, runtime, source, enabled });
+      if (runtime === 'dsh' || dshSessionId !== undefined)
+        require('./workspace/lib/atf-dsh-review.cjs').requireIsolation({ dataDir: DATA_DIR, tasksDir: TASKS_DIR });
+      const result = withStandaloneWriter(() =>
+        upsertAgentRegistryEntry(agentName, { workspace, runtime, source, enabled, dshSessionId }));
       console.log('\nAgent Register\n');
       console.log(`agent=${result.entry.agent}  created=${result.created}  updated=${result.updated}  enabled=${result.entry.enabled !== false}  source=${result.entry.source || '-'}`);
       console.log(`workspace=${result.entry.workspace || '-'}`);

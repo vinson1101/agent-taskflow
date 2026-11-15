@@ -4,6 +4,8 @@ const { createHash, randomBytes } = require('crypto');
 const { spawnSync } = require('child_process');
 const { acquireFileLock, atomicWriteJson, ensureDir } = require('./atf-storage.cjs');
 
+const dshReview = require('./atf-dsh-review.cjs');
+
 const TERMINAL_EVENTS = new Set(['dispatched', 'resolved', 'dlq']);
 const TERMINAL_TASKS = new Set(['completed', 'delivered', 'cancelled', 'archived']);
 
@@ -92,8 +94,10 @@ function emitEvent(config, input) {
   const release = acquireFileLock(path.join(p.dedupe, `${dedupeKey}.lock`));
   try {
     const priorRef = readJson(path.join(p.dedupe, `${dedupeKey}.json`));
-    const prior = priorRef?.event_id ? readJson(path.join(p.events, `${priorRef.event_id}.json`)) : null;
+    const prior = priorRef?.event_id ? readJson(path.join(p.events, `${priorRef.event_id}.json`)) :
+      (input.event_type === 'dsh_artifact_review' && input.event_id ? readJson(path.join(p.events, `${input.event_id}.json`)) : null);
     if (prior) {
+      if (input.event_type === 'dsh_artifact_review' && !priorRef) writeRecord(p.dedupe, dedupeKey, { event_id: prior.event_id, created_at: prior.created_at });
       prior.duplicate_count = Number(prior.duplicate_count || 0) + 1;
       prior.last_duplicate_at = nowIso();
       writeRecord(p.events, prior.event_id, prior);
@@ -101,7 +105,8 @@ function emitEvent(config, input) {
     }
 
     const writebacks = obligationDefaults(input.event_type, input);
-    const obligations = writebacks.map(writeback => createObligation(config, {
+    const obligations = writebacks.map(writeback => (input.event_type === 'dsh_artifact_review' && writeback.obligation_id ?
+      readJson(path.join(p.obligations, `${writeback.obligation_id}.json`)) : null) || createObligation(config, {
       ...writeback,
       task_id: input.task_id,
       agent: input.agent,
@@ -268,16 +273,54 @@ async function dispatchEvents(config, options = {}) {
     throw error;
   }
   try {
-    const selected = collection(p.events).filter(event => (event.status === 'pending' || event.status === 'retry')
-      && (!options.eventId || event.event_id === options.eventId));
+    const selected = collection(p.events).filter(event => {
+      if (options.eventId && event.event_id !== options.eventId) return false;
+      if (event.status === 'pending' || event.status === 'retry') return true;
+      return Boolean(options.eventId) && event.runtime === 'dsh' && event.status === 'blocked_review_dispatch';
+    });
     const groups = new Map();
     for (const event of selected) {
-      const key = `${event.runtime}:${event.agent}`;
+      const key = event.runtime === 'dsh' ? event.event_id : `${event.runtime}:${event.agent}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(event);
     }
     const results = [];
     for (const events of groups.values()) {
+      // One ATF event / revision per DSH invocation. Never fall through to an OpenClaw adapter.
+      if (events[0].runtime === 'dsh') {
+        const event = events[0];
+        if (event.event_type !== 'dsh_artifact_review' || !event.required_writebacks?.[0]?.ref ||
+            !/^EVT-DSH-[a-f0-9]{64}$/.test(event.event_id)) {
+          event.status = 'dlq';
+          event.error = { message: 'DSH requires a staged review event', at: nowIso() };
+          writeRecord(p.events, event.event_id, event);
+          results.push({ event_ids: [event.event_id], accepted: false, dsh_state: 'unsupported_event' });
+          continue;
+        }
+        if (event.status === 'blocked_review_dispatch' && dshReview.hasDurableIntent(module.exports, config, event.event_id)) {
+          // Manual remediation is for pre-send failures only. If storage
+          // already contains an intent, use the ordinary settle/reconcile path.
+          results.push({ event_ids: [event.event_id], accepted: false, dsh_state: 'intent_exists_reconcile' });
+          continue;
+        }
+        let outcome;
+        try {
+          outcome = await dshReview.dispatch(module.exports, config, event, options.dshRelay);
+        } catch {
+          // Isolate invalid configuration/review state to this event. Never fall through to another runtime.
+          outcome = { accepted: false, dsh_state: 'blocked_review_dispatch' };
+        }
+        if (outcome.dsh_state !== 'waiting_for_session') {
+          event.attempts = 1;
+          event.status = outcome.accepted ? 'dispatched' : outcome.dsh_state === 'stale' ? 'resolved' :
+            outcome.dsh_state === 'blocked_review_dispatch' ? 'blocked_review_dispatch' : 'awaiting_reconcile';
+          event.dispatched_at = outcome.dispatched_at;
+          event.runtime_session_ref = outcome.runtime_session_ref;
+          writeRecord(p.events, event.event_id, event);
+        }
+        results.push({ event_ids: [event.event_id], ...outcome });
+        continue;
+      }
       const envelope = buildWorkEnvelope(config, events, options);
       try {
         const result = await dispatchAdapter(config, envelope);
@@ -332,6 +375,27 @@ function verifyObligations(config, options = {}) {
   const checkedAt = nowIso();
   const checked = [];
   for (const obligation of pendingObligations(config, options.taskId, options.agent)) {
+    if (obligation.kind === 'dsh_artifact_review') {
+      const release = acquireFileLock(path.join(config.dataDir, 'runtime-dispatch.lock'));
+      try {
+        const refreshed = readJson(path.join(p.obligations, obligation.obligation_id + '.json'));
+        if (refreshed?.status !== 'pending') continue;
+        const evidence = dshReview.verify(module.exports, config, refreshed);
+        if (evidence) {
+          refreshed.status = evidence.status;
+          if (evidence.status === 'resolved') refreshed.resolved_at = checkedAt;
+          if (evidence.status === 'escalation_required') refreshed.recovery_state = 'attention';
+          refreshed.last_verifier = { ok: evidence.status === 'resolved', checked_at: checkedAt, evidence };
+        } else {
+          // No automated second POST. Due reviews stay open for reconciliation/operator attention.
+          refreshed.recovery_state = new Date(refreshed.due_at) <= new Date(checkedAt) ? 'attention' : null;
+          refreshed.last_verifier = { ok: false, checked_at: checkedAt, reason: 'pending_transport_or_review' };
+        }
+        writeRecord(p.obligations, refreshed.obligation_id, refreshed);
+        checked.push(refreshed);
+      } finally { release(); }
+      continue;
+    }
     const evidence = verifierEvidence(config, obligation);
     if (evidence) {
       obligation.status = 'resolved';
@@ -435,6 +499,6 @@ function toA2ATask(config, taskId, mapping = null) {
 
 module.exports = {
   TERMINAL_TASKS, a2aState, buildWorkEnvelope, collection, contextSearch, createObligation,
-  dispatchEvents, emitEvent, metrics, paths, pendingObligations, readJson, taskContext, toA2ATask,
+  dispatchEvents, emitEvent, metrics, paths, pendingObligations, readJson, taskContext, taskDir, toA2ATask,
   verifyObligations, writeRecord,
 };

@@ -23,3 +23,4 @@ jobs:
       - run: npm run atf:dsh:integrated:smoke
       - run: npm run atf:dsh:handoff:smoke
       - run: npm run atf:dsh:public-research:test
+      - run: npm run atf:release:packlist

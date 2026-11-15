@@ -68,6 +68,7 @@ function canonicalManifest(raw) {
   const provider = raw.source_kind;
   const source = id(raw.source_id, 'public source ID');
   const canonical = provider === 'synthetic' ? 'https://example.invalid/research/' + source :
+    provider === 'cue-public' ? 'cue-public:research/' + source :
     provider === 'grok-public' ? 'https://grok.com/share/' + source : null;
   if (!canonical || raw.source_url !== canonical) throw new Error('source URL is not canonical for the source ID');
   if (!Number.isSafeInteger(raw.source_revision) || raw.source_revision < 1)
@@ -146,7 +147,7 @@ async function approve(core, config, dsh, [taskId, manifest, artifact], io = { i
   const p = preview.selection;
   io.output.write('Public research review approval (local only)\n' +
     `Task ${p.task_id}; reviewer ${p.reviewer}; source ${p.source_kind} ${p.source_id} v${p.source_revision}\n` +
-    `URL ${p.source_url}\nArtifact ${artifact}; SHA-256 ${p.artifact_sha256}; bytes ${p.artifact_bytes}\n` +
+    `Provenance reference ${p.source_url}\nArtifact ${artifact}; SHA-256 ${p.artifact_sha256}; bytes ${p.artifact_bytes}\n` +
     `Dedicated reviewer session fingerprint: ${p.reviewer_session_sha256}\n` +
     `Review criterion (operator must check): ${p.criterion}\n` +
     'Confirm only after independently checking this exact file is complete and either synthetic or approved for local copying and submission to the designated reviewer. A public link alone does not grant copying permission.\n');

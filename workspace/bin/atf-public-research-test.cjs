@@ -262,3 +262,47 @@ test('later approval can import a new source version only while this original ta
   assert.match(f.invokeImport().stderr, /task cannot be reviewed/);
   assert.equal(f.current().status, 'completed');
 });
+
+test('Cue uses exact local provenance and sends only approved research without mailbox metadata', async t => {
+  const f = fixture(t);
+  const id = 'cue-fixture-local-report';
+  const localRef = 'cue-public:research/' + id;
+  const artifact = '# Complete synthetic Cue fixture\n\nScope: schema testing only.\n\nFinding: the test symbol is ZZZB.\n';
+  const cue = { ...f.manifest, source_kind: 'cue-public', source_id: id,
+    source_url: localRef, artifact_sha256: hash(artifact) };
+  const mailLink = 'https://mail.google.com/mail/u/0/#all/fixture-private-id';
+  for (const ref of [mailLink, localRef + '?mail=fixture-private-id', 'cue-public:research/other-id']) {
+    f.write({ ...cue, source_url: ref }, artifact);
+    await assert.rejects(operatorFixture(f), /source URL is not canonical/);
+  }
+  f.write({ ...cue, mail_thread_id: 'fixture-private-id' }, artifact);
+  await assert.rejects(operatorFixture(f), /only source\/provenance fields/);
+  f.write(cue, artifact);
+  const approval = await operatorFixture(f);
+  f.write({ ...cue, source_revision: 2 }, artifact);
+  assert.match(f.invokeImport().stderr, /exact separate trusted operator approval/);
+  f.write(cue, artifact);
+  const imported = f.imported();
+  const source = f.current().dsh_public_research[0];
+  assert.equal(source.source_id, id);
+  assert.equal(source.source_url, localRef);
+  assert.equal(source.source_kind, 'cue-public');
+  assert.equal(source.source_revision, 1);
+  assert.equal(source.artifact_sha256, hash(artifact));
+  assert.equal(source.approval_id, approval.approval_id);
+  assert.equal(f.imported().event_id, imported.event_id);
+  const receiver = mockReviewer();
+  const relay = async (endpoint, query, payload) => {
+    if (endpoint === '/send') {
+      const serialized = JSON.stringify(payload);
+      for (const value of [localRef, id, mailLink, 'fixture-private-id', 'cue-public'])
+        assert.equal(serialized.includes(value), false);
+      assert.match(payload.text, /Finding: the test symbol is ZZZB/);
+    }
+    return receiver.relay(endpoint, query, payload);
+  };
+  assert.equal((await core.dispatchEvents(f.config, { eventId: imported.event_id, dshRelay: relay }))[0].accepted, true);
+  assert.equal((await dsh.settle(core, f.config, imported.event_id, relay)).decision, 'pass');
+  assert.equal(core.verifyObligations(f.config, { taskId: f.task }).resolved, 1);
+  assert.equal(f.current().status, 'completed');
+});

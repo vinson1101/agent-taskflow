@@ -385,6 +385,10 @@ function printTextSummary(summary) {
 }
 
 function main() {
+  // This legacy runner invokes host-specific children. Standalone uses the
+  // explicit atf reconcile path; refuse before opening the legacy lock.
+  if (process.env.ATF_STANDALONE_ROOT)
+    throw new Error('legacy control-plane is disabled in standalone mode; use atf reconcile');
   const releaseLock = acquireFileLock(controlPlaneLockPath());
   try {
   let options;

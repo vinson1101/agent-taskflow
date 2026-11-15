@@ -18,6 +18,7 @@ async function dispatch() {
 }
 
 async function main() {
+  if (process.env.ATF_STANDALONE_ROOT) require('../lib/atf-dsh-review.cjs').requireIsolation(config);
   const once = process.argv.includes('--once');
   if (once) {
     await dispatch();

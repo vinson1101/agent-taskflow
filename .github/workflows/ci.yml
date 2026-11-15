@@ -18,3 +18,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run atf:dsh:hardening:test
+      - run: npm run atf:dsh:integrated:smoke
